@@ -1,0 +1,92 @@
+{
+  "name": "gem-radar",
+  "version": "0.1.0",
+  "description": "Ethereum/Base Gem Radar — Research & Paper Trading System",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:prod": "node dist/main",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:cov": "jest --coverage",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "lint": "eslint \"{src}/**/*.ts\" --fix",
+    "smoke:risk": "ts-node scripts/smoke-risk.ts",
+    "report:now": "ts-node scripts/report-now.ts",
+    "eval": "ts-node scripts/eval.ts",
+    "postmortem": "ts-node scripts/postmortem.ts",
+    "edge": "ts-node scripts/edge.ts",
+    "probe:onchain": "ts-node scripts/probe-onchain.ts",
+    "probe:v3": "ts-node scripts/probe-v3.ts",
+    "verify:pools": "ts-node scripts/verify-pools.ts",
+    "probe:age": "ts-node scripts/probe-age.ts",
+    "reset": "ts-node scripts/reset.ts",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down"
+  },
+  "dependencies": {
+    "@nestjs/bullmq": "^10.2.3",
+    "@nestjs/common": "^10.4.4",
+    "@nestjs/config": "^3.2.3",
+    "@nestjs/core": "^10.4.4",
+    "@nestjs/platform-express": "^10.4.4",
+    "@nestjs/schedule": "^4.1.1",
+    "@prisma/client": "^5.19.1",
+    "axios": "^1.7.7",
+    "axios-retry": "^4.5.0",
+    "bullmq": "^5.19.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "ioredis": "^5.4.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "viem": "^2.21.11"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^10.4.5",
+    "@nestjs/schematics": "^10.1.4",
+    "@nestjs/testing": "^10.4.4",
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^20.16.11",
+    "jest": "^29.7.0",
+    "prisma": "^5.19.1",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.6.3"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.(t|j)s$": [
+        "ts-jest",
+        {
+          "diagnostics": {
+            "ignoreCodes": [
+              151002
+            ]
+          }
+        }
+      ]
+    },
+    "collectCoverageFrom": [
+      "**/*.(t|j)s",
+      "!**/*.spec.ts"
+    ],
+    "coverageDirectory": "../coverage",
+    "testEnvironment": "node"
+  }
+}

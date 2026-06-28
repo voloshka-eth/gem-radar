@@ -1,0 +1,339 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Tokens ────────────────────────────────────────────────────────────────────
+model Token {
+  id              String   @id @default(cuid())
+  chain           String
+  tokenAddress    String   @map("token_address")
+  symbol          String?
+  name            String?
+  decimals        Int?
+  firstSeenAt     DateTime @map("first_seen_at")
+  deployerAddress String?  @map("deployer_address")
+  source          String   // dexscreener | geckoterminal | onchain
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  pools               Pool[]
+  poolSnapshots       PoolSnapshot[]
+  contractRiskChecks  ContractRiskCheck[] @relation("TokenRiskChecks")
+  holderSnapshots     HolderSnapshot[]
+  scoringHistory  ScoringHistory[]
+  paperPositions  PaperPosition[]
+
+  @@unique([chain, tokenAddress])
+  @@index([chain])
+  @@map("tokens")
+}
+
+// ─── Pools ─────────────────────────────────────────────────────────────────────
+model Pool {
+  id           String   @id @default(cuid())
+  chain        String
+  poolAddress  String   @map("pool_address")
+  dex          String
+  tokenId      String   @map("token_id")
+  token0       String   @map("token0")
+  token1       String   @map("token1")
+  quoteAsset   String   @map("quote_asset") // WETH | USDC | USDT | DAI
+  feeTier      String?  @map("fee_tier")
+  firstSeenAt  DateTime @map("first_seen_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  token          Token          @relation(fields: [tokenId], references: [id])
+  poolSnapshots  PoolSnapshot[]
+  paperPositions PaperPosition[]
+
+  @@unique([chain, poolAddress])
+  @@index([chain])
+  @@map("pools")
+}
+
+// ─── Pool Snapshots (append-only, never updated) ───────────────────────────────
+model PoolSnapshot {
+  id                   String   @id @default(cuid())
+  chain                String
+  poolId               String   @map("pool_id")
+  tokenId              String   @map("token_id")
+  ts                   DateTime
+  priceUsd             Decimal? @map("price_usd") @db.Decimal(30, 18)
+  reserveToken         Decimal? @map("reserve_token") @db.Decimal(40, 0)
+  reserveQuote         Decimal? @map("reserve_quote") @db.Decimal(40, 0)
+  onchainLiquidityUsd  Decimal? @map("onchain_liquidity_usd") @db.Decimal(20, 4)
+  reportedLiquidityUsd Decimal? @map("reported_liquidity_usd") @db.Decimal(20, 4)
+  fdvUsd               Decimal? @map("fdv_usd") @db.Decimal(20, 4)
+  vol5m                Decimal? @map("vol_5m") @db.Decimal(20, 4)
+  vol1h                Decimal? @map("vol_1h") @db.Decimal(20, 4)
+  vol6h                Decimal? @map("vol_6h") @db.Decimal(20, 4)
+  vol24h               Decimal? @map("vol_24h") @db.Decimal(20, 4)
+  txCount              Int?     @map("tx_count")
+  buys                 Int?
+  sells                Int?
+  uniqueBuyers         Int?     @map("unique_buyers")
+  uniqueSellers        Int?     @map("unique_sellers")
+  holdersCount         Int?     @map("holders_count")
+  executableDepthUsd   Decimal? @map("executable_depth_usd") @db.Decimal(20, 4)
+  slip50               Decimal? @map("slip_50") @db.Decimal(10, 6)
+  slip100              Decimal? @map("slip_100") @db.Decimal(10, 6)
+  slip500              Decimal? @map("slip_500") @db.Decimal(10, 6)
+  slip1000             Decimal? @map("slip_1000") @db.Decimal(10, 6)
+  // M3A on-chain liquidity fields
+  liquidityModel       String?  @map("liquidity_model")   // V2 | V3 | UNSUPPORTED_*
+  liquidityVerified    Boolean? @map("liquidity_verified")
+  reportedVsOnchainPct Decimal? @map("reported_vs_onchain_pct") @db.Decimal(10, 4)
+  spotPriceUsd         Decimal? @map("spot_price_usd") @db.Decimal(30, 18)
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  pool  Pool  @relation(fields: [poolId], references: [id])
+  token Token @relation(fields: [tokenId], references: [id])
+
+  @@index([chain, poolId, ts])
+  @@index([ts])
+  @@map("pool_snapshots")
+}
+
+// ─── Deployers ─────────────────────────────────────────────────────────────────
+model Deployer {
+  id               String   @id @default(cuid())
+  chain            String
+  address          String
+  funderAddress    String?  @map("funder_address")
+  deploymentsCount Int      @default(0) @map("deployments_count")
+  rugLikeCount     Int      @default(0) @map("rug_like_count")
+  riskScore        Decimal? @map("risk_score") @db.Decimal(5, 2)
+  summary          String?
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@unique([chain, address])
+  @@map("deployers")
+}
+
+// ─── Contract Risk Checks (M2A) ────────────────────────────────────────────────
+// Written for ALL decisions: CONTRACT_SAFE, CONTRACT_REJECT, CONTRACT_UNKNOWN.
+// tokenId is null for REJECT/UNKNOWN (no DB token row exists yet).
+model ContractRiskCheck {
+  id               String   @id @default(cuid())
+  runId            String?  @map("run_id")
+  chain            String
+  tokenAddress     String   @map("token_address")
+  tokenId          String?  @map("token_id")
+  ts               DateTime
+  source           String   @default("goplus")
+  goplusQueried    Boolean  @default(false) @map("goplus_queried")
+  honeypotQueried  Boolean  @default(false) @map("honeypot_queried")
+  verified         Boolean?
+  honeypot         Boolean?
+  buyTax           Decimal? @map("buy_tax") @db.Decimal(10, 4)
+  sellTax          Decimal? @map("sell_tax") @db.Decimal(10, 4)
+  canMint          Boolean? @map("can_mint")
+  canBlacklist     Boolean? @map("can_blacklist")
+  canPause         Boolean? @map("can_pause")
+  isProxy          Boolean? @map("is_proxy")
+  ownerRenounced   Boolean? @map("owner_renounced")
+  lpLockedOrBurned Boolean? @map("lp_locked_or_burned")
+  decision         String   @default("CONTRACT_UNKNOWN")
+  rejectReasons    Json?    @map("reject_reasons")
+  hardReject       Boolean  @default(false) @map("hard_reject")
+  rejectReason     String?  @map("reject_reason")
+  rawGoplusJson    Json?    @map("raw_goplus_json")
+  rawHoneypotJson  Json?    @map("raw_honeypot_json")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  token Token? @relation("TokenRiskChecks", fields: [tokenId], references: [id])
+
+  @@index([chain, tokenAddress, ts])
+  @@index([runId])
+  @@map("contract_risk_checks")
+}
+
+// ─── Quarantine Tokens (M2A) ────────────────────────────────────────────────────
+// Tokens where both GoPlus and Honeypot.is were unavailable (CONTRACT_UNKNOWN).
+// Not persisted as passed candidates. Retry queue re-checks them.
+model QuarantineToken {
+  id               String    @id @default(cuid())
+  runId            String    @map("run_id")
+  chain            String
+  tokenAddress     String    @map("token_address")
+  tokenSymbol      String?   @map("token_symbol")
+  tokenName        String?   @map("token_name")
+  poolAddress      String    @map("pool_address")
+  dex              String
+  status           String    @default("PENDING") // PENDING | RESOLVED | ABANDONED
+  retryCount       Int       @default(0) @map("retry_count")
+  nextRetryAt      DateTime? @map("next_retry_at")
+  resolvedAt       DateTime? @map("resolved_at")
+  resolvedDecision String?   @map("resolved_decision") // CONTRACT_SAFE | CONTRACT_REJECT | null
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([chain, tokenAddress])
+  @@index([status, nextRetryAt])
+  @@map("quarantine_tokens")
+}
+
+// ─── Holder Snapshots ──────────────────────────────────────────────────────────
+model HolderSnapshot {
+  id            String   @id @default(cuid())
+  chain         String
+  tokenId       String   @map("token_id")
+  ts            DateTime
+  top1Pct       Decimal? @map("top1_pct") @db.Decimal(8, 4)
+  top5Pct       Decimal? @map("top5_pct") @db.Decimal(8, 4)
+  top10Pct      Decimal? @map("top10_pct") @db.Decimal(8, 4)
+  top20Pct      Decimal? @map("top20_pct") @db.Decimal(8, 4)
+  nonlpTop1Pct  Decimal? @map("nonlp_top1_pct") @db.Decimal(8, 4)
+  nonlpTop10Pct Decimal? @map("nonlp_top10_pct") @db.Decimal(8, 4)
+  clusterMaxPct Decimal? @map("cluster_max_pct") @db.Decimal(8, 4)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  token Token @relation(fields: [tokenId], references: [id])
+
+  @@index([chain, tokenId, ts])
+  @@map("holder_snapshots")
+}
+
+// ─── Scoring History ───────────────────────────────────────────────────────────
+// M4 scoring. Only CONTRACT_SAFE + liquidity_verified=true survivors are scored.
+// Component scores are nullable: a component is NULL when its data was absent
+// (omitted + weights renormalized) — never a fabricated neutral value.
+model ScoringHistory {
+  id                String   @id @default(cuid())
+  runId             String?  @map("run_id")
+  chain             String
+  tokenId           String   @map("token_id")
+  tokenAddress      String   @map("token_address")
+  poolAddress       String?  @map("pool_address")
+  ts                DateTime
+  liquidityModel    String   @map("liquidity_model") // V2 | V3
+  liquidityScore    Decimal? @map("liquidity_score")    @db.Decimal(5, 2)
+  depthScore        Decimal? @map("depth_score")        @db.Decimal(5, 2)
+  ageScore          Decimal? @map("age_score")          @db.Decimal(5, 2)
+  tractionScore     Decimal? @map("traction_score")     @db.Decimal(5, 2)
+  divergenceScore   Decimal? @map("divergence_score")   @db.Decimal(5, 2)
+  finalScore        Decimal  @map("final_score")        @db.Decimal(5, 2)
+  band              String   // reject_band | watchlist | candidate | high_band (UNVALIDATED)
+  scoreConfidence   Decimal  @map("score_confidence")   @db.Decimal(4, 3)
+  componentsPresent String   @map("components_present")  // comma-joined component keys
+  componentsMissing String   @map("components_missing")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  token Token @relation(fields: [tokenId], references: [id])
+
+  @@index([chain, tokenId, ts])
+  @@index([finalScore])
+  @@index([band])
+  @@map("scoring_history")
+}
+
+// ─── Paper Positions (M5 — PAPER ONLY, no real trades) ──────────────────────────
+// One row per candidate (CONTRACT_SAFE + liquidity_verified=true). Entry is modeled
+// once at discovery with pessimistic fills; eval re-reads on-chain state on demand.
+model PaperPosition {
+  id                 String    @id @default(cuid())
+  runId              String?   @map("run_id")
+  chain              String
+  tokenId            String    @map("token_id")
+  poolId             String    @map("pool_id")
+  tokenAddress       String    @map("token_address")
+  poolAddress        String    @map("pool_address")
+  symbol             String?
+  liquidityModel     String    @map("liquidity_model")
+  // Entry timing (no look-ahead: entry uses a snapshot with ts ≤ openedAt).
+  firstSeenAt        DateTime  @map("first_seen_at")
+  detectionDelaySec  Int       @map("detection_delay_sec")
+  openedAt           DateTime  @map("opened_at")
+  sizeUsd            Decimal   @map("size_usd") @db.Decimal(12, 4)
+  // Entry economics (pessimistic fill).
+  entryPriceUsd          Decimal? @map("entry_price_usd") @db.Decimal(40, 18)            // spot at entry
+  entryPriceEffectiveUsd Decimal? @map("entry_price_effective_usd") @db.Decimal(40, 18)  // after all costs
+  modeledSlippagePct Decimal?  @map("modeled_slippage_pct") @db.Decimal(10, 6)
+  modeledSandwichPct Decimal?  @map("modeled_sandwich_pct") @db.Decimal(10, 6)
+  modeledGasUsd      Decimal?  @map("modeled_gas_usd") @db.Decimal(12, 4)
+  modeledBuyTaxPct   Decimal?  @map("modeled_buy_tax_pct") @db.Decimal(10, 6)
+  tokensBought       Decimal?  @map("tokens_bought") @db.Decimal(40, 18)
+  onchainLiqEntryUsd Decimal?  @map("onchain_liq_entry_usd") @db.Decimal(20, 4)
+  entryFeatures      Json?     @map("entry_features")  // t0 snapshot features for post-mortem
+  // Lifecycle.
+  status             String    @default("OPEN") // OPEN | CLOSED | INVALIDATED | NOT_ENTERED
+  notEnteredReason   String?   @map("not_entered_reason")
+  executedRungs      String    @default("") @map("executed_rungs") // comma-joined rung multiples sold
+  remainingFraction  Decimal   @default(1) @map("remaining_fraction") @db.Decimal(8, 6)
+  realizedValueUsd   Decimal   @default(0) @map("realized_value_usd") @db.Decimal(20, 4)
+  // Eval state (refreshed on demand).
+  lastEvalAt          DateTime? @map("last_eval_at")
+  priceNowUsd         Decimal?  @map("price_now_usd") @db.Decimal(40, 18)
+  onchainLiqNowUsd    Decimal?  @map("onchain_liq_now_usd") @db.Decimal(20, 4)
+  currentMultiple     Decimal?  @map("current_multiple") @db.Decimal(16, 4)
+  maxMultipleObserved Decimal?  @map("max_multiple_observed") @db.Decimal(16, 4)
+  maxDrawdownObserved Decimal?  @map("max_drawdown_observed") @db.Decimal(10, 4)
+  // Last-tick post-t0 rug signals (COLLECTION ONLY — not wired into exits). Captured
+  // each eval run; the LAST value before close feeds the post-mortem comparison.
+  lastUniqueBuyers         Int?     @map("last_unique_buyers")
+  lastUniqueSellers        Int?     @map("last_unique_sellers")
+  lastSellersToBuyersRatio Decimal? @map("last_sellers_to_buyers_ratio") @db.Decimal(12, 4)
+  lastSellSimOk            Boolean? @map("last_sell_sim_ok")
+  lastSellTaxNow           Decimal? @map("last_sell_tax_now") @db.Decimal(10, 6)
+  // Close.
+  closedAt           DateTime? @map("closed_at")
+  realizedMultiple   Decimal?  @map("realized_multiple") @db.Decimal(16, 4) // total realized value / size
+  outcomeClass       String?   @map("outcome_class")
+  // WIN | LOSS | RUG | UNSELLABLE | LIQ_PULL | STILL_ACTIVE | NOT_ENTERED
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  token  Token        @relation(fields: [tokenId], references: [id])
+  pool   Pool         @relation(fields: [poolId], references: [id])
+  events PaperEvent[]
+
+  @@index([chain, tokenId])
+  @@index([status])
+  @@index([outcomeClass])
+  @@map("paper_positions")
+}
+
+// ─── Raw Collector Payloads ────────────────────────────────────────────────────
+// Stores the raw API response per pool per cycle.
+// Kept separate from pool_snapshots so the normalised time-series table stays lean
+// and raw payloads can be pruned/archived on an independent schedule.
+model RawCollectorPayload {
+  id        String   @id @default(cuid())
+  runId     String   @map("run_id")
+  chain     String
+  source    String   // geckoterminal | dexscreener
+  ts        DateTime
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([chain, ts])
+  @@index([runId])
+  @@map("raw_collector_payloads")
+}
+
+// ─── Paper Events ──────────────────────────────────────────────────────────────
+model PaperEvent {
+  id         String   @id @default(cuid())
+  positionId String   @map("position_id")
+  ts         DateTime
+  type       String   // BUY | LADDER_SELL | INVALIDATE_SELL | NOT_ENTERED
+  price      Decimal  @db.Decimal(40, 18)
+  multiple   Decimal? @db.Decimal(16, 4)
+  fraction   Decimal? @db.Decimal(8, 6)   // fraction of original position transacted
+  tokens     Decimal? @db.Decimal(40, 18)
+  usd        Decimal? @db.Decimal(20, 4)  // net USD (proceeds for sells, cost for buys)
+  slipPct    Decimal? @map("slip_pct") @db.Decimal(10, 6)
+  note       String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  position PaperPosition @relation(fields: [positionId], references: [id])
+
+  @@index([positionId])
+  @@map("paper_events")
+}

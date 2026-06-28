@@ -1,0 +1,20 @@
+{
+  "token": {
+    "name": "ScamToken",
+    "symbol": "SCAM",
+    "decimals": 18,
+    "address": "0xbbb0000000000000000000000000000000000002"
+  },
+  "simulationResult": {
+    "buyTax": 0.0,
+    "sellTax": 0.0,
+    "transferTax": 0.0,
+    "buyGas": "150000",
+    "sellGas": "0"
+  },
+  "honeypotResult": {
+    "isHoneypot": true,
+    "honeypotReason": "Unable to sell"
+  },
+  "isHoneypot": true
+}

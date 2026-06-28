@@ -1,0 +1,20 @@
+export type LiquidityModel =
+  | 'V2'
+  | 'V3'
+  | 'UNSUPPORTED_V4'
+  | 'UNSUPPORTED_AERODROME_STABLE'
+  | 'UNSUPPORTED_UNKNOWN';
+
+export interface LiquidityCheckResult {
+  liquidityModel: LiquidityModel;
+  liquidityVerified: boolean;
+  onchainTvlUsd: number | null;
+  reportedVsOnchainPct: number | null; // (reported − onchain) / onchain; positive = inflated
+  executableDepthUsd: number | null;   // largest probe size (USD) with slippage < 10%
+  slip50:   number | null;             // slippage fraction for $50 sell
+  slip100:  number | null;
+  slip500:  number | null;
+  slip1000: number | null;
+  spotPriceUsd: number | null;
+  error?: string;                      // reason why liquidityVerified = false
+}

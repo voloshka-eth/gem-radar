@@ -1,0 +1,132 @@
+═══════════════════════════════════════════════════════════
+  GEM RADAR — Daily Collection Report
+  Date:      2026-06-21
+  Window:    2026-06-21T00:00:00.000Z → 2026-06-21T13:47:36.410Z
+  Generated: 2026-06-21T13:47:36.410Z  (trigger: shutdown)
+═══════════════════════════════════════════════════════════
+
+STAGE 0 FILTER
+  Total rejection events:  2388
+  Unique tokens rejected:  205
+
+  Reason histogram:
+    liquidity_too_low              1082   (45.3%)
+    fdv_too_high                    981   (41.1%)
+    fdv_too_low                     325   (13.6%)
+
+CONTRACT GATE  (unique tokens, latest decision per token)
+  Tokens evaluated:    88
+  CONTRACT_SAFE:         72   (81.8%)
+  CONTRACT_REJECT:       15   (17.0%)
+  CONTRACT_UNKNOWN:       1   (1.1%)
+  Unique discovered:   72
+
+CONTRACT REJECT REASON HISTOGRAM
+  owner_can_mint                        15   (100.0%)
+
+COLLECTION FUNNEL  (unique tokens)
+  Pools seen total:         293
+  → Stage 0 rejected:       205   (70.0%)
+  → Reached contract gate:   88   (30.0%)
+     → CONTRACT_SAFE:        72   (81.8% of gate)
+     → CONTRACT_REJECT:      15   (17.0% of gate)
+     → CONTRACT_UNKNOWN:      1   (1.1% of gate)
+
+DATA AVAILABILITY
+  Cycles run:          88
+  GoPlus queried:      87/88 (98.9%)
+  Honeypot.is queried: 50/88 (56.8%)
+
+FILES
+  Stage 0 detail:   logs/decisions/rejected_tokens.csv
+  Trajectory data:  logs/raw/pool_snapshots.csv
+  Discovery log:    logs/raw/new_pools.csv
+
+═══════════════════════════════════════════════════════════
+  GEM RADAR — Daily Collection Report
+  Date:      2026-06-21
+  Window:    2026-06-21T00:00:00.000Z → 2026-06-21T13:47:55.038Z
+  Generated: 2026-06-21T13:47:55.038Z  (trigger: shutdown)
+═══════════════════════════════════════════════════════════
+
+STAGE 0 FILTER
+  Total rejection events:  2388
+  Unique tokens rejected:  205
+
+  Reason histogram:
+    liquidity_too_low              1082   (45.3%)
+    fdv_too_high                    981   (41.1%)
+    fdv_too_low                     325   (13.6%)
+
+CONTRACT GATE  (unique tokens, latest decision per token)
+  Tokens evaluated:    88
+  CONTRACT_SAFE:         72   (81.8%)
+  CONTRACT_REJECT:       15   (17.0%)
+  CONTRACT_UNKNOWN:       1   (1.1%)
+  Unique discovered:   72
+
+CONTRACT REJECT REASON HISTOGRAM
+  owner_can_mint                        15   (100.0%)
+
+COLLECTION FUNNEL  (unique tokens)
+  Pools seen total:         293
+  → Stage 0 rejected:       205   (70.0%)
+  → Reached contract gate:   88   (30.0%)
+     → CONTRACT_SAFE:        72   (81.8% of gate)
+     → CONTRACT_REJECT:      15   (17.0% of gate)
+     → CONTRACT_UNKNOWN:      1   (1.1% of gate)
+
+DATA AVAILABILITY
+  Cycles run:          88
+  GoPlus queried:      87/88 (98.9%)
+  Honeypot.is queried: 50/88 (56.8%)
+
+FILES
+  Stage 0 detail:   logs/decisions/rejected_tokens.csv
+  Trajectory data:  logs/raw/pool_snapshots.csv
+  Discovery log:    logs/raw/new_pools.csv
+
+═══════════════════════════════════════════════════════════
+  GEM RADAR — Daily Collection Report
+  Date:      2026-06-21
+  Window:    2026-06-21T00:00:00.000Z → 2026-06-21T13:47:55.092Z
+  Generated: 2026-06-21T13:47:55.092Z  (trigger: shutdown)
+═══════════════════════════════════════════════════════════
+
+STAGE 0 FILTER
+  Total rejection events:  2388
+  Unique tokens rejected:  205
+
+  Reason histogram:
+    liquidity_too_low              1082   (45.3%)
+    fdv_too_high                    981   (41.1%)
+    fdv_too_low                     325   (13.6%)
+
+CONTRACT GATE  (unique tokens, latest decision per token)
+  Tokens evaluated:    88
+  CONTRACT_SAFE:         72   (81.8%)
+  CONTRACT_REJECT:       15   (17.0%)
+  CONTRACT_UNKNOWN:       1   (1.1%)
+  Unique discovered:   72
+
+CONTRACT REJECT REASON HISTOGRAM
+  owner_can_mint                        15   (100.0%)
+
+COLLECTION FUNNEL  (unique tokens)
+  Pools seen total:         293
+  → Stage 0 rejected:       205   (70.0%)
+  → Reached contract gate:   88   (30.0%)
+     → CONTRACT_SAFE:        72   (81.8% of gate)
+     → CONTRACT_REJECT:      15   (17.0% of gate)
+     → CONTRACT_UNKNOWN:      1   (1.1% of gate)
+
+DATA AVAILABILITY
+  Cycles run:          88
+  GoPlus queried:      87/88 (98.9%)
+  Honeypot.is queried: 50/88 (56.8%)
+
+FILES
+  Stage 0 detail:   logs/decisions/rejected_tokens.csv
+  Trajectory data:  logs/raw/pool_snapshots.csv
+  Discovery log:    logs/raw/new_pools.csv
+

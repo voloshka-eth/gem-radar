@@ -1,0 +1,1 @@
+export const RISK_REDIS_CLIENT = 'RISK_REDIS_CLIENT';

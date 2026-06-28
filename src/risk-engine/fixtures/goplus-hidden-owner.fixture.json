@@ -1,0 +1,20 @@
+{
+  "code": 1,
+  "message": "ok",
+  "result": {
+    "0xaaa0000000000000000000000000000000000001": {
+      "is_open_source": "1",
+      "is_honeypot": "0",
+      "buy_tax": "0.00",
+      "sell_tax": "0.00",
+      "can_take_back_ownership": "0",
+      "is_mintable": "0",
+      "is_blacklisted": "0",
+      "transfer_pausable": "0",
+      "is_proxy": "1",
+      "hidden_owner": "1",
+      "owner_address": "",
+      "lp_holders": []
+    }
+  }
+}

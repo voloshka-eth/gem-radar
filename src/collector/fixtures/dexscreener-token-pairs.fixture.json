@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "1.0.0",
+  "pairs": [
+    {
+      "chainId": "ethereum",
+      "dexId": "uniswap_v3",
+      "url": "https://dexscreener.com/ethereum/0xccc0000000000000000000000000000000000001",
+      "pairAddress": "0xccc0000000000000000000000000000000000001",
+      "baseToken":  { "address": "0xaaa0000000000000000000000000000000000001", "name": "Gem X",        "symbol": "GEMX"    },
+      "quoteToken": { "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  "name": "Wrapped Ether", "symbol": "WETH"    },
+      "priceNative": "0.000000386",
+      "priceUsd": "0.001234",
+      "txns": {
+        "m5": { "buys": 5,   "sells": 2   },
+        "h1": { "buys": 40,  "sells": 20  },
+        "h6": { "buys": 150, "sells": 80  },
+        "h24":{ "buys": 400, "sells": 200 }
+      },
+      "volume": { "m5": 500, "h1": 3000, "h6": 15000, "h24": 45000 },
+      "priceChange": { "m5": 1.2, "h1": 5.3, "h6": -2.1, "h24": 18.7 },
+      "liquidity": { "usd": 84000, "base": 34000000, "quote": 13.125 },
+      "fdv": 1234000,
+      "pairCreatedAt": 1718618400000
+    },
+    {
+      "chainId": "ethereum",
+      "dexId": "uniswap_v2",
+      "url": "https://dexscreener.com/ethereum/0xccc0000000000000000000000000000000000002",
+      "pairAddress": "0xccc0000000000000000000000000000000000002",
+      "baseToken":  { "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  "name": "Wrapped Ether", "symbol": "WETH"    },
+      "quoteToken": { "address": "0xaaa0000000000000000000000000000000000002", "name": "Alt Coin",     "symbol": "ALTCOIN" },
+      "priceNative": "3198220",
+      "priceUsd": "3200.55",
+      "txns": {
+        "m5": { "buys": 2,   "sells": 1   },
+        "h1": { "buys": 20,  "sells": 10  },
+        "h6": { "buys": 80,  "sells": 40  },
+        "h24":{ "buys": 200, "sells": 100 }
+      },
+      "volume": { "m5": 200, "h1": 1200, "h6": 6000, "h24": 18000 },
+      "priceChange": { "m5": 0.1, "h1": 0.3, "h6": -0.2, "h24": 0.5 },
+      "liquidity": { "usd": 50000, "base": 7.8125, "quote": 25000000 },
+      "fdv": 876000,
+      "pairCreatedAt": 1718624600000
+    },
+    {
+      "chainId": "ethereum",
+      "dexId": "uniswap_v3",
+      "url": "https://dexscreener.com/ethereum/0xccc0000000000000000000000000000000000003",
+      "pairAddress": "0xccc0000000000000000000000000000000000003",
+      "baseToken":  { "address": "0xaaa0000000000000000000000000000000000003", "name": "Null Price Token", "symbol": "NPT" },
+      "quoteToken": { "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  "name": "Wrapped Ether",    "symbol": "WETH" },
+      "priceNative": "0",
+      "priceUsd": null,
+      "txns": {
+        "m5": { "buys": 0, "sells": 0 },
+        "h1": { "buys": 0, "sells": 0 },
+        "h6": { "buys": 0, "sells": 0 },
+        "h24":{ "buys": 0, "sells": 0 }
+      },
+      "volume": { "m5": 0, "h1": 0, "h6": 0, "h24": 0 },
+      "priceChange": { "m5": 0, "h1": 0, "h6": 0, "h24": 0 },
+      "fdv": 0
+    }
+  ]
+}

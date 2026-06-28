@@ -1,0 +1,20 @@
+{
+  "token": {
+    "name": "GemToken",
+    "symbol": "GEM",
+    "decimals": 18,
+    "address": "0xaaa0000000000000000000000000000000000001"
+  },
+  "simulationResult": {
+    "buyTax": 1.0,
+    "sellTax": 1.0,
+    "transferTax": 0.0,
+    "buyGas": "120000",
+    "sellGas": "120000"
+  },
+  "honeypotResult": {
+    "isHoneypot": false,
+    "honeypotReason": null
+  },
+  "isHoneypot": false
+}
