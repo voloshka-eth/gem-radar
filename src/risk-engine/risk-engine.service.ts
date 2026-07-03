@@ -155,8 +155,8 @@ export class RiskEngineService {
   ): RiskDataStatus {
     const explicitStatus = goplusData.providerStatus ?? 'OK';
     if (explicitStatus === 'GOPLUS_PARSE_FAILED') return explicitStatus;
-    if (this.allCriticalRiskFieldsUnknown(goplusData)) return 'GOPLUS_PARSE_FAILED';
     if (explicitStatus === 'GOPLUS_PARTIAL') return explicitStatus;
+    if (this.allCriticalRiskFieldsUnknown(goplusData)) return 'GOPLUS_PARSE_FAILED';
     if (this.allCriticalRiskFieldsUnknown(merged)) return 'GOPLUS_PARSE_FAILED';
     return 'OK';
   }

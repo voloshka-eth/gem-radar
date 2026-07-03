@@ -6,13 +6,14 @@ import { PaperService } from './paper.service';
 import { EvalService } from './eval.service';
 import { PostmortemService } from '../postmortem/postmortem.service';
 import { EdgeService } from '../edge/edge.service';
+import { DeployerModule } from '../deployer/deployer.module';
 
 // PrismaService + FileLoggerService + ConfigService are global. EvalService additionally
 // needs on-chain re-reads (OnchainModule), best-effort risk re-checks (RiskEngineModule),
 // and current pool trade stats. GeckoTerminalService is stateless (ConfigService only), so
 // it is provided directly here to avoid a circular dependency with CollectorModule.
 @Module({
-  imports: [OnchainModule, RiskEngineModule],
+  imports: [OnchainModule, RiskEngineModule, DeployerModule],
   providers: [PaperService, EvalService, PostmortemService, EdgeService, GeckoTerminalService],
   exports: [PaperService, EvalService, PostmortemService, EdgeService],
 })

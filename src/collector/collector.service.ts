@@ -18,20 +18,15 @@ import { PoolLiquiditySnapshotRow } from '../file-logger/csv-schemas';
 import { ScoringService } from '../scoring/scoring.service';
 import type { ScoreSnapshot, ScoreResult } from '../scoring/score';
 import { PaperService } from '../paper/paper.service';
+import {
+  DeployerReputationService,
+  DeployerReputationSummary,
+} from '../deployer/deployer-reputation.service';
 
 type CandidateProcessingResult = {
   outcome: 'SAFE' | 'REJECT' | 'QUARANTINE';
   riskResult: ContractRiskResult;
 };
-
-type DeployerGateHit = {
-  address: string;
-  deploymentsCount: number;
-  rugLikeCount: number;
-  rugRate: number;
-};
-
-const RUG_LIKE_OUTCOMES = new Set(['RUG', 'UNSELLABLE', 'LIQ_PULL']);
 
 @Injectable()
 export class CollectorService implements OnModuleInit, OnModuleDestroy {
@@ -49,9 +44,6 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly stage0Config: Stage0Config;
   private readonly tokenMaxAgeDays: number;
   private readonly deployerGateEnabled: boolean;
-  private readonly deployerGateMinDeployments: number;
-  private readonly deployerGateMinRugLike: number;
-  private readonly deployerGateMinRugRate: number;
 
   constructor(
     private readonly config: ConfigService,
@@ -64,6 +56,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     private readonly liquidityVerifier: LiquidityVerificationService,
     private readonly scoring: ScoringService,
     private readonly paper: PaperService,
+    private readonly deployerReputation: DeployerReputationService,
   ) {
     this.enabledChains = (
       this.config.get<string[]>('chain.enabledChains') ?? ['ethereum', 'base']
@@ -78,16 +71,16 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       minLiquidityUsd: this.config.get<number>('scoring.minLiquidityUsd') ?? 5_000,
       minFdvUsd: this.config.get<number>('scoring.minFdvUsd') ?? 10_000,
       maxFdvUsd: this.config.get<number>('scoring.maxFdvUsd') ?? 50_000_000,
+      moonshotEnabled: this.config.get<boolean>('collector.moonshotStage0Enabled') ?? true,
+      moonshotMinLiquidityUsd: this.config.get<number>('collector.moonshotMinLiquidityUsd') ?? 1_000,
+      moonshotMinFdvUsd: this.config.get<number>('collector.moonshotMinFdvUsd') ?? 1_000,
+      moonshotMinVol1hUsd: this.config.get<number>('collector.moonshotMinVol1hUsd') ?? 1_000,
+      moonshotMinTx1h: this.config.get<number>('collector.moonshotMinTx1h') ?? 30,
+      moonshotMinBuys1h: this.config.get<number>('collector.moonshotMinBuys1h') ?? 15,
     };
     this.tokenMaxAgeDays = this.config.get<number>('collector.tokenMaxAgeDays') ?? 7;
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
-    this.deployerGateMinDeployments =
-      this.config.get<number>('collector.deployerGateMinDeployments') ?? 2;
-    this.deployerGateMinRugLike =
-      this.config.get<number>('collector.deployerGateMinRugLike') ?? 2;
-    this.deployerGateMinRugRate =
-      this.config.get<number>('collector.deployerGateMinRugRate') ?? 0.5;
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
@@ -170,6 +163,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         } else if (await this.isTokenTooOld(candidate, runId)) {
           rejected++;
         } else {
+          if (gate.lane === 'moonshot_probe') this.logMoonshotProbe(candidate);
           const processed = await this.processCandidate(candidate, runId);
           cycleRiskResults.push(processed.riskResult);
           if (processed.outcome === 'SAFE') passed++;
@@ -211,6 +205,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       } else if (await this.isTokenTooOld(candidate, runId)) {
         rejected++;
       } else {
+        if (gate.lane === 'moonshot_probe') this.logMoonshotProbe(candidate);
         const processed = await this.processCandidate(candidate, runId);
         cycleRiskResults.push(processed.riskResult);
         if (processed.outcome === 'SAFE') passed++;
@@ -308,7 +303,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
   private rejectForDeployerReputation(
     riskResult: ContractRiskResult,
-    hit: DeployerGateHit,
+    hit: DeployerReputationSummary,
   ): ContractRiskResult {
     this.logger.warn(
       `Deployer reputation gate: ${hit.address} rejected - ` +
@@ -328,48 +323,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
   private async checkDeployerReputation(
     candidate: CollectorResult,
-  ): Promise<DeployerGateHit | null> {
+  ): Promise<DeployerReputationSummary | null> {
     if (!this.deployerGateEnabled) return null;
 
     const address = candidate.token.deployerAddress?.toLowerCase();
     if (!address) return null;
 
     try {
-      const [deployerRow, deployedTokens] = await Promise.all([
-        this.prisma.deployer.findUnique({
-          where: { chain_address: { chain: candidate.token.chain, address } },
-        }),
-        this.prisma.token.findMany({
-          where: { chain: candidate.token.chain, deployerAddress: address },
-          select: {
-            tokenAddress: true,
-            paperPositions: { select: { outcomeClass: true } },
-          },
-        }),
-      ]);
-
-      const outcomeRugTokens = deployedTokens.filter((token) =>
-        token.paperPositions.some((position) =>
-          position.outcomeClass ? RUG_LIKE_OUTCOMES.has(position.outcomeClass) : false,
-        ),
-      ).length;
-      const deploymentsCount = Math.max(
-        deployerRow?.deploymentsCount ?? 0,
-        deployedTokens.length,
-      );
-      const rugLikeCount = Math.max(
-        deployerRow?.rugLikeCount ?? 0,
-        outcomeRugTokens,
-      );
-      const rugRate = deploymentsCount > 0 ? rugLikeCount / deploymentsCount : 0;
-
-      if (
-        deploymentsCount >= this.deployerGateMinDeployments &&
-        rugLikeCount >= this.deployerGateMinRugLike &&
-        rugRate >= this.deployerGateMinRugRate
-      ) {
-        return { address, deploymentsCount, rugLikeCount, rugRate };
-      }
+      const summary = await this.deployerReputation.summarize(candidate.token.chain, address);
+      return summary && this.deployerReputation.isRepeatRugger(summary) ? summary : null;
     } catch (err) {
       this.logger.warn(
         `Deployer reputation lookup failed for ${candidate.token.chain}:${address} - ${(err as Error).message}`,
@@ -415,6 +377,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ─── DB persistence ───────────────────────────────────────────────────────────
+
+  private logMoonshotProbe(candidate: CollectorResult): void {
+    const { token, pool } = candidate;
+    this.logger.log(
+      `Stage0 moonshot probe: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
+      `liq=$${pool.liquidityUsd?.toFixed(0) ?? '?'} fdv=$${pool.fdvUsd?.toFixed(0) ?? '?'} ` +
+      `vol1h=$${pool.vol1h?.toFixed(0) ?? '?'} buys1h=${pool.buys1h ?? '?'} tx1h=${pool.txCount1h ?? '?'}`,
+    );
+  }
 
   private async persistCandidate(
     candidate: CollectorResult,

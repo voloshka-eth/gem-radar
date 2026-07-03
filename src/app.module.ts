@@ -8,6 +8,7 @@ import { CollectorModule } from './collector/collector.module';
 import { ReportModule } from './report/report.module';
 import { PaperModule } from './paper/paper.module';
 import { GemModule } from './gem/gem.module';
+import { DeployerModule } from './deployer/deployer.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { GemModule } from './gem/gem.module';
     ReportModule,
     PaperModule,
     GemModule,
+    DeployerModule,
   ],
 })
 export class AppModule {}

@@ -262,6 +262,42 @@ describe('RiskEngineService — CSV file creation', () => {
     expect(redisMock.setex).not.toHaveBeenCalled();
   });
 
+  it('GoPlus trade-only partial without critical fields stays GOPLUS_PARTIAL, not PARSE_FAILED', async () => {
+    goplusMock.checkToken.mockResolvedValue({
+      providerStatus: 'GOPLUS_PARTIAL',
+      buyTax: 0,
+      sellTax: 0,
+      deployerAddress: '0xdeployer',
+    });
+    honeypotMock.checkToken.mockResolvedValue({ honeypot: false, canSell: undefined });
+
+    const result = await service.checkToken('base', '0xtradepartial', 'TP', 'Trade Partial', 'run-goplus-trade-partial');
+
+    expect(result.decision).toBe('CONTRACT_UNKNOWN');
+    expect(result.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(result.merged.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(redisMock.setex).not.toHaveBeenCalled();
+
+    const csvPath = path.join(tempDir, 'raw', 'contract_risk_checks.csv');
+    const dataRow = fs.readFileSync(csvPath, 'utf8').trim().split('\n')[1];
+    expect(dataRow).toContain('GOPLUS_PARTIAL');
+    expect(dataRow).not.toContain('GOPLUS_PARSE_FAILED');
+  });
+
+  it('GoPlus trade-only partial with positive tax can reject while preserving GOPLUS_PARTIAL status', async () => {
+    goplusMock.checkToken.mockResolvedValue({
+      providerStatus: 'GOPLUS_PARTIAL',
+      sellTax: 24.3,
+    });
+    honeypotMock.checkToken.mockResolvedValue({ honeypot: false, canSell: undefined });
+
+    const result = await service.checkToken('ethereum', '0xtaxpartial', 'TAXP', 'Tax Partial', 'run-goplus-tax-partial');
+
+    expect(result.decision).toBe('CONTRACT_REJECT');
+    expect(result.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(result.rejectReasons).toContain('sell_tax_24.3pct');
+  });
+
   it('GoPlus fails, Honeypot.is finds honeypot → CONTRACT_REJECT (valid even without GoPlus)', async () => {
     goplusMock.checkToken.mockResolvedValue(null);
     honeypotMock.checkToken.mockResolvedValue({ honeypot: true, canSell: false });

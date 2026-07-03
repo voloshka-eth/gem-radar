@@ -16,6 +16,7 @@ import { TokenAgeService } from '../onchain/token-age.service';
 import { LiquidityVerificationService } from '../onchain/liquidity-verification.service';
 import { ScoringService } from '../scoring/scoring.service';
 import { PaperService } from '../paper/paper.service';
+import { DeployerReputationService } from '../deployer/deployer-reputation.service';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -148,6 +149,10 @@ describe('CollectorService', () => {
   };
   // Paper entry only fires when liquidityVerified=true (default mock is false) → DI-only.
   const paperMock = { recordEntry: jest.fn().mockResolvedValue(undefined) };
+  const deployerReputationMock = {
+    summarize: jest.fn().mockResolvedValue(null),
+    isRepeatRugger: jest.fn().mockReturnValue(false),
+  };
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gem-radar-collector-test-'));
@@ -163,6 +168,8 @@ describe('CollectorService', () => {
     prismaMock.rawCollectorPayload.create.mockResolvedValue({});
     prismaMock.contractRiskCheck.create.mockResolvedValue({});
     prismaMock.quarantineToken.create.mockResolvedValue({ id: 'quat-id' });
+    deployerReputationMock.summarize.mockResolvedValue(null);
+    deployerReputationMock.isRepeatRugger.mockReturnValue(false);
     gtMock.getNewPools.mockResolvedValue([]);
     dsMock.getLatestProfileAddresses.mockResolvedValue([]);
     dsMock.getPairsForTokens.mockResolvedValue([]);
@@ -190,6 +197,7 @@ describe('CollectorService', () => {
         { provide: LiquidityVerificationService, useValue: liquidityMock },
         { provide: ScoringService, useValue: scoringMock },
         { provide: PaperService, useValue: paperMock },
+        { provide: DeployerReputationService, useValue: deployerReputationMock },
         {
           provide: ConfigService,
           useValue: {
@@ -599,10 +607,15 @@ describe('CollectorService', () => {
       merged: { ...SAFE_RISK.merged, deployerAddress: '0xrugger' },
     };
     riskMock.checkToken.mockResolvedValue(safeWithDeployer);
-    prismaMock.deployer.findUnique.mockResolvedValue({
+    deployerReputationMock.summarize.mockResolvedValue({
+      chain: 'ethereum',
+      address: '0xrugger',
       deploymentsCount: 3,
       rugLikeCount: 2,
+      rugRate: 2 / 3,
+      riskScore: 66.67,
     });
+    deployerReputationMock.isRepeatRugger.mockReturnValue(true);
     gtMock.getNewPools.mockResolvedValue([buildResult()]);
 
     await service.runCollectionCycle();

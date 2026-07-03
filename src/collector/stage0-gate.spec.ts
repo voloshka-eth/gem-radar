@@ -92,6 +92,53 @@ describe('applyStage0Gate', () => {
     });
   });
 
+  it('moonshot bypass passes low-FDV tokens with tradable liquidity and strong early traction', () => {
+    expect(
+      applyStage0Gate(
+        buildCandidate({
+          liquidityUsd: 6_754.38,
+          fdvUsd: 6_433.77,
+          vol1h: 5_089.7,
+          buys1h: 52,
+          txCount1h: 69,
+        }),
+        {
+          ...BASE_CONFIG,
+          moonshotEnabled: true,
+          moonshotMinLiquidityUsd: 1_000,
+          moonshotMinFdvUsd: 1_000,
+          moonshotMinVol1hUsd: 1_000,
+          moonshotMinTx1h: 30,
+          moonshotMinBuys1h: 15,
+        },
+      ),
+    ).toEqual({ pass: true, lane: 'moonshot_probe' });
+  });
+
+  it('moonshot bypass still rejects dust-liquidity tokens as untradeable', () => {
+    expect(
+      applyStage0Gate(
+        buildCandidate({
+          liquidityUsd: 0.0027,
+          fdvUsd: 2_070,
+          vol1h: 0,
+          vol6h: 1_817,
+          buys1h: 0,
+          txCount1h: 0,
+        }),
+        {
+          ...BASE_CONFIG,
+          moonshotEnabled: true,
+          moonshotMinLiquidityUsd: 1_000,
+          moonshotMinFdvUsd: 1_000,
+          moonshotMinVol1hUsd: 1_000,
+          moonshotMinTx1h: 30,
+          moonshotMinBuys1h: 15,
+        },
+      ),
+    ).toEqual({ pass: false, reason: 'liquidity_too_low' });
+  });
+
   it('rejects when fdvUsd exceeds maxFdvUsd', () => {
     expect(applyStage0Gate(buildCandidate({ fdvUsd: 100_000_000 }), BASE_CONFIG)).toEqual({
       pass: false,

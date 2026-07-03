@@ -17,7 +17,8 @@ async function main(): Promise<void> {
   const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error', 'warn', 'log'] });
   const evalService = app.get(EvalService);
 
-  const { rows, evaluated, closed } = await evalService.evaluateOpenPositions();
+  const { rows, evaluated, closed, deployersRefreshed, rugLikeTokens } =
+    await evalService.evaluateOpenPositions();
 
   console.log('\n' + renderEvalTable(rows));
 
@@ -26,6 +27,7 @@ async function main(): Promise<void> {
   fs.writeFileSync(path.join(outDir, 'paper_positions.html'), renderEvalHtml(rows), 'utf8');
 
   console.log(`\nEvaluated ${evaluated} open position(s); ${closed} closed this run.`);
+  console.log(`Deployer reputation refreshed: ${deployersRefreshed} deployer(s), ${rugLikeTokens} rug-like token(s).`);
   console.log('sellers/buyers + sell-sim now captured; not yet an exit rule — collecting samples.');
   console.log('Intuitive view → logs/reports/paper_positions.html');
   process.exit(0);

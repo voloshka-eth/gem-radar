@@ -15,6 +15,7 @@ import {
 import { modelExit, slipForSize } from './fills';
 import { taxFraction } from './paper.service';
 import type { EvalViewRow } from './paper.types';
+import { DeployerReputationService } from '../deployer/deployer-reputation.service';
 
 const num = (d: unknown): number | null => (d == null ? null : Number(d));
 
@@ -41,9 +42,16 @@ export class EvalService {
     private readonly liquidityVerifier: LiquidityVerificationService,
     private readonly riskEngine: RiskEngineService,
     private readonly geckoTerminal: GeckoTerminalService,
+    private readonly deployerReputation: DeployerReputationService,
   ) {}
 
-  async evaluateOpenPositions(): Promise<{ rows: EvalViewRow[]; evaluated: number; closed: number }> {
+  async evaluateOpenPositions(): Promise<{
+    rows: EvalViewRow[];
+    evaluated: number;
+    closed: number;
+    deployersRefreshed: number;
+    rugLikeTokens: number;
+  }> {
     const runId = `eval-${randomUUID().slice(0, 8)}`;
     const open = await this.prisma.paperPosition.findMany({
       where: { status: 'OPEN' },
@@ -209,7 +217,15 @@ export class EvalService {
       );
     }
 
-    return { rows, evaluated: open.length, closed };
+    const reputation = await this.deployerReputation.refreshAll();
+
+    return {
+      rows,
+      evaluated: open.length,
+      closed,
+      deployersRefreshed: reputation.deployersUpdated,
+      rugLikeTokens: reputation.rugLikeTokens,
+    };
   }
 
   // Re-verify the pool's CURRENT on-chain liquidity/price. Returns null if unreadable.

@@ -8,11 +8,18 @@ export interface Stage0Config {
   minLiquidityUsd: number;
   minFdvUsd: number;
   maxFdvUsd: number;
+  moonshotEnabled?: boolean;
+  moonshotMinLiquidityUsd?: number;
+  moonshotMinFdvUsd?: number;
+  moonshotMinVol1hUsd?: number;
+  moonshotMinTx1h?: number;
+  moonshotMinBuys1h?: number;
 }
 
 export interface Stage0Result {
   pass: boolean;
   reason?: Stage0RejectReason;
+  lane?: 'standard' | 'moonshot_probe';
 }
 
 /**
@@ -39,6 +46,10 @@ export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): 
   }
 
   // Missing liquidity/FDV data → don't false-reject (pass silently; later stages will handle)
+  if (isMoonshotProbeCandidate(candidate, cfg)) {
+    return { pass: true, lane: 'moonshot_probe' };
+  }
+
   if (pool.liquidityUsd !== undefined && pool.liquidityUsd < cfg.minLiquidityUsd) {
     return { pass: false, reason: 'liquidity_too_low' };
   }
@@ -49,6 +60,30 @@ export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): 
   }
 
   return { pass: true };
+}
+
+function isMoonshotProbeCandidate(candidate: CollectorResult, cfg: Stage0Config): boolean {
+  if (cfg.moonshotEnabled !== true) return false;
+
+  const { pool } = candidate;
+  const liq = pool.liquidityUsd;
+  const fdv = pool.fdvUsd;
+  if (liq === undefined || fdv === undefined) return false;
+  if (fdv > cfg.maxFdvUsd) return false;
+
+  const minLiq = cfg.moonshotMinLiquidityUsd ?? cfg.minLiquidityUsd;
+  const minFdv = cfg.moonshotMinFdvUsd ?? 0;
+  if (liq < minLiq || fdv < minFdv) return false;
+
+  const vol1h = pool.vol1h ?? 0;
+  const tx1h = pool.txCount1h ?? 0;
+  const buys1h = pool.buys1h ?? 0;
+
+  return (
+    vol1h >= (cfg.moonshotMinVol1hUsd ?? Number.POSITIVE_INFINITY) ||
+    tx1h >= (cfg.moonshotMinTx1h ?? Number.POSITIVE_INFINITY) ||
+    buys1h >= (cfg.moonshotMinBuys1h ?? Number.POSITIVE_INFINITY)
+  );
 }
 
 /**
