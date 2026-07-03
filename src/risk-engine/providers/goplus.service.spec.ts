@@ -30,6 +30,8 @@ describe('GoPlusService', () => {
         return undefined;
       },
     } as unknown as ConfigService);
+    (service as any).minIntervalMs = 0;
+    (service as any).retryDelayMs = 0;
 
     mockGet = jest.fn();
     (service as any).http = { get: mockGet };
@@ -124,6 +126,77 @@ describe('GoPlusService', () => {
     mockGet.mockResolvedValueOnce({ data: malformedFixture });
     const result = await service.checkToken('ethereum', TOKEN_ADDR);
     expect(result).toBeNull();
+  });
+
+  it('empty success payload without critical risk fields -> GOPLUS_PARSE_FAILED', async () => {
+    const emptyPayload = { data: buildGoPlusResponse({ token_name: 'Partial Only' }) };
+    mockGet.mockResolvedValueOnce(emptyPayload).mockResolvedValueOnce(emptyPayload);
+
+    const result = await service.checkToken('ethereum', TOKEN_ADDR);
+
+    expect(result).not.toBeNull();
+    expect(result!.providerStatus).toBe('GOPLUS_PARSE_FAILED');
+    expect(result!.mintRisk).toBeUndefined();
+    expect(result!.blacklistRisk).toBeUndefined();
+    expect(result!.proxyRisk).toBeUndefined();
+    expect(result!.honeypot).toBeUndefined();
+  });
+
+  it('trade-only GoPlus payload without owner capability fields -> GOPLUS_PARTIAL', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: buildGoPlusResponse({
+        token_name: 'Trade Only',
+        buy_tax: '0',
+        sell_tax: '0',
+        cannot_buy: '0',
+        cannot_sell_all: '0',
+        is_in_dex: '1',
+        holder_count: '42',
+        creator_address: '0xC0FFEE0000000000000000000000000000000000',
+      }),
+    });
+
+    const result = await service.checkToken('base', TOKEN_ADDR);
+
+    expect(result).not.toBeNull();
+    expect(result!.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(result!.buyTax).toBe(0);
+    expect(result!.sellTax).toBe(0);
+    expect(result!.deployerAddress).toBe('0xc0ffee0000000000000000000000000000000000');
+    expect(result!.mintRisk).toBeUndefined();
+  });
+
+  it('rate-limit response is retried before returning data', async () => {
+    mockGet
+      .mockResolvedValueOnce({ data: { code: 4029, message: 'too many requests' } })
+      .mockResolvedValueOnce({ data: safeFixture });
+
+    const result = await service.checkToken('ethereum', TOKEN_ADDR);
+
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(result).not.toBeNull();
+    expect(result!.providerStatus).toBe('OK');
+    expect(result!.mintRisk).toBe(false);
+  });
+
+  it('missing tax fields with critical booleans present -> GOPLUS_PARTIAL', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: buildGoPlusResponse({
+        is_open_source: '1',
+        is_honeypot: '0',
+        is_mintable: '0',
+        is_blacklisted: '0',
+        is_proxy: '0',
+        can_take_back_ownership: '0',
+        transfer_pausable: '0',
+      }),
+    });
+
+    const result = await service.checkToken('ethereum', TOKEN_ADDR);
+
+    expect(result).not.toBeNull();
+    expect(result!.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(result!.mintRisk).toBe(false);
   });
 
   it('HTTP error → returns null', async () => {

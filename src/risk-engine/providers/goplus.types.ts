@@ -12,7 +12,10 @@ export interface GoPlusTokenResult {
   is_honeypot?: string;                 // "1" | "0"
   buy_tax?: string;                     // decimal fraction: "0.05" = 5 %
   sell_tax?: string;
+  transfer_tax?: string;
+  cannot_buy?: string;                  // "1" = buy simulation failed/blocked
   cannot_sell_all?: string;             // "1" = cannot sell entire balance (partial sell-lock)
+  is_in_dex?: string;                   // "1" = GoPlus found DEX/liquidity metadata
   can_take_back_ownership?: string;     // "1" = owner can reclaim a renounced contract
   is_mintable?: string;                 // "1" = owner can mint new tokens
   is_blacklisted?: string;              // "1" = blacklist function exists
@@ -25,7 +28,11 @@ export interface GoPlusTokenResult {
   selfdestruct?: string;                // "1" = contract has selfdestruct
   anti_whale_modifiable?: string;       // "1" = owner can change max-wallet / anti-whale limits
   owner_address?: string;               // empty or zero address = renounced (empty = ambiguous)
+  creator_address?: string;             // token deployer/creator when GoPlus exposes it
+  holder_count?: string;
   lp_holders?: GoPlusLpHolder[];
+  dex?: unknown[];
+  holders?: unknown[];
 }
 
 export interface GoPlusApiResponse {

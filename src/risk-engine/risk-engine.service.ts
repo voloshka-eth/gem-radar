@@ -3,7 +3,7 @@ import type { Redis } from 'ioredis';
 import { GoPlusService } from './providers/goplus.service';
 import { HoneypotService } from './providers/honeypot.service';
 import { applyContractRiskGate, mergeRiskData } from './contract-risk-gate';
-import { ContractRiskResult, NormalizedRiskData } from './risk-engine.types';
+import { ContractRiskResult, NormalizedRiskData, RiskDataStatus } from './risk-engine.types';
 import { SupportedChain } from '../collector/collector.types';
 import { FileLoggerService } from '../file-logger/file-logger.service';
 import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
@@ -11,7 +11,7 @@ import { RISK_REDIS_CLIENT } from './risk-engine.constants';
 
 const CACHE_TTL_SECONDS = 45 * 60;
 // Bump this string whenever gate rules change — otherwise stale decisions live in cache.
-const CACHE_KEY_PREFIX = 'risk:v2:';
+const CACHE_KEY_PREFIX = 'risk:v3:';
 
 @Injectable()
 export class RiskEngineService {
@@ -80,6 +80,7 @@ export class RiskEngineService {
         goplusQueried: false,
         honeypotQueried: false,
         merged: {},
+        providerStatus: 'ALL_PROVIDERS_UNAVAILABLE',
         cacheHit: false,
       };
       this.logRiskCheck(chain, tokenAddress, tokenSymbol, tokenName, runId, result);
@@ -100,7 +101,8 @@ export class RiskEngineService {
         rejectReasons: finalDecision === 'CONTRACT_REJECT' ? hpReasons : [],
         goplusQueried: false,
         honeypotQueried: true,
-        merged: honeypotData!,
+        merged: { ...honeypotData!, providerStatus: 'HONEYPOT_ONLY_PARTIAL' },
+        providerStatus: 'HONEYPOT_ONLY_PARTIAL',
         cacheHit: false,
       };
       this.logger.log(
@@ -120,21 +122,52 @@ export class RiskEngineService {
     const merged = mergeRiskData(primary, supplementary);
 
     const { decision, rejectReasons } = applyContractRiskGate(merged);
+    const providerStatus = this.resolveProviderStatus(primary, merged);
+    const finalDecision =
+      decision === 'CONTRACT_REJECT'
+        ? 'CONTRACT_REJECT'
+        : providerStatus === 'OK'
+          ? 'CONTRACT_SAFE'
+          : 'CONTRACT_UNKNOWN';
     const result: ContractRiskResult = {
-      decision,
-      rejectReasons,
+      decision: finalDecision,
+      rejectReasons: finalDecision === 'CONTRACT_REJECT' ? rejectReasons : [],
       goplusQueried: true,
       honeypotQueried,
-      merged,
+      merged: { ...merged, providerStatus },
+      providerStatus,
       cacheHit: false,
     };
 
     this.logger.log(
-      `Risk: ${chain}:${tokenAddress} → ${decision}${rejectReasons.length ? ` [${rejectReasons.join(', ')}]` : ''}`,
+      `Risk: ${chain}:${tokenAddress} -> ${finalDecision}${rejectReasons.length && finalDecision === 'CONTRACT_REJECT' ? ` [${rejectReasons.join(', ')}]` : ''}${providerStatus !== 'OK' ? ` (${providerStatus})` : ''}`,
     );
     this.logRiskCheck(chain, tokenAddress, tokenSymbol, tokenName, runId, result);
-    await this.setCached(cacheKey, result);
+    if (finalDecision !== 'CONTRACT_UNKNOWN') {
+      await this.setCached(cacheKey, result);
+    }
     return result;
+  }
+
+  private resolveProviderStatus(
+    goplusData: NormalizedRiskData,
+    merged: NormalizedRiskData,
+  ): RiskDataStatus {
+    const explicitStatus = goplusData.providerStatus ?? 'OK';
+    if (explicitStatus === 'GOPLUS_PARSE_FAILED') return explicitStatus;
+    if (this.allCriticalRiskFieldsUnknown(goplusData)) return 'GOPLUS_PARSE_FAILED';
+    if (explicitStatus === 'GOPLUS_PARTIAL') return explicitStatus;
+    if (this.allCriticalRiskFieldsUnknown(merged)) return 'GOPLUS_PARSE_FAILED';
+    return 'OK';
+  }
+
+  private allCriticalRiskFieldsUnknown(data: NormalizedRiskData): boolean {
+    return (
+      data.mintRisk === undefined &&
+      data.blacklistRisk === undefined &&
+      data.proxyRisk === undefined &&
+      data.honeypot === undefined
+    );
   }
 
   // ── Redis helpers (non-fatal — Redis unavailability must not block checks) ──
@@ -192,6 +225,7 @@ export class RiskEngineService {
       honeypot_queried: honeypotQueried.toString(),
       decision,
       reject_reasons: rejectReasons.join(';'),
+      risk_status: result.providerStatus ?? merged.providerStatus ?? '',
     });
   }
 }

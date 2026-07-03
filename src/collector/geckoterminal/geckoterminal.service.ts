@@ -22,6 +22,10 @@ export interface PoolTradeStats {
   uniqueSellers: number;
   volumeUsd: number | null;   // total (GeckoTerminal does not split buy/sell volume)
   window: 'h1' | 'h6' | 'h24';
+  // Current valuation (same source/method as the t0 FDV the pipeline stored at discovery).
+  priceUsd: number | null;
+  fdvUsd: number | null;
+  reserveUsd: number | null;
 }
 
 @Injectable()
@@ -116,6 +120,9 @@ export class GeckoTerminalService {
         uniqueSellers: bucket.sellers,
         volumeUsd: this.parseNum(vol) ?? null,
         window: bucket.window,
+        priceUsd: this.parseNum(a.base_token_price_usd) ?? null,
+        fdvUsd: this.parseNum(a.fdv_usd) ?? null,
+        reserveUsd: this.parseNum(a.reserve_in_usd) ?? null,
       };
     } catch (err) {
       this.logger.debug(`GeckoTerminal pool stats failed for ${chain}:${poolAddress}: ${(err as Error).message}`);

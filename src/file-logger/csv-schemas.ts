@@ -2,7 +2,7 @@
 // Adding a field: extend the interface, add an entry to the headers array,
 // bump CSV_SCHEMA_VERSION.  Never reorder existing columns — append only.
 
-export const CSV_SCHEMA_VERSION = '1.3.0'; // M5 paper-trade evaluator
+export const CSV_SCHEMA_VERSION = '1.4.0'; // GoPlus fail-closed parser quality status
 
 export interface CsvHeader {
   id: string;   // matches the key in the row object
@@ -229,6 +229,12 @@ export interface PaperEntryRow {
   final_score: string;
   band: string;
   score_confidence: string;
+  deployer_address: string;         // deployer EOA
+  deployer_deployments_count: string; // total deployments by this deployer at entry time
+  deployer_rug_count: string;       // rugs attributed to this deployer at entry time
+  lp_locked: string;               // true | false | '' (undetermined)
+  lp_lock_source: string;          // burn | locker:<name> | none | undetermined_v3 | ''
+  lp_lock_fraction: string;        // locked/burned fraction (0–1) | ''
 }
 
 export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
@@ -257,6 +263,12 @@ export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
   { id: 'final_score', title: 'final_score' },
   { id: 'band', title: 'band' },
   { id: 'score_confidence', title: 'score_confidence' },
+  { id: 'deployer_address', title: 'deployer_address' },
+  { id: 'deployer_deployments_count', title: 'deployer_deployments_count' },
+  { id: 'deployer_rug_count', title: 'deployer_rug_count' },
+  { id: 'lp_locked', title: 'lp_locked' },
+  { id: 'lp_lock_source', title: 'lp_lock_source' },
+  { id: 'lp_lock_fraction', title: 'lp_lock_fraction' },
 ];
 
 // ─── decisions/position_ticks.csv ─────────────────────────────────────────────
@@ -325,6 +337,10 @@ export interface PaperExitRow {
   slip_pct: string;
   realized_multiple_total: string; // cumulative realized value / size after this event
   note: string;
+  deployer_address: string;
+  deployer_deployments_count: string;
+  deployer_rug_count: string;
+  outcome_class: string;      // RUG | UNSELLABLE | LIQ_PULL | WIN | LOSS
 }
 
 export const PAPER_EXIT_HEADERS: CsvHeader[] = [
@@ -377,6 +393,7 @@ export interface ContractRiskRow {
   honeypot_queried: string;
   decision: string;         // CONTRACT_SAFE | CONTRACT_REJECT | CONTRACT_UNKNOWN
   reject_reasons: string;   // semicolon-joined list of reason codes, or ''
+  risk_status: string;      // OK | GOPLUS_PARTIAL | GOPLUS_PARSE_FAILED | ...
 }
 
 export const CONTRACT_RISK_HEADERS: CsvHeader[] = [
@@ -405,6 +422,7 @@ export const CONTRACT_RISK_HEADERS: CsvHeader[] = [
   { id: 'honeypot_queried', title: 'honeypot_queried' },
   { id: 'decision', title: 'decision' },
   { id: 'reject_reasons', title: 'reject_reasons' },
+  { id: 'risk_status', title: 'risk_status' },
 ];
 
 // ─── decisions/quarantine_tokens.csv ─────────────────────────────────────────
@@ -571,6 +589,12 @@ export interface CandidateRow {
   slip_1000: string;
   fdv_usd: string;
   age_days: string;
+  deployer_address: string;
+  deployer_deployments_count: string;
+  deployer_rug_count: string;
+  lp_locked: string;
+  lp_lock_source: string;
+  lp_lock_fraction: string;
 }
 
 export const CANDIDATE_HEADERS: CsvHeader[] = [
@@ -587,6 +611,12 @@ export const CANDIDATE_HEADERS: CsvHeader[] = [
   { id: 'slip_1000',               title: 'slip_1000' },
   { id: 'fdv_usd',                 title: 'fdv_usd' },
   { id: 'age_days',                title: 'age_days' },
+  { id: 'deployer_address',         title: 'deployer_address' },
+  { id: 'deployer_deployments_count', title: 'deployer_deployments_count' },
+  { id: 'deployer_rug_count',       title: 'deployer_rug_count' },
+  { id: 'lp_locked',               title: 'lp_locked' },
+  { id: 'lp_lock_source',          title: 'lp_lock_source' },
+  { id: 'lp_lock_fraction',         title: 'lp_lock_fraction' },
 ];
 
 export const POOL_SNAPSHOT_HEADERS: CsvHeader[] = [

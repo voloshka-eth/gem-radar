@@ -19,6 +19,20 @@ import { ScoringService } from '../scoring/scoring.service';
 import type { ScoreSnapshot, ScoreResult } from '../scoring/score';
 import { PaperService } from '../paper/paper.service';
 
+type CandidateProcessingResult = {
+  outcome: 'SAFE' | 'REJECT' | 'QUARANTINE';
+  riskResult: ContractRiskResult;
+};
+
+type DeployerGateHit = {
+  address: string;
+  deploymentsCount: number;
+  rugLikeCount: number;
+  rugRate: number;
+};
+
+const RUG_LIKE_OUTCOMES = new Set(['RUG', 'UNSELLABLE', 'LIQ_PULL']);
+
 @Injectable()
 export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CollectorService.name);
@@ -34,6 +48,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly pollIntervalMs: number;
   private readonly stage0Config: Stage0Config;
   private readonly tokenMaxAgeDays: number;
+  private readonly deployerGateEnabled: boolean;
+  private readonly deployerGateMinDeployments: number;
+  private readonly deployerGateMinRugLike: number;
+  private readonly deployerGateMinRugRate: number;
 
   constructor(
     private readonly config: ConfigService,
@@ -62,6 +80,14 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       maxFdvUsd: this.config.get<number>('scoring.maxFdvUsd') ?? 50_000_000,
     };
     this.tokenMaxAgeDays = this.config.get<number>('collector.tokenMaxAgeDays') ?? 7;
+    this.deployerGateEnabled =
+      this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
+    this.deployerGateMinDeployments =
+      this.config.get<number>('collector.deployerGateMinDeployments') ?? 2;
+    this.deployerGateMinRugLike =
+      this.config.get<number>('collector.deployerGateMinRugLike') ?? 2;
+    this.deployerGateMinRugRate =
+      this.config.get<number>('collector.deployerGateMinRugRate') ?? 0.5;
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
@@ -110,6 +136,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     let skipped = 0;
 
     const seenThisCycle = new Set<string>();
+    const cycleRiskResults: ContractRiskResult[] = [];
 
     // ── GeckoTerminal pass (per chain) ──
     for (const chain of this.enabledChains) {
@@ -143,9 +170,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         } else if (await this.isTokenTooOld(candidate, runId)) {
           rejected++;
         } else {
-          const outcome = await this.processCandidate(candidate, runId);
-          if (outcome === 'SAFE') passed++;
-          else if (outcome === 'QUARANTINE') quarantined++;
+          const processed = await this.processCandidate(candidate, runId);
+          cycleRiskResults.push(processed.riskResult);
+          if (processed.outcome === 'SAFE') passed++;
+          else if (processed.outcome === 'QUARANTINE') quarantined++;
           else rejected++;
         }
         this.seenAcrossCycles.add(tokenKey);
@@ -183,13 +211,16 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       } else if (await this.isTokenTooOld(candidate, runId)) {
         rejected++;
       } else {
-        const outcome = await this.processCandidate(candidate, runId);
-        if (outcome === 'SAFE') passed++;
-        else if (outcome === 'QUARANTINE') quarantined++;
+        const processed = await this.processCandidate(candidate, runId);
+        cycleRiskResults.push(processed.riskResult);
+        if (processed.outcome === 'SAFE') passed++;
+        else if (processed.outcome === 'QUARANTINE') quarantined++;
         else rejected++;
       }
       this.seenAcrossCycles.add(tokenKey);
     }
+
+    this.emitContractGateSanityAlert(runId, cycleRiskResults);
 
     this.logger.log(
       `Cycle done — run_id: ${runId} | total: ${total} passed: ${passed} rejected: ${rejected} quarantined: ${quarantined} skipped: ${skipped} | elapsed: ${Date.now() - cycleStart}ms`,
@@ -206,9 +237,9 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private async processCandidate(
     candidate: CollectorResult,
     runId: string,
-  ): Promise<'SAFE' | 'REJECT' | 'QUARANTINE'> {
+  ): Promise<CandidateProcessingResult> {
     const { pool, token } = candidate;
-    const riskResult = await this.riskEngine.checkToken(
+    let riskResult = await this.riskEngine.checkToken(
       pool.chain,
       token.tokenAddress,
       token.symbol,
@@ -216,13 +247,21 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       runId,
     );
     const now = new Date();
+    this.enrichCandidateDeployer(candidate, riskResult);
+
+    if (riskResult.decision === 'CONTRACT_SAFE') {
+      const deployerGateHit = await this.checkDeployerReputation(candidate);
+      if (deployerGateHit) {
+        riskResult = this.rejectForDeployerReputation(riskResult, deployerGateHit);
+      }
+    }
 
     if (riskResult.decision === 'CONTRACT_REJECT') {
       this.logContractRejected(candidate, riskResult, runId);
       if (!riskResult.cacheHit) {
         await this.storeRiskCheck(runId, pool.chain, token.tokenAddress, null, now, riskResult);
       }
-      return 'REJECT';
+      return { outcome: 'REJECT', riskResult };
     }
 
     if (riskResult.decision === 'CONTRACT_UNKNOWN') {
@@ -231,7 +270,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       if (!riskResult.cacheHit) {
         await this.storeRiskCheck(runId, pool.chain, token.tokenAddress, null, now, riskResult);
       }
-      return 'QUARANTINE';
+      return { outcome: 'QUARANTINE', riskResult };
     }
 
     // CONTRACT_SAFE — run on-chain liquidity verification before persisting
@@ -254,7 +293,125 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
-    return 'SAFE';
+    return { outcome: 'SAFE', riskResult };
+  }
+
+  private enrichCandidateDeployer(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+  ): void {
+    const deployer = riskResult.merged.deployerAddress?.toLowerCase();
+    if (!candidate.token.deployerAddress && deployer) {
+      candidate.token.deployerAddress = deployer;
+    }
+  }
+
+  private rejectForDeployerReputation(
+    riskResult: ContractRiskResult,
+    hit: DeployerGateHit,
+  ): ContractRiskResult {
+    this.logger.warn(
+      `Deployer reputation gate: ${hit.address} rejected - ` +
+      `${hit.rugLikeCount}/${hit.deploymentsCount} rug-like ` +
+      `(${(hit.rugRate * 100).toFixed(1)}%)`,
+    );
+    return {
+      ...riskResult,
+      decision: 'CONTRACT_REJECT',
+      rejectReasons: [...riskResult.rejectReasons, 'deployer_repeat_rugger'],
+      merged: {
+        ...riskResult.merged,
+        deployerAddress: hit.address,
+      },
+    };
+  }
+
+  private async checkDeployerReputation(
+    candidate: CollectorResult,
+  ): Promise<DeployerGateHit | null> {
+    if (!this.deployerGateEnabled) return null;
+
+    const address = candidate.token.deployerAddress?.toLowerCase();
+    if (!address) return null;
+
+    try {
+      const [deployerRow, deployedTokens] = await Promise.all([
+        this.prisma.deployer.findUnique({
+          where: { chain_address: { chain: candidate.token.chain, address } },
+        }),
+        this.prisma.token.findMany({
+          where: { chain: candidate.token.chain, deployerAddress: address },
+          select: {
+            tokenAddress: true,
+            paperPositions: { select: { outcomeClass: true } },
+          },
+        }),
+      ]);
+
+      const outcomeRugTokens = deployedTokens.filter((token) =>
+        token.paperPositions.some((position) =>
+          position.outcomeClass ? RUG_LIKE_OUTCOMES.has(position.outcomeClass) : false,
+        ),
+      ).length;
+      const deploymentsCount = Math.max(
+        deployerRow?.deploymentsCount ?? 0,
+        deployedTokens.length,
+      );
+      const rugLikeCount = Math.max(
+        deployerRow?.rugLikeCount ?? 0,
+        outcomeRugTokens,
+      );
+      const rugRate = deploymentsCount > 0 ? rugLikeCount / deploymentsCount : 0;
+
+      if (
+        deploymentsCount >= this.deployerGateMinDeployments &&
+        rugLikeCount >= this.deployerGateMinRugLike &&
+        rugRate >= this.deployerGateMinRugRate
+      ) {
+        return { address, deploymentsCount, rugLikeCount, rugRate };
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Deployer reputation lookup failed for ${candidate.token.chain}:${address} - ${(err as Error).message}`,
+      );
+    }
+
+    return null;
+  }
+
+  private emitContractGateSanityAlert(runId: string, results: ContractRiskResult[]): void {
+    const total = results.length;
+    if (total === 0) return;
+
+    const safe = results.filter((r) => r.decision === 'CONTRACT_SAFE').length;
+    const goplusQueried = results.filter((r) => r.goplusQueried);
+    const alerts: string[] = [];
+
+    if (total >= 20 && safe / total > 0.9) {
+      alerts.push(`SAFE RATE ${((safe / total) * 100).toFixed(1)}% > 90% (${safe}/${total})`);
+    }
+
+    if (goplusQueried.length >= 20) {
+      const taxFilled = goplusQueried.filter(
+        (r) => r.merged.buyTax !== undefined || r.merged.sellTax !== undefined,
+      ).length;
+      const mintFilled = goplusQueried.filter((r) => r.merged.mintRisk !== undefined).length;
+      const taxRate = taxFilled / goplusQueried.length;
+      const mintRate = mintFilled / goplusQueried.length;
+
+      if (taxRate < 0.4) {
+        alerts.push(`GoPlus tax fill rate ${(taxRate * 100).toFixed(1)}% < 40% (${taxFilled}/${goplusQueried.length})`);
+      }
+      if (mintRate < 0.4) {
+        alerts.push(`GoPlus can_mint fill rate ${(mintRate * 100).toFixed(1)}% < 40% (${mintFilled}/${goplusQueried.length})`);
+      }
+    }
+
+    if (alerts.length > 0) {
+      this.logger.warn(
+        `CONTRACT GATE DATA QUALITY ALERT run_id=${runId}: ${alerts.join(' | ')}`,
+      );
+    }
   }
 
   // ─── DB persistence ───────────────────────────────────────────────────────────
@@ -652,6 +809,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       slip_1000:               liq.slip1000?.toFixed(6) ?? '',
       fdv_usd:                 pool.fdvUsd?.toFixed(0) ?? '',
       age_days:                ageDays != null ? ageDays.toFixed(2) : '',
+      deployer_address:        token.deployerAddress ?? '',
+      deployer_deployments_count: '',
+      deployer_rug_count:      '',
+      lp_locked:               '',
+      lp_lock_source:          '',
+      lp_lock_fraction:        '',
     });
   }
 

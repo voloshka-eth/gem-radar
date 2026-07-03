@@ -66,6 +66,7 @@ import { LiquidityVerificationService } from './liquidity-verification.service';
   exports: [
     TokenAgeService,
     LiquidityVerificationService,
+    VIEM_CLIENTS,
   ],
 })
 export class OnchainModule {}

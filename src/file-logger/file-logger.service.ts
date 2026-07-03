@@ -133,6 +133,8 @@ export class FileLoggerService implements OnModuleInit {
     if (isNewFile) {
       if (leadingComment) output += leadingComment + '\n';
       output += headers.map((h) => escapeCsvField(h.title)).join(',') + '\n';
+    } else {
+      this.upgradeHeaderIfAppendOnly(fullPath, headers, leadingComment);
     }
     output += headers.map((h) => escapeCsvField(rowObj[h.id])).join(',') + '\n';
 
@@ -147,6 +149,34 @@ export class FileLoggerService implements OnModuleInit {
     for (const subdir of ['raw', 'decisions', 'reports']) {
       fs.mkdirSync(path.join(this.logDir, subdir), { recursive: true });
     }
+  }
+
+  private upgradeHeaderIfAppendOnly(
+    fullPath: string,
+    headers: CsvHeader[],
+    leadingComment?: string,
+  ): void {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(fullPath, 'utf8');
+    } catch {
+      return;
+    }
+
+    const expected = headers.map((h) => escapeCsvField(h.title)).join(',');
+    const lines = raw.split(/\r?\n/);
+    const headerIndex = leadingComment ? lines.findIndex((line) => !line.startsWith('#')) : 0;
+    if (headerIndex < 0 || lines[headerIndex] === expected) return;
+
+    const existing = lines[headerIndex].split(',');
+    const next = expected.split(',');
+    const isAppendOnly =
+      existing.length < next.length &&
+      existing.every((value, index) => value === next[index]);
+    if (!isAppendOnly) return;
+
+    lines[headerIndex] = expected;
+    fs.writeFileSync(fullPath, lines.join('\n'), 'utf8');
   }
 }
 

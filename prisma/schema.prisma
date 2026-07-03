@@ -299,6 +299,62 @@ model PaperPosition {
   @@map("paper_positions")
 }
 
+// ─── Shadow gem-tracker (OBSERVATION ONLY — never wired into entry/exit) ─────────
+// A survivor that passed the gem-screen hard gate (lp_locked_or_burned + FDV headroom).
+model GemCandidate {
+  id                 String   @id @default(cuid())
+  chain              String
+  tokenAddress       String   @map("token_address")
+  poolAddress        String   @map("pool_address")
+  symbol             String?
+  liquidityModel     String   @map("liquidity_model")
+  deployerAddress    String?  @map("deployer_address")
+  t0Ts               DateTime @map("t0_ts")            // real discovery time (t0 baseline)
+  entryFdvUsd        Decimal? @map("entry_fdv_usd") @db.Decimal(30, 4)
+  entryPriceUsd      Decimal? @map("entry_price_usd") @db.Decimal(40, 18)
+  entryLiquidityUsd  Decimal? @map("entry_liquidity_usd") @db.Decimal(20, 4)
+  // LP lock/burn evidence (the hard gate).
+  lpLockedOrBurned   Boolean  @map("lp_locked_or_burned")
+  lpLockedFraction   Decimal? @map("lp_locked_fraction") @db.Decimal(8, 6)
+  lpLockSource       String?  @map("lp_lock_source")    // burn | locker:<name> | mixed | undetermined
+  screenedAt         DateTime @default(now()) @map("screened_at")
+
+  ticks GemShadowTick[]
+
+  @@unique([chain, tokenAddress, poolAddress])
+  @@index([t0Ts])
+  @@map("gem_candidates")
+}
+
+// One forward observation of a gem_candidate at a horizon bucket. Keyed token+pool+horizon.
+model GemShadowTick {
+  id              String   @id @default(cuid())
+  candidateId     String   @map("candidate_id")
+  chain           String
+  tokenAddress    String   @map("token_address")
+  poolAddress     String   @map("pool_address")
+  horizon         String   // 15m | 1h | 6h | 24h | 72h
+  dueAt           DateTime @map("due_at")
+  capturedAt      DateTime @map("captured_at")
+  elapsedMin      Int      @map("elapsed_min")
+  status          String   // captured | missed (started tracking after this horizon passed)
+  priceUsd        Decimal? @map("price_usd") @db.Decimal(40, 18)
+  fdvUsd          Decimal? @map("fdv_usd") @db.Decimal(30, 4)
+  onchainLiqUsd   Decimal? @map("onchain_liq_usd") @db.Decimal(20, 4)
+  multipleVsT0    Decimal? @map("multiple_vs_t0") @db.Decimal(20, 6) // by FDV
+  uniqueBuyers    Int?     @map("unique_buyers")
+  uniqueSellers   Int?     @map("unique_sellers")
+  sellSimOk       Boolean? @map("sell_sim_ok")
+  rugFlag         Boolean  @map("rug_flag")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  candidate GemCandidate @relation(fields: [candidateId], references: [id])
+
+  @@unique([candidateId, horizon])
+  @@index([chain, tokenAddress, poolAddress])
+  @@map("gem_shadow_ticks")
+}
+
 // ─── Raw Collector Payloads ────────────────────────────────────────────────────
 // Stores the raw API response per pool per cycle.
 // Kept separate from pool_snapshots so the normalised time-series table stays lean

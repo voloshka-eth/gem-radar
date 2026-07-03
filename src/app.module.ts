@@ -7,6 +7,7 @@ import { FileLoggerModule } from './file-logger/file-logger.module';
 import { CollectorModule } from './collector/collector.module';
 import { ReportModule } from './report/report.module';
 import { PaperModule } from './paper/paper.module';
+import { GemModule } from './gem/gem.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { PaperModule } from './paper/paper.module';
     CollectorModule,
     ReportModule,
     PaperModule,
+    GemModule,
   ],
 })
 export class AppModule {}

@@ -96,7 +96,11 @@ describe('CollectorService', () => {
   };
 
   const prismaMock = {
-    token: { upsert: jest.fn().mockResolvedValue(mockToken) },
+    token: {
+      upsert: jest.fn().mockResolvedValue(mockToken),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    deployer: { findUnique: jest.fn().mockResolvedValue(null) },
     pool: {
       upsert: jest.fn().mockResolvedValue(mockPool),
       // null = pool not yet in DB → isNewDiscovery = true (default for tests)
@@ -151,6 +155,8 @@ describe('CollectorService', () => {
     // Reset all mocks between tests
     jest.clearAllMocks();
     prismaMock.token.upsert.mockResolvedValue(mockToken);
+    prismaMock.token.findMany.mockResolvedValue([]);
+    prismaMock.deployer.findUnique.mockResolvedValue(null);
     prismaMock.pool.upsert.mockResolvedValue(mockPool);
     prismaMock.pool.findUnique.mockResolvedValue(null); // default: new pool
     prismaMock.poolSnapshot.create.mockResolvedValue({});
@@ -585,6 +591,38 @@ describe('CollectorService', () => {
         }),
       }),
     );
+  });
+
+  it('deployer reputation gate rejects repeat rugger even when contract risk is SAFE', async () => {
+    const safeWithDeployer: ContractRiskResult = {
+      ...SAFE_RISK,
+      merged: { ...SAFE_RISK.merged, deployerAddress: '0xrugger' },
+    };
+    riskMock.checkToken.mockResolvedValue(safeWithDeployer);
+    prismaMock.deployer.findUnique.mockResolvedValue({
+      deploymentsCount: 3,
+      rugLikeCount: 2,
+    });
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+
+    await service.runCollectionCycle();
+
+    expect(prismaMock.pool.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.contractRiskCheck.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          tokenAddress: '0xdeadbeef',
+          decision: 'CONTRACT_REJECT',
+          rejectReason: 'deployer_repeat_rugger',
+          tokenId: undefined,
+        }),
+      }),
+    );
+
+    const rejectedPath = path.join(tempDir, 'decisions', 'contract_rejected_tokens.csv');
+    expect(fs.existsSync(rejectedPath)).toBe(true);
+    const row = fs.readFileSync(rejectedPath, 'utf8').trim().split('\n')[1];
+    expect(row).toContain('deployer_repeat_rugger');
   });
 
   it('risk engine is NOT called for Stage-0-rejected candidates', async () => {

@@ -291,6 +291,10 @@ export class EvalService {
       slip_pct: slipPct != null ? slipPct.toFixed(6) : '',
       realized_multiple_total: realizedMultipleTotal.toFixed(4),
       note,
+      deployer_address: '',
+      deployer_deployments_count: '',
+      deployer_rug_count: '',
+      outcome_class: '',
     });
   }
 }

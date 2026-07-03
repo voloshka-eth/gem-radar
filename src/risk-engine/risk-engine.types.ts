@@ -1,7 +1,16 @@
 export type ContractDecision = 'CONTRACT_SAFE' | 'CONTRACT_REJECT' | 'CONTRACT_UNKNOWN';
+export type RiskDataStatus =
+  | 'OK'
+  | 'GOPLUS_PARTIAL'
+  | 'GOPLUS_PARSE_FAILED'
+  | 'GOPLUS_UNAVAILABLE'
+  | 'HONEYPOT_ONLY_PARTIAL'
+  | 'ALL_PROVIDERS_UNAVAILABLE';
 
 /** Normalized risk fields from any provider. undefined = no data for that field. */
 export interface NormalizedRiskData {
+  providerStatus?: RiskDataStatus;
+
   // ── Source verification ──────────────────────────────────────────────────────
   verified?: boolean;                // contract source is open-source / verified
 
@@ -30,6 +39,7 @@ export interface NormalizedRiskData {
   // ── Ownership & LP safety ─────────────────────────────────────────────────────
   ownerRenounced?: boolean;          // ownership has been burned/zeroed (undefined if ambiguous)
   lpLockedOrBurned?: boolean;        // ≥50% of LP tokens are on dead/locker addresses
+  deployerAddress?: string;          // creator/deployer address when provider exposes it
 }
 
 export interface ContractRiskResult {
@@ -38,6 +48,7 @@ export interface ContractRiskResult {
   goplusQueried: boolean;
   honeypotQueried: boolean;
   merged: NormalizedRiskData;
+  providerStatus?: RiskDataStatus;
   // true when result was served from Redis cache — caller skips DB persistence
   cacheHit: boolean;
 }

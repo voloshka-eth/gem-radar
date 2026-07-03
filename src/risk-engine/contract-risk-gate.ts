@@ -19,10 +19,10 @@ export function applyContractRiskGate(data: NormalizedRiskData): ContractGateRes
   if (data.honeypot === true) reasons.push('honeypot_detected');
   if (data.canSell === false) reasons.push('cannot_sell');
 
-  // ── Tax ─────────────────────────────────────────────────────────────────────
-  if (data.sellTax !== undefined && data.sellTax > 10)
+  // ── Tax (any non-zero detectable tax → reject) ─────────────────────────────
+  if (data.sellTax !== undefined && data.sellTax > 0)
     reasons.push(`sell_tax_${data.sellTax.toFixed(1)}pct`);
-  if (data.buyTax !== undefined && data.buyTax > 10)
+  if (data.buyTax !== undefined && data.buyTax > 0)
     reasons.push(`buy_tax_${data.buyTax.toFixed(1)}pct`);
 
   // ── Owner capabilities (dangerous) ──────────────────────────────────────────
@@ -84,6 +84,7 @@ export function mergeRiskData(
   };
 
   return {
+    providerStatus:            primary.providerStatus ?? supplementary.providerStatus,
     verified:                 safeWins(primary.verified, supplementary.verified),
     honeypot:                 riskWins(primary.honeypot, supplementary.honeypot),
     canSell:                  safeWins(primary.canSell, supplementary.canSell),
@@ -101,5 +102,6 @@ export function mergeRiskData(
     antiWhaleModifiableRisk:  riskWins(primary.antiWhaleModifiableRisk, supplementary.antiWhaleModifiableRisk),
     ownerRenounced:           safeWins(primary.ownerRenounced, supplementary.ownerRenounced),
     lpLockedOrBurned:         safeWins(primary.lpLockedOrBurned, supplementary.lpLockedOrBurned),
+    deployerAddress:          primary.deployerAddress ?? supplementary.deployerAddress,
   };
 }

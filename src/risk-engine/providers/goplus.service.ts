@@ -27,6 +27,35 @@ const LOCK_TAGS = new Set([
 // LP_LOCK_THRESHOLD = 0.5 means at least 50% of LP must be on dead/locked addresses.
 const LP_LOCK_THRESHOLD = 0.5;
 
+const CRITICAL_GOPLUS_FIELDS: Array<keyof GoPlusTokenResult> = [
+  'is_honeypot',
+  'is_mintable',
+  'is_blacklisted',
+  'is_proxy',
+];
+
+const EXPECTED_GOPLUS_FIELDS: Array<keyof GoPlusTokenResult> = [
+  ...CRITICAL_GOPLUS_FIELDS,
+  'buy_tax',
+  'sell_tax',
+  'can_take_back_ownership',
+  'transfer_pausable',
+  'owner_address',
+];
+
+const TRADE_SIGNAL_FIELDS: Array<keyof GoPlusTokenResult> = [
+  'buy_tax',
+  'sell_tax',
+  'transfer_tax',
+  'cannot_buy',
+  'cannot_sell_all',
+  'is_in_dex',
+  'holder_count',
+  'lp_holders',
+  'dex',
+  'holders',
+];
+
 @Injectable()
 export class GoPlusService {
   private readonly logger = new Logger(GoPlusService.name);
@@ -38,11 +67,19 @@ export class GoPlusService {
   // Anon tier: ~30 req/min → 2 s minimum spacing.
   // TODO: raise to 200 ms once access-token auth is implemented (paid tier is 300 req/min).
   private lastCallAt = 0;
-  private readonly minIntervalMs = 2_000;
+  private minIntervalMs: number;
+  private readonly maxAttempts: number;
+  private readonly retryDelayMs: number;
 
   constructor(private readonly config: ConfigService) {
     this.baseUrl =
       this.config.get<string>('api.goplusBaseUrl') ?? 'https://api.gopluslabs.io';
+    this.minIntervalMs =
+      this.config.get<number>('api.goplusMinIntervalMs') ?? 2_000;
+    this.maxAttempts =
+      Math.max(1, this.config.get<number>('api.goplusMaxAttempts') ?? 2);
+    this.retryDelayMs =
+      this.config.get<number>('api.goplusRetryDelayMs') ?? 2_500;
     this.http = axios.create({ timeout: 10_000 });
     axiosRetry(this.http, { retries: 2, retryDelay: axiosRetry.exponentialDelay });
   }
@@ -70,6 +107,8 @@ export class GoPlusService {
       return null;
     }
 
+    return this.checkTokenWithRetry(chainId, tokenAddress);
+
     await this.throttle();
 
     try {
@@ -88,19 +127,80 @@ export class GoPlusService {
         return null;
       }
 
-      const key = Object.keys(data.result)[0];
+      const key = Object.keys(data.result ?? {})[0];
       if (!key) {
         this.logger.warn(`GoPlus: empty result object for ${tokenAddress}`);
         return null;
       }
 
-      return this.normalize(data.result[key]);
+      return this.normalize(data.result![key], tokenAddress);
     } catch (err) {
       this.logger.warn(
         `GoPlus: request failed for ${tokenAddress} — ${(err as Error).message}`,
       );
       return null;
     }
+  }
+
+  private async checkTokenWithRetry(
+    chainId: string,
+    tokenAddress: string,
+  ): Promise<NormalizedRiskData | null> {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      await this.throttle();
+
+      try {
+        const { data } = await this.http.get<GoPlusApiResponse>(
+          `${this.baseUrl}/api/v1/token_security/${chainId}`,
+          {
+            params: { contract_addresses: tokenAddress.toLowerCase() },
+            // No Authorization header - anon tier until access-token flow is implemented.
+          },
+        );
+
+        if (data.code !== 1 || !data.result) {
+          this.logger.warn(
+            `GoPlus: non-ok response for ${tokenAddress} - code: ${data.code}, msg: ${data.message}`,
+          );
+          if (attempt < this.maxAttempts) {
+            await this.retryDelay(attempt);
+            continue;
+          }
+          return null;
+        }
+
+        const key = Object.keys(data.result)[0];
+        if (!key) {
+          this.logger.warn(`GoPlus: empty result object for ${tokenAddress}`);
+          if (attempt < this.maxAttempts) {
+            await this.retryDelay(attempt);
+            continue;
+          }
+          return null;
+        }
+
+        const normalized = this.normalize(data.result[key], tokenAddress);
+        if (
+          normalized.providerStatus === 'GOPLUS_PARSE_FAILED' &&
+          attempt < this.maxAttempts
+        ) {
+          await this.retryDelay(attempt);
+          continue;
+        }
+        return normalized;
+      } catch (err) {
+        this.logger.warn(
+          `GoPlus: request failed for ${tokenAddress} - ${(err as Error).message}`,
+        );
+        if (attempt < this.maxAttempts) {
+          await this.retryDelay(attempt);
+          continue;
+        }
+        return null;
+      }
+    }
+
+    return null;
   }
 
   private async throttle(): Promise<void> {
@@ -112,7 +212,37 @@ export class GoPlusService {
     this.lastCallAt = Date.now();
   }
 
-  private normalize(r: GoPlusTokenResult): NormalizedRiskData {
+  private async retryDelay(attempt: number): Promise<void> {
+    const wait = this.retryDelayMs * attempt;
+    if (wait > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, wait));
+    }
+  }
+
+  private normalize(r: GoPlusTokenResult, tokenAddress: string): NormalizedRiskData {
+    if (!r || typeof r !== 'object') {
+      this.logger.warn(`GoPlus: malformed token payload for ${tokenAddress}`);
+      return { providerStatus: 'GOPLUS_PARSE_FAILED' };
+    }
+
+    const criticalPresent = CRITICAL_GOPLUS_FIELDS.filter((field) => this.hasValue(r[field]));
+    const tradeOrMetadataPresent = TRADE_SIGNAL_FIELDS.some((field) => this.hasValue(r[field]));
+    if (criticalPresent.length === 0 && !tradeOrMetadataPresent) {
+      this.logger.warn(
+        `GoPlus: parse failed for ${tokenAddress} - critical risk fields missing`,
+      );
+      return { providerStatus: 'GOPLUS_PARSE_FAILED' };
+    }
+
+    const missingExpected = EXPECTED_GOPLUS_FIELDS.filter((field) => !this.hasValue(r[field]));
+    const providerStatus =
+      missingExpected.length > 0 ? 'GOPLUS_PARTIAL' : 'OK';
+    if (providerStatus === 'GOPLUS_PARTIAL') {
+      this.logger.warn(
+        `GoPlus: partial payload for ${tokenAddress} - missing/empty: ${missingExpected.join(', ')}`,
+      );
+    }
+
     const flag = (s?: string): boolean | undefined =>
       s === '1' ? true : s === '0' ? false : undefined;
 
@@ -151,6 +281,7 @@ export class GoPlusService {
           : undefined;
 
     return {
+      providerStatus,
       verified: flag(r.is_open_source),
       honeypot: isHoneypot,
       canSell,
@@ -168,7 +299,16 @@ export class GoPlusService {
       antiWhaleModifiableRisk: flag(r.anti_whale_modifiable),
       ownerRenounced,
       lpLockedOrBurned,
+      deployerAddress: this.normalizeAddress(r.creator_address),
     };
+  }
+
+  private hasValue(value: unknown): boolean {
+    return value !== undefined && value !== null && value !== '';
+  }
+
+  private normalizeAddress(value?: string): string | undefined {
+    return value && value !== '' ? value.toLowerCase() : undefined;
   }
 
   private calcLpLocked(holders?: GoPlusLpHolder[]): boolean | undefined {

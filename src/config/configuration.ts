@@ -29,6 +29,9 @@ export const apiConfig = registerAs('api', () => ({
     process.env.GECKOTERMINAL_BASE_URL ?? 'https://api.geckoterminal.com/api/v2',
   goplusBaseUrl: process.env.GOPLUS_BASE_URL ?? 'https://api.gopluslabs.io',
   goplusApiKey: process.env.GOPLUS_API_KEY,
+  goplusMinIntervalMs: parseInt(process.env.GOPLUS_MIN_INTERVAL_MS ?? '2000', 10),
+  goplusMaxAttempts: parseInt(process.env.GOPLUS_MAX_ATTEMPTS ?? '2', 10),
+  goplusRetryDelayMs: parseInt(process.env.GOPLUS_RETRY_DELAY_MS ?? '2500', 10),
   honeypotBaseUrl: process.env.HONEYPOT_BASE_URL ?? 'https://api.honeypot.is',
 }));
 
@@ -36,6 +39,10 @@ export const collectorConfig = registerAs('collector', () => ({
   pollIntervalMs: parseInt(process.env.COLLECTOR_POLL_INTERVAL_MS ?? '120000', 10),
   newPoolMaxAgeHours: parseInt(process.env.NEW_POOL_MAX_AGE_HOURS ?? '6', 10),
   tokenMaxAgeDays: parseFloat(process.env.TOKEN_MAX_AGE_DAYS ?? '7'),
+  deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
+  deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '2', 10),
+  deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '2', 10),
+  deployerGateMinRugRate: parseFloat(process.env.DEPLOYER_GATE_MIN_RUG_RATE ?? '0.5'),
 }));
 
 // Block-explorer APIs (Etherscan V2 unified API).
@@ -112,6 +119,45 @@ export const paperConfig = registerAs('paper', () => ({
   minPerGroupPostmortem: parseInt(  process.env.PAPER_MIN_PER_GROUP        ?? '30', 10),
 }));
 
+// ── Shadow gem-tracker (OBSERVATION ONLY — never wired into entry/exit) ──
+// Measures the forward-return distribution of the survivor cohort to learn whether
+// the funnel has an x10–x1000 tail. All thresholds are config, not hard-wired.
+export const gemConfig = registerAs('gem', () => ({
+  // FDV-headroom gate: cut dust below the floor; cap entry FDV so x1000 stays geometrically possible.
+  minEntryFdvUsd: parseFloat(process.env.GEM_MIN_ENTRY_FDV_USD ?? '1000'),
+  maxEntryFdvUsd: parseFloat(process.env.GEM_MAX_ENTRY_FDV_USD ?? '50000'),
+  // LP must be ≥ this fraction locked-or-burned to pass the hard gate (undetermined → reject).
+  lpLockedMinFraction: parseFloat(process.env.GEM_LP_LOCKED_MIN_FRACTION ?? '0.9'),
+  // Forward horizons (minutes from t0) at which the shadow tracker snapshots state.
+  // 180 (3h) added to test the "snipe only tokens that survived ≥3h" hypothesis.
+  horizonsMin: (process.env.GEM_HORIZONS_MIN ?? '15,60,180,360,1440,4320').split(',').map((s) => parseInt(s, 10)),
+  // Re-baseline horizon for the snipe report (forward returns measured FROM this mark).
+  snipeBaselineHorizon: process.env.GEM_SNIPE_BASELINE ?? '3h',
+  // Rug threshold for the shadow tracker (reuses the paper engine's notion of "gone").
+  rugLiqUsd: parseFloat(process.env.GEM_RUG_LIQ_USD ?? '50'),
+  // Below this many candidates in a bucket, the outcome report shouts "small sample".
+  minSampleWarn: parseInt(process.env.GEM_MIN_SAMPLE_WARN ?? '30', 10),
+  // Burn sinks — LP sent here is permanently unrecoverable.
+  deadAddresses: [
+    '0x0000000000000000000000000000000000000000',
+    '0x000000000000000000000000000000000000dead',
+  ],
+  // Known LP lockers per chain (lowercased). BEST-EFFORT, UNVERIFIED registry — these
+  // addresses were NOT re-verified on-chain in this build, so treat lock-by-locker as a
+  // softer signal than burn. The RELIABLE path is burn detection (LP held by deadAddresses).
+  // An unknown/unmatched locker means "not detected" → not-locked → reject (conservative).
+  // Set GEM_LOCKERS via env (chain:addr=name,...) or extend here once addresses are confirmed.
+  lockers: {
+    ethereum: {
+      '0x663a5c229c09b049e36dcc11a9b0d4a8eb9db214': 'Unicrypt(UNCX) v2 (UNVERIFIED)',
+      '0xe2fe530c047f2d85298b07d9333c05737f1435fb': 'Team.Finance (UNVERIFIED)',
+    } as Record<string, string>,
+    base: {
+      '0xc4e637d37113192f4f1f060daebd7758de7f4131': 'Unicrypt(UNCX) Base (UNVERIFIED)',
+    } as Record<string, string>,
+  } as Record<string, Record<string, string>>,
+}));
+
 export const telegramConfig = registerAs('telegram', () => ({
   botToken: process.env.TELEGRAM_BOT_TOKEN,
   chatId: process.env.TELEGRAM_CHAT_ID,
@@ -127,6 +173,7 @@ export default [
   collectorConfig,
   scoringConfig,
   paperConfig,
+  gemConfig,
   telegramConfig,
   explorerConfig,
   onchainConfig,

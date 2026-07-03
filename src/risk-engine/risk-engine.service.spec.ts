@@ -16,8 +16,8 @@ const SAFE_DATA: NormalizedRiskData = {
   verified: true,
   honeypot: false,
   canSell: true,
-  buyTax: 1.0,
-  sellTax: 1.0,
+  buyTax: 0,
+  sellTax: 0,
   mintRisk: false,
   blacklistRisk: false,
   pauseRisk: false,
@@ -115,12 +115,13 @@ describe('RiskEngineService — CSV file creation', () => {
     expect(header).toContain('goplus_queried');
     expect(header).toContain('honeypot_queried');
     expect(header).toContain('reject_reasons');
+    expect(header).toContain('risk_status');
     expect(header).toContain('hard_reject');
   });
 
   it('CONTRACT_SAFE — data row contains token address, decision, and queried flags', async () => {
     goplusMock.checkToken.mockResolvedValue(SAFE_DATA);
-    honeypotMock.checkToken.mockResolvedValue({ honeypot: false, buyTax: 0.5, sellTax: 0.5 });
+    honeypotMock.checkToken.mockResolvedValue({ honeypot: false, buyTax: 0, sellTax: 0 });
 
     await service.checkToken('ethereum', '0xdeadbeef', 'GEM', 'Gem Token', 'run-safe-3');
 
@@ -231,6 +232,36 @@ describe('RiskEngineService — CSV file creation', () => {
     expect(result.goplusQueried).toBe(false);
   });
 
+  it('GoPlus parse failure with empty critical fields -> CONTRACT_UNKNOWN, not SAFE', async () => {
+    goplusMock.checkToken.mockResolvedValue({ providerStatus: 'GOPLUS_PARSE_FAILED' });
+    honeypotMock.checkToken.mockResolvedValue({ honeypot: false, canSell: undefined });
+
+    const result = await service.checkToken('base', '0xpartial', 'PART', 'Partial Token', 'run-goplus-partial');
+
+    expect(result.decision).toBe('CONTRACT_UNKNOWN');
+    expect(result.goplusQueried).toBe(true);
+    expect(result.honeypotQueried).toBe(true);
+    expect(result.providerStatus).toBe('GOPLUS_PARSE_FAILED');
+    expect(redisMock.setex).not.toHaveBeenCalled();
+  });
+
+  it('GoPlus partial clean payload -> CONTRACT_UNKNOWN, not SAFE', async () => {
+    goplusMock.checkToken.mockResolvedValue({
+      providerStatus: 'GOPLUS_PARTIAL',
+      honeypot: false,
+      mintRisk: false,
+      blacklistRisk: false,
+      proxyRisk: false,
+    });
+    honeypotMock.checkToken.mockResolvedValue({ honeypot: false, canSell: undefined });
+
+    const result = await service.checkToken('base', '0xpartial2', 'PART2', 'Partial Token 2', 'run-goplus-partial2');
+
+    expect(result.decision).toBe('CONTRACT_UNKNOWN');
+    expect(result.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(redisMock.setex).not.toHaveBeenCalled();
+  });
+
   it('GoPlus fails, Honeypot.is finds honeypot → CONTRACT_REJECT (valid even without GoPlus)', async () => {
     goplusMock.checkToken.mockResolvedValue(null);
     honeypotMock.checkToken.mockResolvedValue({ honeypot: true, canSell: false });
@@ -283,13 +314,13 @@ describe('RiskEngineService — CSV file creation', () => {
     );
   });
 
-  it('cache key is chain-scoped with current version prefix: risk:v2:chain:address', async () => {
+  it('cache key is chain-scoped with current version prefix: risk:v3:chain:address', async () => {
     goplusMock.checkToken.mockResolvedValue(SAFE_DATA);
 
     await service.checkToken('base', '0xtokenb', 'B', 'Base Token', 'run-cache-3');
 
     expect(redisMock.get).toHaveBeenCalledWith(
-      expect.stringMatching(/^risk:v2:base:/),
+      expect.stringMatching(/^risk:v3:base:/),
     );
   });
 

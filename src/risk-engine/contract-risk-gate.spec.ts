@@ -5,8 +5,8 @@ const CLEAN: NormalizedRiskData = {
   verified: true,
   honeypot: false,
   canSell: undefined,
-  buyTax: 1,
-  sellTax: 1,
+  buyTax: 0,
+  sellTax: 0,
   mintRisk: false,
   blacklistRisk: false,
   pauseRisk: false,
@@ -40,20 +40,21 @@ describe('applyContractRiskGate', () => {
     expect(decision).toBe('CONTRACT_SAFE');
   });
 
-  it('rejects sell_tax > 10 % with formatted reason', () => {
+  it('rejects any non-zero sell_tax with formatted reason', () => {
     const { decision, rejectReasons } = applyContractRiskGate({ ...CLEAN, sellTax: 15 });
     expect(decision).toBe('CONTRACT_REJECT');
     expect(rejectReasons).toContain('sell_tax_15.0pct');
   });
 
-  it('rejects buy_tax > 10 % with formatted reason', () => {
+  it('rejects any non-zero buy_tax with formatted reason', () => {
     const { rejectReasons } = applyContractRiskGate({ ...CLEAN, buyTax: 25.5 });
     expect(rejectReasons).toContain('buy_tax_25.5pct');
   });
 
-  it('does NOT reject sell_tax exactly 10 %', () => {
-    const { decision } = applyContractRiskGate({ ...CLEAN, sellTax: 10 });
-    expect(decision).toBe('CONTRACT_SAFE');
+  it('rejects sell_tax exactly 10 %', () => {
+    const { decision, rejectReasons } = applyContractRiskGate({ ...CLEAN, sellTax: 10 });
+    expect(decision).toBe('CONTRACT_REJECT');
+    expect(rejectReasons).toContain('sell_tax_10.0pct');
   });
 
   it('rejects owner_can_mint', () => {

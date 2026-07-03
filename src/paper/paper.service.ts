@@ -172,6 +172,12 @@ export class PaperService {
       final_score: score.finalScore.toFixed(2),
       band: score.band,
       score_confidence: score.scoreConfidence.toFixed(3),
+      deployer_address: token.deployerAddress ?? '',
+      deployer_deployments_count: '',
+      deployer_rug_count: '',
+      lp_locked: '',
+      lp_lock_source: '',
+      lp_lock_fraction: '',
     });
 
     this.logger.log(

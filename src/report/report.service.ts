@@ -94,6 +94,9 @@ export class ReportService implements OnModuleDestroy {
           goplusQueried: true,
           honeypotQueried: true,
           rejectReasons: true,
+          buyTax: true,
+          sellTax: true,
+          canMint: true,
         },
         orderBy: { ts: 'desc' }, // newest first → first-seen per key = latest decision
       }),
@@ -153,6 +156,11 @@ export class ReportService implements OnModuleDestroy {
     const safeCount    = decisionMap['CONTRACT_SAFE'] ?? 0;
     const rejectCount  = decisionMap['CONTRACT_REJECT'] ?? 0;
     const unknownCount = decisionMap['CONTRACT_UNKNOWN'] ?? 0;
+    const gateAlerts = buildContractGateAlerts(
+      dedupedChecks,
+      safeCount,
+      totalGate,
+    );
 
     // ── Liquidity verification stats ───────────────────────────────────────────
     const liqModelHistogram: Record<string, number> = {};
@@ -201,6 +209,14 @@ export class ReportService implements OnModuleDestroy {
       '═══════════════════════════════════════════════════════════',
       '',
     ];
+
+    if (gateAlerts.length > 0) {
+      lines.push(
+        '!!! CONTRACT GATE DATA QUALITY ALERT !!!',
+        ...gateAlerts.map((a) => `  ${a}`),
+        '',
+      );
+    }
 
     // ── Stage 0 ────────────────────────────────────────────────────────────────
     lines.push('STAGE 0 FILTER');
@@ -494,4 +510,39 @@ function parseCsvLine(line: string): string[] {
   }
   fields.push(current);
   return fields;
+}
+
+function buildContractGateAlerts(
+  checks: Array<{
+    goplusQueried: boolean;
+    buyTax: unknown;
+    sellTax: unknown;
+    canMint: unknown;
+  }>,
+  safeCount: number,
+  totalGate: number,
+): string[] {
+  const alerts: string[] = [];
+  if (totalGate === 0) return alerts;
+
+  const safeRate = safeCount / totalGate;
+  if (totalGate >= 20 && safeRate > 0.9) {
+    alerts.push(`SAFE RATE ${(safeRate * 100).toFixed(1)}% > 90% over ${totalGate} gate tokens.`);
+  }
+
+  const queried = checks.filter((c) => c.goplusQueried);
+  if (queried.length < 20) return alerts;
+
+  const taxFilled = queried.filter((c) => c.buyTax != null || c.sellTax != null).length;
+  const mintFilled = queried.filter((c) => c.canMint != null).length;
+  const taxRate = taxFilled / queried.length;
+  const mintRate = mintFilled / queried.length;
+
+  if (taxRate < 0.4) {
+    alerts.push(`GoPlus tax fill rate ${(taxRate * 100).toFixed(1)}% < 40% (${taxFilled}/${queried.length}).`);
+  }
+  if (mintRate < 0.4) {
+    alerts.push(`GoPlus can_mint fill rate ${(mintRate * 100).toFixed(1)}% < 40% (${mintFilled}/${queried.length}).`);
+  }
+  return alerts;
 }
