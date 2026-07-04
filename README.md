@@ -283,9 +283,9 @@ summary rows use `chain = "multi"`. GeckoTerminal rows use the actual chain name
 |---|---|
 | **M1** ✅ | Collectors, Stage 0 gate, DB persistence, CSV logger, 69 tests |
 | **M2A** ✅ | Contract Risk Engine: GoPlus + Honeypot.is, hard-reject gate, `contract_risk_checks` table, 115 tests |
-| M2B | On-chain liquidity verify (viem reads against actual reserves) |
-| M2C | Scoring Engine → finalGemScore |
-| M2D | Paper Trading → open/track/exit simulated positions |
-| M3 | On-chain slippage simulator |
-| M4 | Reporting (daily TXT), Telegram alerts |
-| M5 | Holder distribution, deployer reputation |
+| **M2B** ✅ | On-chain liquidity verify (viem reads against actual reserves) |
+| **M2C** ✅ | Scoring Engine → finalGemScore |
+| **M2D** ✅ | Paper Trading → open/track/exit simulated positions |
+| **M3** ✅ | On-chain slippage simulator |
+| **M4** ✅ | Reporting (daily TXT), Telegram alerts |
+| **M5** ✅ | Holder distribution, deployer reputation |
