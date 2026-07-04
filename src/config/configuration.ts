@@ -57,9 +57,10 @@ export const collectorConfig = registerAs('collector', () => ({
 export const explorerConfig = registerAs('explorer', () => ({
   etherscanBaseUrl: process.env.ETHERSCAN_BASE_URL ?? 'https://api.etherscan.io/v2/api',
   etherscanApiKey: process.env.ETHERSCAN_API_KEY ?? '',
-  // Basescan also routes through the Etherscan V2 unified API (chainid=8453)
+  // Basescan also routes through the Etherscan V2 unified API (chainid=8453).
+  // A single Etherscan V2 key is valid for both chains, so fall back to it.
   basescanBaseUrl: process.env.BASESCAN_BASE_URL ?? 'https://api.etherscan.io/v2/api',
-  basescanApiKey: process.env.BASESCAN_API_KEY ?? '',
+  basescanApiKey: process.env.BASESCAN_API_KEY ?? process.env.ETHERSCAN_API_KEY ?? '',
 }));
 
 // On-chain contract addresses — sourced from official deployment docs.
