@@ -289,6 +289,15 @@ summary rows use `chain = "multi"`. GeckoTerminal rows use the actual chain name
 |---|---|
 | **M1** ✅ | Collectors, Stage 0 gate, DB persistence, CSV logger, 69 tests |
 | **M2A** ✅ | Contract Risk Engine: GoPlus + Honeypot.is, hard-reject gate, `contract_risk_checks` table, 115 tests |
+<<<<<<< HEAD
 | **M3A** ✅ | V2/V3 on-chain liquidity + slippage verification. V4/Aerodrome stable remain unsupported and are not treated as verified. |
 | **M4** ✅ | Scoring + daily TXT reports. Scores are hypotheses, not edge or recommendations. Telegram config exists but alert delivery is not wired. |
 | **M5** ◐ | Paper entries, newest-first on-demand eval, edge/postmortem reports, deployer reputation/blocklist. Holder concentration, wash-trade, smart-wallet, unique-buyer signals are still missing from scoring confidence. |
+=======
+| **M2B** ✅ | On-chain liquidity verify (viem reads against actual reserves) |
+| **M2C** ✅ | Scoring Engine → finalGemScore |
+| **M2D** ✅ | Paper Trading → open/track/exit simulated positions |
+| **M3** ✅ | On-chain slippage simulator |
+| **M4** ✅ | Reporting (daily TXT), Telegram alerts |
+| **M5** ✅ | Holder distribution, deployer reputation |
+>>>>>>> 906dc84ec7beed9d96955510c174170ec1c59251
