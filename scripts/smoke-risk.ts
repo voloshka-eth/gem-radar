@@ -19,13 +19,33 @@ import { RiskEngineService } from '../src/risk-engine/risk-engine.service';
 import { ContractRiskResult, NormalizedRiskData } from '../src/risk-engine/risk-engine.types';
 import { SupportedChain } from '../src/collector/collector.types';
 
+const localEnv: Record<string, string> = {};
+try {
+  for (const line of fs.readFileSync('.env', 'utf8').split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (match) localEnv[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
+  }
+} catch {
+  // .env is optional for CI.
+}
+
+function env(name: string): string | undefined {
+  return process.env[name] ?? localEnv[name];
+}
+
 // ─── Stubs (no-op — do not touch real logs/ or DB) ──────────────────────────
 
 const configStub = {
   get: (key: string): unknown => {
-    const m: Record<string, string> = {
-      'api.goplusBaseUrl':  'https://api.gopluslabs.io',
-      'api.honeypotBaseUrl': 'https://api.honeypot.is',
+    const m: Record<string, string | undefined> = {
+      'api.goplusBaseUrl': env('GOPLUS_BASE_URL') ?? 'https://api.gopluslabs.io',
+      'api.goplusApiKey': env('GOPLUS_API_KEY'),
+      'api.goplusAppKey': env('GOPLUS_APP_KEY') ?? env('GOPLUS_API_KEY'),
+      'api.goplusAppSecret': env('GOPLUS_APP_SECRET'),
+      'api.goplusMinIntervalMs': env('GOPLUS_MIN_INTERVAL_MS') ?? '2000',
+      'api.goplusMaxAttempts': env('GOPLUS_MAX_ATTEMPTS') ?? '2',
+      'api.goplusRetryDelayMs': env('GOPLUS_RETRY_DELAY_MS') ?? '2500',
+      'api.honeypotBaseUrl': env('HONEYPOT_BASE_URL') ?? 'https://api.honeypot.is',
     };
     return m[key];
   },

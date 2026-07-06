@@ -271,6 +271,70 @@ export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
   { id: 'lp_lock_fraction', title: 'lp_lock_fraction' },
 ];
 
+export interface ResearchPaperEntryRow {
+  ts: string;
+  run_id: string;
+  schema_version: string;
+  cohort: string;
+  chain: string;
+  token_address: string;
+  symbol: string;
+  pool_address: string;
+  liquidity_model: string;
+  liquidity_verified: string;
+  risk_status: string;
+  research_reason: string;
+  first_seen_at: string;
+  detection_delay_sec: string;
+  opened_at: string;
+  size_usd: string;
+  spot_price_usd: string;
+  entry_price_effective_usd: string;
+  slippage_pct: string;
+  sandwich_pct: string;
+  gas_usd: string;
+  buy_tax_pct: string;
+  tokens_bought: string;
+  onchain_liq_entry_usd: string;
+  entered: string;
+  not_entered_reason: string;
+  final_score: string;
+  band: string;
+  score_confidence: string;
+}
+
+export const RESEARCH_PAPER_ENTRY_HEADERS: CsvHeader[] = [
+  { id: 'ts', title: 'ts' },
+  { id: 'run_id', title: 'run_id' },
+  { id: 'schema_version', title: 'schema_version' },
+  { id: 'cohort', title: 'cohort' },
+  { id: 'chain', title: 'chain' },
+  { id: 'token_address', title: 'token_address' },
+  { id: 'symbol', title: 'symbol' },
+  { id: 'pool_address', title: 'pool_address' },
+  { id: 'liquidity_model', title: 'liquidity_model' },
+  { id: 'liquidity_verified', title: 'liquidity_verified' },
+  { id: 'risk_status', title: 'risk_status' },
+  { id: 'research_reason', title: 'research_reason' },
+  { id: 'first_seen_at', title: 'first_seen_at' },
+  { id: 'detection_delay_sec', title: 'detection_delay_sec' },
+  { id: 'opened_at', title: 'opened_at' },
+  { id: 'size_usd', title: 'size_usd' },
+  { id: 'spot_price_usd', title: 'spot_price_usd' },
+  { id: 'entry_price_effective_usd', title: 'entry_price_effective_usd' },
+  { id: 'slippage_pct', title: 'slippage_pct' },
+  { id: 'sandwich_pct', title: 'sandwich_pct' },
+  { id: 'gas_usd', title: 'gas_usd' },
+  { id: 'buy_tax_pct', title: 'buy_tax_pct' },
+  { id: 'tokens_bought', title: 'tokens_bought' },
+  { id: 'onchain_liq_entry_usd', title: 'onchain_liq_entry_usd' },
+  { id: 'entered', title: 'entered' },
+  { id: 'not_entered_reason', title: 'not_entered_reason' },
+  { id: 'final_score', title: 'final_score' },
+  { id: 'band', title: 'band' },
+  { id: 'score_confidence', title: 'score_confidence' },
+];
+
 // ─── decisions/position_ticks.csv ─────────────────────────────────────────────
 // M5 extension — one row per OPEN position per `npm run eval` run. COLLECTION ONLY:
 // captures post-t0 rug signals (sellers/buyers, re-run sell simulation) so that, once
@@ -361,6 +425,10 @@ export const PAPER_EXIT_HEADERS: CsvHeader[] = [
   { id: 'slip_pct', title: 'slip_pct' },
   { id: 'realized_multiple_total', title: 'realized_multiple_total' },
   { id: 'note', title: 'note' },
+  { id: 'deployer_address', title: 'deployer_address' },
+  { id: 'deployer_deployments_count', title: 'deployer_deployments_count' },
+  { id: 'deployer_rug_count', title: 'deployer_rug_count' },
+  { id: 'outcome_class', title: 'outcome_class' },
 ];
 
 // ─── raw/contract_risk_checks.csv ─────────────────────────────────────────────
@@ -452,6 +520,129 @@ export const QUARANTINE_TOKEN_HEADERS: CsvHeader[] = [
   { id: 'pool_address', title: 'pool_address' },
   { id: 'dex', title: 'dex' },
   { id: 'status', title: 'status' },
+];
+
+// ─── decisions/research_candidates.csv ───────────────────────────────────────
+// CONTRACT_UNKNOWN tokens with clean trade-side signals. Observation only:
+// these are not SAFE, not scored, not paper-traded, and not buy signals.
+export const RESEARCH_CANDIDATE_CAVEAT =
+  '# Research candidates = CONTRACT_UNKNOWN with no observed hard risk. ' +
+  'NOT CONTRACT_SAFE, NOT scored, NOT paper-traded, NOT a buy signal.';
+
+export interface ResearchCandidateRow {
+  ts: string;
+  run_id: string;
+  schema_version: string;
+  chain: string;
+  token_address: string;
+  token_symbol: string;
+  token_name: string;
+  pool_address: string;
+  dex: string;
+  source: string;
+  status: string;       // WATCH_ONLY
+  reason: string;
+  risk_status: string;
+  honeypot: string;
+  buy_tax: string;
+  sell_tax: string;
+  liquidity_usd: string;
+  fdv_usd: string;
+  vol_1h: string;
+  buys_1h: string;
+  sells_1h: string;
+  tx_count_1h: string;
+}
+
+export const RESEARCH_CANDIDATE_HEADERS: CsvHeader[] = [
+  { id: 'ts', title: 'ts' },
+  { id: 'run_id', title: 'run_id' },
+  { id: 'schema_version', title: 'schema_version' },
+  { id: 'chain', title: 'chain' },
+  { id: 'token_address', title: 'token_address' },
+  { id: 'token_symbol', title: 'token_symbol' },
+  { id: 'token_name', title: 'token_name' },
+  { id: 'pool_address', title: 'pool_address' },
+  { id: 'dex', title: 'dex' },
+  { id: 'source', title: 'source' },
+  { id: 'status', title: 'status' },
+  { id: 'reason', title: 'reason' },
+  { id: 'risk_status', title: 'risk_status' },
+  { id: 'honeypot', title: 'honeypot' },
+  { id: 'buy_tax', title: 'buy_tax' },
+  { id: 'sell_tax', title: 'sell_tax' },
+  { id: 'liquidity_usd', title: 'liquidity_usd' },
+  { id: 'fdv_usd', title: 'fdv_usd' },
+  { id: 'vol_1h', title: 'vol_1h' },
+  { id: 'buys_1h', title: 'buys_1h' },
+  { id: 'sells_1h', title: 'sells_1h' },
+  { id: 'tx_count_1h', title: 'tx_count_1h' },
+];
+
+// CONTRACT_UNKNOWN with clean trade signals AND liquidity_verified=true.
+// This is the moonshot/probe lane: explicitly not CONTRACT_SAFE.
+export const SPECULATIVE_CANDIDATE_CAVEAT =
+  '# Speculative candidates = CONTRACT_UNKNOWN clean trade-side signals + liquidity_verified=true. ' +
+  'NOT CONTRACT_SAFE, not a verified survivor, high risk.';
+
+export interface SpeculativeCandidateRow {
+  ts: string;
+  run_id: string;
+  schema_version: string;
+  cohort: string;
+  chain: string;
+  token_address: string;
+  symbol: string;
+  name: string;
+  pool_address: string;
+  dex: string;
+  source: string;
+  risk_decision: string;
+  risk_status: string;
+  research_reason: string;
+  liquidity_model: string;
+  liquidity_verified: string;
+  onchain_tvl_usd: string;
+  slip_100: string;
+  slip_1000: string;
+  fdv_usd: string;
+  age_days: string;
+  final_score: string;
+  band: string;
+  score_confidence: string;
+  honeypot: string;
+  buy_tax: string;
+  sell_tax: string;
+}
+
+export const SPECULATIVE_CANDIDATE_HEADERS: CsvHeader[] = [
+  { id: 'ts', title: 'ts' },
+  { id: 'run_id', title: 'run_id' },
+  { id: 'schema_version', title: 'schema_version' },
+  { id: 'cohort', title: 'cohort' },
+  { id: 'chain', title: 'chain' },
+  { id: 'token_address', title: 'token_address' },
+  { id: 'symbol', title: 'symbol' },
+  { id: 'name', title: 'name' },
+  { id: 'pool_address', title: 'pool_address' },
+  { id: 'dex', title: 'dex' },
+  { id: 'source', title: 'source' },
+  { id: 'risk_decision', title: 'risk_decision' },
+  { id: 'risk_status', title: 'risk_status' },
+  { id: 'research_reason', title: 'research_reason' },
+  { id: 'liquidity_model', title: 'liquidity_model' },
+  { id: 'liquidity_verified', title: 'liquidity_verified' },
+  { id: 'onchain_tvl_usd', title: 'onchain_tvl_usd' },
+  { id: 'slip_100', title: 'slip_100' },
+  { id: 'slip_1000', title: 'slip_1000' },
+  { id: 'fdv_usd', title: 'fdv_usd' },
+  { id: 'age_days', title: 'age_days' },
+  { id: 'final_score', title: 'final_score' },
+  { id: 'band', title: 'band' },
+  { id: 'score_confidence', title: 'score_confidence' },
+  { id: 'honeypot', title: 'honeypot' },
+  { id: 'buy_tax', title: 'buy_tax' },
+  { id: 'sell_tax', title: 'sell_tax' },
 ];
 
 // ─── decisions/contract_rejected_tokens.csv ───────────────────────────────────

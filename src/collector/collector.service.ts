@@ -28,6 +28,13 @@ type CandidateProcessingResult = {
   riskResult: ContractRiskResult;
 };
 
+type TokenProbe = { chain: SupportedChain; tokenAddress: string };
+type ResearchEvaluation = {
+  liq: LiquidityCheckResult;
+  ageDays: number | null;
+  score: ScoreResult;
+};
+
 @Injectable()
 export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CollectorService.name);
@@ -40,10 +47,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly seenAcrossCycles = new Set<string>();
 
   private readonly enabledChains: SupportedChain[];
+  private readonly autoStart: boolean;
   private readonly pollIntervalMs: number;
   private readonly stage0Config: Stage0Config;
   private readonly tokenMaxAgeDays: number;
+  private readonly tokenAgeHardGateEnabled: boolean;
+  private readonly promoteCleanUnknownEnabled: boolean;
   private readonly deployerGateEnabled: boolean;
+  private readonly blockedDeployers: Set<string>;
+  private readonly manualProbeTokens: TokenProbe[];
 
   constructor(
     private readonly config: ConfigService,
@@ -61,6 +73,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     this.enabledChains = (
       this.config.get<string[]>('chain.enabledChains') ?? ['ethereum', 'base']
     ) as SupportedChain[];
+    this.autoStart =
+      this.config.get<boolean>('collector.autoStart') ?? true;
 
     this.pollIntervalMs =
       this.config.get<number>('collector.pollIntervalMs') ?? 120_000;
@@ -79,13 +93,30 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       moonshotMinBuys1h: this.config.get<number>('collector.moonshotMinBuys1h') ?? 15,
     };
     this.tokenMaxAgeDays = this.config.get<number>('collector.tokenMaxAgeDays') ?? 7;
+    this.tokenAgeHardGateEnabled =
+      this.config.get<boolean>('collector.tokenAgeHardGateEnabled') ?? false;
+    this.promoteCleanUnknownEnabled =
+      this.config.get<boolean>('collector.promoteCleanUnknownEnabled') ?? false;
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
+    this.blockedDeployers = new Set(
+      (this.config.get<TokenProbe[]>('collector.blockedDeployers') ?? [])
+        .map((probe) => `${probe.chain}:${probe.tokenAddress.toLowerCase()}`),
+    );
+    this.manualProbeTokens =
+      (this.config.get<TokenProbe[]>('collector.manualProbeTokens') ?? [])
+        .filter((probe): probe is TokenProbe =>
+          this.enabledChains.includes(probe.chain) && Boolean(probe.tokenAddress),
+        );
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
   onModuleInit(): void {
+    if (!this.autoStart) {
+      this.logger.log('Collector autostart disabled');
+      return;
+    }
     this.collectInterval = setInterval(
       () => void this.runCollectionCycle(),
       this.pollIntervalMs,
@@ -160,7 +191,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         if (!gate.pass) {
           rejected++;
           this.logRejection(candidate, 'stage0', gate.reason!, runId);
-        } else if (await this.isTokenTooOld(candidate, runId)) {
+        } else if (await this.shouldRejectForTokenAge(candidate, runId)) {
           rejected++;
         } else {
           if (gate.lane === 'moonshot_probe') this.logMoonshotProbe(candidate);
@@ -175,7 +206,19 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     // ── DexScreener supplementary pass ──
-    const dsAddresses = await this.dexScreener.getLatestProfileAddresses(this.enabledChains);
+    const dsProfileAddresses = await this.dexScreener.getLatestProfileAddresses(this.enabledChains);
+    const dsBoostAddresses = await this.dexScreener.getLatestBoostAddresses(this.enabledChains);
+    const dsTopBoostAddresses = await this.dexScreener.getTopBoostAddresses(this.enabledChains);
+    const dsCommunityAddresses = await this.dexScreener.getLatestCommunityTakeoverAddresses(this.enabledChains);
+    const dsAdAddresses = await this.dexScreener.getLatestAdAddresses(this.enabledChains);
+    const dsAddresses = this.dedupeTokenProbes([
+      ...dsProfileAddresses,
+      ...dsBoostAddresses,
+      ...dsTopBoostAddresses,
+      ...dsCommunityAddresses,
+      ...dsAdAddresses,
+      ...this.manualProbeTokens,
+    ]);
     const dsCandidates = await this.dexScreener.getPairsForTokens(dsAddresses);
     const dsFiltered = filterDuplicates(dsCandidates, seenThisCycle);
 
@@ -183,11 +226,25 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       run_id: runId,
       ts: new Date().toISOString(),
       source: 'dexscreener',
+      profile_addresses: dsProfileAddresses.length,
+      boost_addresses: dsBoostAddresses.length,
+      top_boost_addresses: dsTopBoostAddresses.length,
+      community_takeover_addresses: dsCommunityAddresses.length,
+      ad_addresses: dsAdAddresses.length,
+      manual_addresses: this.manualProbeTokens.length,
+      token_addresses: dsAddresses.length,
       raw_count: dsCandidates.length,
       deduped_count: dsFiltered.length,
     });
     await this.storeRawPayload(runId, 'multi', 'dexscreener', {
       payload_type: 'cycle_summary',
+      profile_addresses: dsProfileAddresses.length,
+      boost_addresses: dsBoostAddresses.length,
+      top_boost_addresses: dsTopBoostAddresses.length,
+      community_takeover_addresses: dsCommunityAddresses.length,
+      ad_addresses: dsAdAddresses.length,
+      manual_addresses: this.manualProbeTokens.length,
+      token_addresses_count: dsAddresses.length,
       raw_count: dsCandidates.length,
       deduped_count: dsFiltered.length,
       token_addresses: dsFiltered.map((c) => c.token.tokenAddress).slice(0, 100),
@@ -202,7 +259,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       if (!gate.pass) {
         rejected++;
         this.logRejection(candidate, 'stage0', gate.reason!, runId);
-      } else if (await this.isTokenTooOld(candidate, runId)) {
+      } else if (await this.shouldRejectForTokenAge(candidate, runId)) {
         rejected++;
       } else {
         if (gate.lane === 'moonshot_probe') this.logMoonshotProbe(candidate);
@@ -244,10 +301,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     this.enrichCandidateDeployer(candidate, riskResult);
 
-    if (riskResult.decision === 'CONTRACT_SAFE') {
-      const deployerGateHit = await this.checkDeployerReputation(candidate);
-      if (deployerGateHit) {
-        riskResult = this.rejectForDeployerReputation(riskResult, deployerGateHit);
+    if (riskResult.decision !== 'CONTRACT_REJECT') {
+      const deployerReject = await this.checkDeployerReject(candidate);
+      if (deployerReject) {
+        riskResult = deployerReject.kind === 'blocklist'
+          ? this.rejectForBlockedDeployer(riskResult, deployerReject.address)
+          : this.rejectForDeployerReputation(riskResult, deployerReject.summary);
       }
     }
 
@@ -260,6 +319,20 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (riskResult.decision === 'CONTRACT_UNKNOWN') {
+      let researchEvaluation: ResearchEvaluation | null = null;
+      if (this.shouldLogResearchCandidate(candidate, riskResult)) {
+        this.logResearchCandidate(candidate, riskResult, runId);
+        researchEvaluation = await this.recordResearchPaperEntry(candidate, riskResult, runId);
+        const promoted = await this.tryPromoteCleanUnknownCandidate(
+          candidate,
+          riskResult,
+          runId,
+          researchEvaluation,
+        );
+        if (promoted) {
+          return { outcome: 'SAFE', riskResult };
+        }
+      }
       this.logQuarantine(candidate, runId);
       await this.persistQuarantine(candidate, runId);
       if (!riskResult.cacheHit) {
@@ -289,6 +362,112 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       }
     }
     return { outcome: 'SAFE', riskResult };
+  }
+
+  private async recordResearchPaperEntry(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+    runId: string,
+  ): Promise<ResearchEvaluation | null> {
+    const { pool, token } = candidate;
+    try {
+      const liq = await this.liquidityVerifier.verify(pool, token.decimals);
+      const ageDays = await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
+      const score = this.scoreCandidate(candidate, liq, ageDays, 'Research score');
+
+      await this.paper.recordResearchEntry({
+        pool,
+        token,
+        liq,
+        score,
+        ageDays,
+        runId,
+        buyTax: riskResult.merged.buyTax,
+        riskStatus: riskResult.providerStatus ?? riskResult.merged.providerStatus ?? '',
+        researchReason: 'contract_unknown_clean_trade_signals',
+      });
+
+      if (liq.liquidityVerified === true && score.band !== 'reject_band') {
+        this.logSpeculativeCandidate(candidate, riskResult, runId, liq, ageDays, score);
+      }
+      return { liq, ageDays, score };
+    } catch (err) {
+      this.logger.warn(
+        `Research paper entry failed for ${pool.chain}:${token.tokenAddress} - ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  private async tryPromoteCleanUnknownCandidate(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+    runId: string,
+    evaluation: ResearchEvaluation | null,
+  ): Promise<boolean> {
+    if (!evaluation) return false;
+    if (!this.shouldPromoteCleanUnknownCandidate(riskResult, evaluation.liq, evaluation.score)) {
+      return false;
+    }
+
+    const { pool, token } = candidate;
+    const persisted = await this.persistCandidate(candidate, runId, riskResult, evaluation.liq);
+    if (!persisted) return false;
+
+    if (persisted.isNewDiscovery) {
+      this.logNewPool(candidate, runId, 'CONTRACT_UNKNOWN_PROMOTED_CLEAN_PARTIAL');
+    }
+    this.logPoolSnapshot(candidate, runId);
+    this.logLiquiditySnapshot(candidate, runId, evaluation.liq);
+    this.logCandidate(candidate, runId, evaluation.liq, evaluation.ageDays);
+    await this.storeScore(runId, candidate, persisted.id, evaluation.liq.liquidityModel, evaluation.score);
+    this.logScore(runId, candidate, evaluation.liq.liquidityModel, evaluation.score);
+    await this.paper.recordEntry({
+      pool,
+      token,
+      liq: evaluation.liq,
+      score: evaluation.score,
+      ageDays: evaluation.ageDays,
+      tokenId: persisted.id,
+      poolId: persisted.poolId,
+      runId,
+      buyTax: riskResult.merged.buyTax,
+    });
+
+    this.logger.log(
+      `Promoted clean partial candidate: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
+      `risk=${riskResult.providerStatus ?? riskResult.merged.providerStatus ?? 'CONTRACT_UNKNOWN'} ` +
+      `score=${evaluation.score.finalScore} band=${evaluation.score.band}`,
+    );
+    return true;
+  }
+
+  private shouldPromoteCleanUnknownCandidate(
+    riskResult: ContractRiskResult,
+    liq: LiquidityCheckResult,
+    score: ScoreResult,
+  ): boolean {
+    if (!this.promoteCleanUnknownEnabled) return false;
+    if (riskResult.decision !== 'CONTRACT_UNKNOWN') return false;
+    if (riskResult.rejectReasons.length > 0) return false;
+    if (liq.liquidityVerified !== true) return false;
+    if (score.band === 'reject_band') return false;
+
+    const status = riskResult.providerStatus ?? riskResult.merged.providerStatus;
+    if (status !== 'GOPLUS_PARTIAL' && status !== 'GOPLUS_TRADE_ONLY_PARTIAL') {
+      return false;
+    }
+
+    const m = riskResult.merged;
+    if (m.honeypot !== false && m.canSell !== true) return false;
+    if (m.canSell === false) return false;
+    if (m.mintRisk === true || m.blacklistRisk === true || m.pauseRisk === true || m.proxyRisk === true) {
+      return false;
+    }
+    if (m.sellTax !== undefined && m.sellTax > 0) return false;
+    if (m.buyTax !== undefined && m.buyTax > 0) return false;
+
+    return true;
   }
 
   private enrichCandidateDeployer(
@@ -321,17 +500,42 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async checkDeployerReputation(
+  private rejectForBlockedDeployer(
+    riskResult: ContractRiskResult,
+    address: string,
+  ): ContractRiskResult {
+    this.logger.warn(`Blocked deployer gate: ${address} rejected by local blocklist`);
+    return {
+      ...riskResult,
+      decision: 'CONTRACT_REJECT',
+      rejectReasons: [...riskResult.rejectReasons, 'deployer_blocklisted'],
+      merged: {
+        ...riskResult.merged,
+        deployerAddress: address,
+      },
+    };
+  }
+
+  private async checkDeployerReject(
     candidate: CollectorResult,
-  ): Promise<DeployerReputationSummary | null> {
+  ): Promise<
+    | { kind: 'blocklist'; address: string }
+    | { kind: 'reputation'; summary: DeployerReputationSummary }
+    | null
+  > {
     if (!this.deployerGateEnabled) return null;
 
     const address = candidate.token.deployerAddress?.toLowerCase();
     if (!address) return null;
+    if (this.blockedDeployers.has(`${candidate.token.chain}:${address}`)) {
+      return { kind: 'blocklist', address };
+    }
 
     try {
       const summary = await this.deployerReputation.summarize(candidate.token.chain, address);
-      return summary && this.deployerReputation.isRepeatRugger(summary) ? summary : null;
+      return summary && this.deployerReputation.isRepeatRugger(summary)
+        ? { kind: 'reputation', summary }
+        : null;
     } catch (err) {
       this.logger.warn(
         `Deployer reputation lookup failed for ${candidate.token.chain}:${address} - ${(err as Error).message}`,
@@ -339,6 +543,36 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     return null;
+  }
+
+  private shouldLogResearchCandidate(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+  ): boolean {
+    if (riskResult.decision !== 'CONTRACT_UNKNOWN') return false;
+    if (riskResult.rejectReasons.length > 0) return false;
+
+    const m = riskResult.merged;
+    if (m.honeypot === true || m.canSell === false) return false;
+    if (
+      m.mintRisk === true ||
+      m.blacklistRisk === true ||
+      m.pauseRisk === true ||
+      m.proxyRisk === true
+    ) {
+      return false;
+    }
+    if (m.sellTax !== undefined && m.sellTax >= 10) return false;
+    if (m.buyTax !== undefined && m.buyTax >= 10) return false;
+
+    const hasCleanTradeSignal =
+      m.honeypot === false ||
+      m.canSell === true ||
+      m.sellTax !== undefined ||
+      m.buyTax !== undefined;
+    if (!hasCleanTradeSignal) return false;
+
+    return (candidate.pool.liquidityUsd ?? 0) > 0 && (candidate.pool.fdvUsd ?? 0) > 0;
   }
 
   private emitContractGateSanityAlert(runId: string, results: ContractRiskResult[]): void {
@@ -505,6 +739,20 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         `Quarantine DB write failed for ${pool.chain}:${token.tokenAddress} — ${(err as Error).message}`,
       );
     }
+  }
+
+  private dedupeTokenProbes(probes: TokenProbe[]): TokenProbe[] {
+    const seen = new Set<string>();
+    const out: TokenProbe[] = [];
+    for (const probe of probes) {
+      const tokenAddress = probe.tokenAddress?.toLowerCase();
+      if (!tokenAddress) continue;
+      const key = `${probe.chain}:${tokenAddress}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ chain: probe.chain, tokenAddress });
+    }
+    return out;
   }
 
   private async storeRiskCheck(
@@ -711,7 +959,83 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   // ── Token-age gate (M3A) ──────────────────────────────────────────────────────
   // Returns true if the token is definitely older than TOKEN_MAX_AGE_DAYS.
   // On error (unknown age) returns false — let it through.
-  private async isTokenTooOld(candidate: CollectorResult, runId: string): Promise<boolean> {
+  private logResearchCandidate(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+    runId: string,
+  ): void {
+    const { token, pool } = candidate;
+    const m = riskResult.merged;
+    this.fileLogger.logResearchCandidate({
+      ts: new Date().toISOString(),
+      run_id: runId,
+      schema_version: CSV_SCHEMA_VERSION,
+      chain: pool.chain,
+      token_address: token.tokenAddress,
+      token_symbol: token.symbol ?? '',
+      token_name: token.name ?? '',
+      pool_address: pool.poolAddress,
+      dex: pool.dex,
+      source: pool.source,
+      status: 'WATCH_ONLY',
+      reason: 'contract_unknown_clean_trade_signals',
+      risk_status: riskResult.providerStatus ?? m.providerStatus ?? '',
+      honeypot: m.honeypot?.toString() ?? '',
+      buy_tax: m.buyTax?.toFixed(2) ?? '',
+      sell_tax: m.sellTax?.toFixed(2) ?? '',
+      liquidity_usd: pool.liquidityUsd?.toString() ?? '',
+      fdv_usd: pool.fdvUsd?.toString() ?? '',
+      vol_1h: pool.vol1h?.toString() ?? '',
+      buys_1h: pool.buys1h?.toString() ?? '',
+      sells_1h: pool.sells1h?.toString() ?? '',
+      tx_count_1h: pool.txCount1h?.toString() ?? '',
+    });
+  }
+
+  private logSpeculativeCandidate(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+    runId: string,
+    liq: LiquidityCheckResult,
+    ageDays: number | null,
+    score: ScoreResult,
+  ): void {
+    const { token, pool } = candidate;
+    const m = riskResult.merged;
+    this.fileLogger.logSpeculativeCandidate({
+      ts: new Date().toISOString(),
+      run_id: runId,
+      schema_version: CSV_SCHEMA_VERSION,
+      cohort: 'CONTRACT_UNKNOWN_LIQUIDITY_VERIFIED',
+      chain: pool.chain,
+      token_address: token.tokenAddress,
+      symbol: token.symbol ?? '',
+      name: token.name ?? '',
+      pool_address: pool.poolAddress,
+      dex: pool.dex,
+      source: pool.source,
+      risk_decision: riskResult.decision,
+      risk_status: riskResult.providerStatus ?? m.providerStatus ?? '',
+      research_reason: 'contract_unknown_clean_trade_signals',
+      liquidity_model: liq.liquidityModel,
+      liquidity_verified: String(liq.liquidityVerified),
+      onchain_tvl_usd: liq.onchainTvlUsd?.toFixed(2) ?? '',
+      slip_100: liq.slip100?.toFixed(6) ?? '',
+      slip_1000: liq.slip1000?.toFixed(6) ?? '',
+      fdv_usd: pool.fdvUsd?.toFixed(0) ?? '',
+      age_days: ageDays != null ? ageDays.toFixed(2) : '',
+      final_score: score.finalScore.toFixed(2),
+      band: score.band,
+      score_confidence: score.scoreConfidence.toFixed(3),
+      honeypot: m.honeypot?.toString() ?? '',
+      buy_tax: m.buyTax?.toFixed(2) ?? '',
+      sell_tax: m.sellTax?.toFixed(2) ?? '',
+    });
+  }
+
+  private async shouldRejectForTokenAge(candidate: CollectorResult, runId: string): Promise<boolean> {
+    if (!this.tokenAgeHardGateEnabled) return false;
+
     const { token, pool } = candidate;
     const ageDays = await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
     if (ageDays === null) return false; // unknown age ≠ old
@@ -800,9 +1124,37 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     tokenId: string,
     ageDays: number | null,
   ): Promise<ScoreResult> {
-    const { token, pool } = candidate;
+    const result = this.scoreCandidate(candidate, liq, ageDays, 'Score');
+    await this.storeScore(runId, candidate, tokenId, liq.liquidityModel, result);
+    this.logScore(runId, candidate, liq.liquidityModel, result);
+    return result;
+  }
 
-    const snapshot: ScoreSnapshot = {
+  private scoreCandidate(
+    candidate: CollectorResult,
+    liq: LiquidityCheckResult,
+    ageDays: number | null,
+    label: string,
+  ): ScoreResult {
+    const { token, pool } = candidate;
+    const result = this.scoring.score(this.buildScoreSnapshot(candidate, liq, ageDays));
+
+    this.logger.log(
+      `${label}: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
+      `final=${result.finalScore} band=${result.band} ` +
+      `confidence=${result.scoreConfidence} present=[${result.componentsPresent.join(',')}]` +
+      `${result.componentsMissing.length ? ` missing=[${result.componentsMissing.join(',')}]` : ''}`,
+    );
+    return result;
+  }
+
+  private buildScoreSnapshot(
+    candidate: CollectorResult,
+    liq: LiquidityCheckResult,
+    ageDays: number | null,
+  ): ScoreSnapshot {
+    const { pool } = candidate;
+    return {
       liquidityModel:       liq.liquidityModel,
       onchainTvlUsd:        liq.onchainTvlUsd,
       executableDepthUsd:   liq.executableDepthUsd,
@@ -820,19 +1172,6 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       buys1h:               pool.buys1h  ?? null,
       sells1h:              pool.sells1h ?? null,
     };
-
-    const result = this.scoring.score(snapshot);
-
-    this.logger.log(
-      `Score: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
-      `final=${result.finalScore} band=${result.band} ` +
-      `confidence=${result.scoreConfidence} present=[${result.componentsPresent.join(',')}]` +
-      `${result.componentsMissing.length ? ` missing=[${result.componentsMissing.join(',')}]` : ''}`,
-    );
-
-    await this.storeScore(runId, candidate, tokenId, liq.liquidityModel, result);
-    this.logScore(runId, candidate, liq.liquidityModel, result);
-    return result;
   }
 
   private async storeScore(

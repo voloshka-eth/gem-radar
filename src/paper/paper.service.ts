@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { FileLoggerService } from '../file-logger/file-logger.service';
 import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
-import type { CandidateResult } from './paper.types';
+import type { CandidateResult, ResearchCandidatePaperResult } from './paper.types';
 import { modelEntry, slipForSize, EntryParams } from './fills';
 
 /** A tax value may arrive as a fraction (0.05) or a percent (5). Normalize to a fraction. */
@@ -183,6 +183,63 @@ export class PaperService {
     this.logger.log(
       `Paper entry: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
       `${fill.entered ? `OPEN size=$${sizeUsd} effPx=${fill.effectivePriceUsd?.toExponential(4)} slip=${((fill.slipPct ?? 0) * 100).toFixed(2)}%` : `NOT_ENTERED (${fill.reason})`}`,
+    );
+  }
+
+  async recordResearchEntry(c: ResearchCandidatePaperResult): Promise<void> {
+    const { pool, token, liq, score, runId, buyTax, riskStatus, researchReason } = c;
+
+    const sizeUsd      = this.config.get<number>('paper.positionSizeUsd') ?? 20;
+    const delaySec     = this.config.get<number>('paper.detectionDelaySec') ?? 300;
+    const sandwichPct  = this.config.get<number>('paper.sandwichPct') ?? 0.01;
+    const gasUsd       = this.config.get<number>('paper.gasUsd') ?? 1.5;
+    const maxEntrySlip = this.config.get<number>('paper.maxEntrySlipPct') ?? 0.5;
+
+    const firstSeenAt = new Date();
+    const openedAt = new Date(firstSeenAt.getTime() + delaySec * 1000);
+    const entrySlip = slipForSize(sizeUsd, {
+      slip50: liq.slip50, slip100: liq.slip100, slip500: liq.slip500, slip1000: liq.slip1000,
+    });
+    const buyTaxPct = taxFraction(buyTax);
+    const params: EntryParams = { sizeUsd, sandwichPct, gasUsd, buyTaxPct, maxEntrySlipPct: maxEntrySlip };
+    const fill = modelEntry(liq.spotPriceUsd ?? 0, entrySlip, params);
+
+    this.fileLogger.logResearchPaperEntry({
+      ts: new Date().toISOString(),
+      run_id: runId,
+      schema_version: CSV_SCHEMA_VERSION,
+      cohort: 'CONTRACT_UNKNOWN_RESEARCH',
+      chain: pool.chain,
+      token_address: token.tokenAddress,
+      symbol: token.symbol ?? '',
+      pool_address: pool.poolAddress,
+      liquidity_model: liq.liquidityModel,
+      liquidity_verified: String(liq.liquidityVerified),
+      risk_status: riskStatus,
+      research_reason: researchReason,
+      first_seen_at: firstSeenAt.toISOString(),
+      detection_delay_sec: String(delaySec),
+      opened_at: openedAt.toISOString(),
+      size_usd: sizeUsd.toFixed(2),
+      spot_price_usd: liq.spotPriceUsd != null ? liq.spotPriceUsd.toExponential(8) : '',
+      entry_price_effective_usd: fill.effectivePriceUsd != null ? fill.effectivePriceUsd.toExponential(8) : '',
+      slippage_pct: fill.slipPct != null ? fill.slipPct.toFixed(6) : '',
+      sandwich_pct: sandwichPct.toFixed(6),
+      gas_usd: gasUsd.toFixed(2),
+      buy_tax_pct: buyTaxPct.toFixed(6),
+      tokens_bought: fill.tokensBought != null ? fill.tokensBought.toExponential(8) : '',
+      onchain_liq_entry_usd: liq.onchainTvlUsd != null ? liq.onchainTvlUsd.toFixed(2) : '',
+      entered: String(fill.entered),
+      not_entered_reason: fill.reason ?? '',
+      final_score: score.finalScore.toFixed(2),
+      band: score.band,
+      score_confidence: score.scoreConfidence.toFixed(3),
+    });
+
+    this.logger.log(
+      `Research paper entry: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
+      `${fill.entered ? `OPEN_MODEL size=$${sizeUsd} effPx=${fill.effectivePriceUsd?.toExponential(4)} slip=${((fill.slipPct ?? 0) * 100).toFixed(2)}%` : `NOT_ENTERED (${fill.reason})`} ` +
+      `risk=${riskStatus}`,
     );
   }
 }

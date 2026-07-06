@@ -2,7 +2,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
 import axiosRetry from 'axios-retry';
-import { GoPlusApiResponse, GoPlusLpHolder, GoPlusTokenResult } from './goplus.types';
+import { createHash } from 'crypto';
+import {
+  GoPlusAccessTokenResponse,
+  GoPlusApiResponse,
+  GoPlusLpHolder,
+  GoPlusTokenResult,
+} from './goplus.types';
 import { NormalizedRiskData } from '../risk-engine.types';
 import { SupportedChain } from '../../collector/collector.types';
 
@@ -19,11 +25,18 @@ const DEAD_LP_ADDRESSES = new Set([
 
 // Tags GoPlus uses for known time-locks and burn addresses.
 const LOCK_TAGS = new Set([
-  'Dead Wallet', 'Burned', 'Unicrypt', 'Team Finance', 'UNCX',
-  'PinkLock', 'DxSale', 'Mudra', 'TrustSwap',
+  'Dead Wallet',
+  'Burned',
+  'Unicrypt',
+  'Team Finance',
+  'UNCX',
+  'PinkLock',
+  'DxSale',
+  'Mudra',
+  'TrustSwap',
 ]);
 
-// GoPlus lp_holders[].percent is a decimal fraction (e.g. "0.95" = 95%), not a percentage.
+// GoPlus lp_holders[].percent is a decimal fraction (e.g. "0.95" = 95%).
 // LP_LOCK_THRESHOLD = 0.5 means at least 50% of LP must be on dead/locked addresses.
 const LP_LOCK_THRESHOLD = 0.5;
 
@@ -61,11 +74,13 @@ export class GoPlusService {
   private readonly logger = new Logger(GoPlusService.name);
   private readonly http: AxiosInstance;
   private readonly baseUrl: string;
-  // TODO: add private readonly appKey/appSecret here once access-token flow is implemented
+  private readonly appKey?: string;
+  private readonly appSecret?: string;
+  private accessToken?: string;
+  private accessTokenExpiresAt = 0;
+  private authFailedUntil = 0;
 
-  // Per-instance rate limiter.
-  // Anon tier: ~30 req/min → 2 s minimum spacing.
-  // TODO: raise to 200 ms once access-token auth is implemented (paid tier is 300 req/min).
+  // Keep conservative free-plan spacing unless explicitly overridden.
   private lastCallAt = 0;
   private minIntervalMs: number;
   private readonly maxAttempts: number;
@@ -74,6 +89,10 @@ export class GoPlusService {
   constructor(private readonly config: ConfigService) {
     this.baseUrl =
       this.config.get<string>('api.goplusBaseUrl') ?? 'https://api.gopluslabs.io';
+    this.appKey =
+      this.config.get<string>('api.goplusAppKey') ??
+      this.config.get<string>('api.goplusApiKey');
+    this.appSecret = this.config.get<string>('api.goplusAppSecret');
     this.minIntervalMs =
       this.config.get<number>('api.goplusMinIntervalMs') ?? 2_000;
     this.maxAttempts =
@@ -88,14 +107,9 @@ export class GoPlusService {
    * Query GoPlus token security for a single address.
    * Returns normalized risk data, or null if the request failed / response was malformed.
    *
-   * Auth (TODO): GoPlus requires an access-token obtained by signing:
-   *   sha1(GOPLUS_APP_KEY + unix_time_seconds + GOPLUS_APP_SECRET)
-   *   → POST /api/v1/token_security/support/access_token
-   *   → cache the returned access_token (TTL ~59 s)
-   *   → send as Authorization header on token_security requests.
-   * Until that flow is implemented, requests run on the anon tier (30 req/min).
-   * Do NOT send GOPLUS_API_KEY directly — a raw key in Authorization returns 401,
-   * which is worse than no header at all (anon tier continues to work without it).
+   * Auth: GoPlus access-token is sha1(GOPLUS_APP_KEY + unix_time + GOPLUS_APP_SECRET).
+   * The access token is cached and sent as Authorization. If auth fails, keep running
+   * anonymous instead of sending a raw API key as Authorization.
    */
   async checkToken(
     chain: SupportedChain,
@@ -108,38 +122,6 @@ export class GoPlusService {
     }
 
     return this.checkTokenWithRetry(chainId, tokenAddress);
-
-    await this.throttle();
-
-    try {
-      const { data } = await this.http.get<GoPlusApiResponse>(
-        `${this.baseUrl}/api/v1/token_security/${chainId}`,
-        {
-          params: { contract_addresses: tokenAddress.toLowerCase() },
-          // No Authorization header — anon tier until access-token flow is implemented.
-        },
-      );
-
-      if (data.code !== 1 || !data.result) {
-        this.logger.warn(
-          `GoPlus: non-ok response for ${tokenAddress} — code: ${data.code}, msg: ${data.message}`,
-        );
-        return null;
-      }
-
-      const key = Object.keys(data.result ?? {})[0];
-      if (!key) {
-        this.logger.warn(`GoPlus: empty result object for ${tokenAddress}`);
-        return null;
-      }
-
-      return this.normalize(data.result![key], tokenAddress);
-    } catch (err) {
-      this.logger.warn(
-        `GoPlus: request failed for ${tokenAddress} — ${(err as Error).message}`,
-      );
-      return null;
-    }
   }
 
   private async checkTokenWithRetry(
@@ -150,11 +132,12 @@ export class GoPlusService {
       await this.throttle();
 
       try {
+        const authHeaders = await this.authHeaders();
         const { data } = await this.http.get<GoPlusApiResponse>(
           `${this.baseUrl}/api/v1/token_security/${chainId}`,
           {
             params: { contract_addresses: tokenAddress.toLowerCase() },
-            // No Authorization header - anon tier until access-token flow is implemented.
+            ...(authHeaders ? { headers: authHeaders } : {}),
           },
         );
 
@@ -203,6 +186,65 @@ export class GoPlusService {
     return null;
   }
 
+  private async authHeaders(): Promise<Record<string, string> | undefined> {
+    if (!this.appKey || !this.appSecret) return undefined;
+    if (Date.now() < this.authFailedUntil) return undefined;
+
+    const token = await this.getAccessToken();
+    return token ? { Authorization: token } : undefined;
+  }
+
+  private async getAccessToken(): Promise<string | null> {
+    const now = Date.now();
+    if (this.accessToken && now < this.accessTokenExpiresAt) {
+      return this.accessToken;
+    }
+
+    const unixTime = Math.floor(now / 1000).toString();
+    const sign = createHash('sha1')
+      .update(`${this.appKey}${unixTime}${this.appSecret}`)
+      .digest('hex');
+
+    try {
+      const { data } = await this.http.post<GoPlusAccessTokenResponse>(
+        `${this.baseUrl}/api/v1/token_security/access_token`,
+        {
+          app_key: this.appKey,
+          time: unixTime,
+          sign,
+        },
+      );
+
+      const token =
+        data.result?.access_token ??
+        data.result?.token ??
+        data.access_token ??
+        data.token;
+      if (data.code !== 1 || !token) {
+        this.logger.warn(
+          `GoPlus: auth failed - code: ${data.code}, msg: ${data.message}; falling back to anonymous tier`,
+        );
+        this.authFailedUntil = Date.now() + 5 * 60_000;
+        return null;
+      }
+
+      const rawTtl = data.result?.expires_in ?? data.expires_in;
+      const ttlMs = Number.isFinite(Number(rawTtl))
+        ? Math.max(10_000, Number(rawTtl) * 1000 - 5_000)
+        : 55_000;
+
+      this.accessToken = token;
+      this.accessTokenExpiresAt = Date.now() + ttlMs;
+      return token;
+    } catch (err) {
+      this.logger.warn(
+        `GoPlus: auth request failed - ${(err as Error).message}; falling back to anonymous tier`,
+      );
+      this.authFailedUntil = Date.now() + 5 * 60_000;
+      return null;
+    }
+  }
+
   private async throttle(): Promise<void> {
     const now = Date.now();
     const wait = this.minIntervalMs - (now - this.lastCallAt);
@@ -236,22 +278,26 @@ export class GoPlusService {
 
     const missingExpected = EXPECTED_GOPLUS_FIELDS.filter((field) => !this.hasValue(r[field]));
     const providerStatus =
-      missingExpected.length > 0 ? 'GOPLUS_PARTIAL' : 'OK';
-    if (providerStatus === 'GOPLUS_PARTIAL') {
+      criticalPresent.length === 0
+        ? 'GOPLUS_TRADE_ONLY_PARTIAL'
+        : missingExpected.length > 0
+          ? 'GOPLUS_PARTIAL'
+          : 'OK';
+    if (providerStatus !== 'OK') {
       this.logger.warn(
-        `GoPlus: partial payload for ${tokenAddress} - missing/empty: ${missingExpected.join(', ')}`,
+        `GoPlus: ${providerStatus} payload for ${tokenAddress} - missing/empty: ${missingExpected.join(', ')}`,
       );
     }
 
     const flag = (s?: string): boolean | undefined =>
       s === '1' ? true : s === '0' ? false : undefined;
 
-    // GoPlus buy_tax / sell_tax are decimal fractions: "0.05" = 5 %
+    // GoPlus buy_tax / sell_tax are decimal fractions: "0.05" = 5%.
     const tax = (s?: string): number | undefined =>
       s !== undefined && s !== '' ? parseFloat(s) * 100 : undefined;
 
-    // owner_address === '' is AMBIGUOUS (proxy may hide the real owner).
-    // Empty string → undefined (not "renounced"). Only zero/dead address = renounced.
+    // owner_address === '' is ambiguous (proxy may hide the real owner).
+    // Empty string -> undefined (not "renounced"). Only zero/dead address = renounced.
     const addr = (r.owner_address ?? '').toLowerCase();
     const ownerRenounced: boolean | undefined =
       r.owner_address !== undefined && r.owner_address !== ''
@@ -260,17 +306,15 @@ export class GoPlusService {
         : undefined;
 
     // LP lock: count weighted % of LP supply on dead/locked addresses.
-    // is_contract alone does NOT count (any contract could hold LP — including
-    // malicious ones).  Only is_locked===1, known dead addresses, or lock tags qualify.
+    // is_contract alone does not count. Only is_locked===1, known dead addresses,
+    // or lock tags qualify.
     const lpLockedOrBurned = this.calcLpLocked(r.lp_holders);
 
-    // cannot_sell_all or is_honeypot both block selling
     const cannotSellAll = flag(r.cannot_sell_all);
     const isHoneypot = flag(r.is_honeypot);
     const canSell: boolean | undefined =
       isHoneypot === true || cannotSellAll === true ? false : undefined;
 
-    // slippage_modifiable OR personal_slippage_modifiable → fee-change risk
     const slipMod = flag(r.slippage_modifiable);
     const persSlipMod = flag(r.personal_slippage_modifiable);
     const feeModifiableRisk: boolean | undefined =

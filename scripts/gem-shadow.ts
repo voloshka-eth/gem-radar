@@ -4,6 +4,7 @@
  * No entry, no trade — observation only.
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { ShadowTrackerService } from '../src/gem/shadow-tracker.service';

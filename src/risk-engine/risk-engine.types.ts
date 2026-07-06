@@ -2,6 +2,7 @@ export type ContractDecision = 'CONTRACT_SAFE' | 'CONTRACT_REJECT' | 'CONTRACT_U
 export type RiskDataStatus =
   | 'OK'
   | 'GOPLUS_PARTIAL'
+  | 'GOPLUS_TRADE_ONLY_PARTIAL'
   | 'GOPLUS_PARSE_FAILED'
   | 'GOPLUS_UNAVAILABLE'
   | 'HONEYPOT_ONLY_PARTIAL'

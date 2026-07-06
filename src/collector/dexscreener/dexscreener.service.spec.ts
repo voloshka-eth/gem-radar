@@ -183,4 +183,46 @@ describe('DexScreenerService — normalisePair (fixture-based)', () => {
     // The Base pair must be completely absent
     expect(results.some((r) => r.pool.poolAddress === '0xccc0000000000000000000000000000000000022')).toBe(false);
   });
+
+  it('fetches top boosted token addresses from supported chains', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: [
+        { chainId: 'base', tokenAddress: '0xABCDEF0000000000000000000000000000000001' },
+        { chainId: 'solana', tokenAddress: 'So11111111111111111111111111111111111111112' },
+      ],
+    });
+
+    await expect(service.getTopBoostAddresses(['ethereum', 'base'])).resolves.toEqual([
+      { chain: 'base', tokenAddress: '0xabcdef0000000000000000000000000000000001' },
+    ]);
+    expect(mockGet).toHaveBeenCalledWith('/token-boosts/top/v1');
+  });
+
+  it('fetches latest community takeover token addresses from supported chains', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: [
+        { chainId: 'ethereum', tokenAddress: '0xABCDEF0000000000000000000000000000000002' },
+        { chainId: 'bsc', tokenAddress: '0x0000000000000000000000000000000000000000' },
+      ],
+    });
+
+    await expect(service.getLatestCommunityTakeoverAddresses(['ethereum', 'base'])).resolves.toEqual([
+      { chain: 'ethereum', tokenAddress: '0xabcdef0000000000000000000000000000000002' },
+    ]);
+    expect(mockGet).toHaveBeenCalledWith('/community-takeovers/latest/v1');
+  });
+
+  it('fetches latest ad token addresses from supported chains', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: [
+        { chainId: 'base', tokenAddress: '0xABCDEF0000000000000000000000000000000003' },
+        { chainId: 'polygon', tokenAddress: '0x0000000000000000000000000000000000000000' },
+      ],
+    });
+
+    await expect(service.getLatestAdAddresses(['ethereum', 'base'])).resolves.toEqual([
+      { chain: 'base', tokenAddress: '0xabcdef0000000000000000000000000000000003' },
+    ]);
+    expect(mockGet).toHaveBeenCalledWith('/ads/latest/v1');
+  });
 });

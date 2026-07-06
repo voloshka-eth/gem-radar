@@ -15,6 +15,7 @@
  * Usage:  npm run verify:pools
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import axios from 'axios';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';

@@ -245,7 +245,7 @@ describe('RiskEngineService — CSV file creation', () => {
     expect(redisMock.setex).not.toHaveBeenCalled();
   });
 
-  it('GoPlus partial clean payload -> CONTRACT_UNKNOWN, not SAFE', async () => {
+  it('GoPlus partial clean payload with all critical fields -> CONTRACT_SAFE with partial status', async () => {
     goplusMock.checkToken.mockResolvedValue({
       providerStatus: 'GOPLUS_PARTIAL',
       honeypot: false,
@@ -257,14 +257,31 @@ describe('RiskEngineService — CSV file creation', () => {
 
     const result = await service.checkToken('base', '0xpartial2', 'PART2', 'Partial Token 2', 'run-goplus-partial2');
 
+    expect(result.decision).toBe('CONTRACT_SAFE');
+    expect(result.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(redisMock.setex).toHaveBeenCalled();
+  });
+
+  it('GoPlus partial payload missing a critical field stays CONTRACT_UNKNOWN', async () => {
+    goplusMock.checkToken.mockResolvedValue({
+      providerStatus: 'GOPLUS_PARTIAL',
+      honeypot: false,
+      mintRisk: false,
+      blacklistRisk: false,
+      // proxyRisk missing -> not enough to pass the contract gate.
+    });
+    honeypotMock.checkToken.mockResolvedValue({ honeypot: false });
+
+    const result = await service.checkToken('base', '0xpartialmissing', 'PM', 'Partial Missing', 'run-goplus-partial-missing');
+
     expect(result.decision).toBe('CONTRACT_UNKNOWN');
     expect(result.providerStatus).toBe('GOPLUS_PARTIAL');
     expect(redisMock.setex).not.toHaveBeenCalled();
   });
 
-  it('GoPlus trade-only partial without critical fields stays GOPLUS_PARTIAL, not PARSE_FAILED', async () => {
+  it('GoPlus trade-only partial without critical fields stays UNKNOWN, not SAFE', async () => {
     goplusMock.checkToken.mockResolvedValue({
-      providerStatus: 'GOPLUS_PARTIAL',
+      providerStatus: 'GOPLUS_TRADE_ONLY_PARTIAL',
       buyTax: 0,
       sellTax: 0,
       deployerAddress: '0xdeployer',
@@ -274,13 +291,13 @@ describe('RiskEngineService — CSV file creation', () => {
     const result = await service.checkToken('base', '0xtradepartial', 'TP', 'Trade Partial', 'run-goplus-trade-partial');
 
     expect(result.decision).toBe('CONTRACT_UNKNOWN');
-    expect(result.providerStatus).toBe('GOPLUS_PARTIAL');
-    expect(result.merged.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(result.providerStatus).toBe('GOPLUS_TRADE_ONLY_PARTIAL');
+    expect(result.merged.providerStatus).toBe('GOPLUS_TRADE_ONLY_PARTIAL');
     expect(redisMock.setex).not.toHaveBeenCalled();
 
     const csvPath = path.join(tempDir, 'raw', 'contract_risk_checks.csv');
     const dataRow = fs.readFileSync(csvPath, 'utf8').trim().split('\n')[1];
-    expect(dataRow).toContain('GOPLUS_PARTIAL');
+    expect(dataRow).toContain('GOPLUS_TRADE_ONLY_PARTIAL');
     expect(dataRow).not.toContain('GOPLUS_PARSE_FAILED');
   });
 
@@ -350,13 +367,13 @@ describe('RiskEngineService — CSV file creation', () => {
     );
   });
 
-  it('cache key is chain-scoped with current version prefix: risk:v3:chain:address', async () => {
+  it('cache key is chain-scoped with current version prefix: risk:v4:chain:address', async () => {
     goplusMock.checkToken.mockResolvedValue(SAFE_DATA);
 
     await service.checkToken('base', '0xtokenb', 'B', 'Base Token', 'run-cache-3');
 
     expect(redisMock.get).toHaveBeenCalledWith(
-      expect.stringMatching(/^risk:v3:base:/),
+      expect.stringMatching(/^risk:v4:base:/),
     );
   });
 

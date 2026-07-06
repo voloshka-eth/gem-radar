@@ -4,6 +4,7 @@
  * as gem_candidates. OBSERVATION ONLY — never wired into entry/exit.
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { GemScreenService } from '../src/gem/gem-screen.service';

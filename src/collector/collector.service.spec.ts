@@ -96,6 +96,16 @@ describe('CollectorService', () => {
     cacheHit: false,
   };
 
+  const CLEAN_UNKNOWN_RISK: ContractRiskResult = {
+    decision: 'CONTRACT_UNKNOWN',
+    rejectReasons: [],
+    goplusQueried: true,
+    honeypotQueried: true,
+    merged: { honeypot: false, buyTax: 0, sellTax: 0 },
+    providerStatus: 'GOPLUS_PARTIAL',
+    cacheHit: false,
+  };
+
   const prismaMock = {
     token: {
       upsert: jest.fn().mockResolvedValue(mockToken),
@@ -117,6 +127,10 @@ describe('CollectorService', () => {
   const gtMock = { getNewPools: jest.fn().mockResolvedValue([]) };
   const dsMock = {
     getLatestProfileAddresses: jest.fn().mockResolvedValue([]),
+    getLatestBoostAddresses: jest.fn().mockResolvedValue([]),
+    getTopBoostAddresses: jest.fn().mockResolvedValue([]),
+    getLatestCommunityTakeoverAddresses: jest.fn().mockResolvedValue([]),
+    getLatestAdAddresses: jest.fn().mockResolvedValue([]),
     getPairsForTokens: jest.fn().mockResolvedValue([]),
   };
   const riskMock = { checkToken: jest.fn().mockResolvedValue(SAFE_RISK) };
@@ -148,7 +162,10 @@ describe('CollectorService', () => {
     }),
   };
   // Paper entry only fires when liquidityVerified=true (default mock is false) → DI-only.
-  const paperMock = { recordEntry: jest.fn().mockResolvedValue(undefined) };
+  const paperMock = {
+    recordEntry: jest.fn().mockResolvedValue(undefined),
+    recordResearchEntry: jest.fn().mockResolvedValue(undefined),
+  };
   const deployerReputationMock = {
     summarize: jest.fn().mockResolvedValue(null),
     isRepeatRugger: jest.fn().mockReturnValue(false),
@@ -172,6 +189,10 @@ describe('CollectorService', () => {
     deployerReputationMock.isRepeatRugger.mockReturnValue(false);
     gtMock.getNewPools.mockResolvedValue([]);
     dsMock.getLatestProfileAddresses.mockResolvedValue([]);
+    dsMock.getLatestBoostAddresses.mockResolvedValue([]);
+    dsMock.getTopBoostAddresses.mockResolvedValue([]);
+    dsMock.getLatestCommunityTakeoverAddresses.mockResolvedValue([]);
+    dsMock.getLatestAdAddresses.mockResolvedValue([]);
     dsMock.getPairsForTokens.mockResolvedValue([]);
     riskMock.checkToken.mockResolvedValue(SAFE_RISK);
     tokenAgeMock.getTokenAgeDays.mockResolvedValue(2);
@@ -440,6 +461,58 @@ describe('CollectorService', () => {
     );
   });
 
+  it('DexScreener pass combines all discovery feeds before pair lookup', async () => {
+    dsMock.getLatestProfileAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xprofile' },
+    ]);
+    dsMock.getLatestBoostAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xboost' },
+    ]);
+    dsMock.getTopBoostAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xtopboost' },
+    ]);
+    dsMock.getLatestCommunityTakeoverAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xcommunity' },
+    ]);
+    dsMock.getLatestAdAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xad' },
+    ]);
+
+    await service.runCollectionCycle();
+
+    expect(dsMock.getPairsForTokens).toHaveBeenCalledWith([
+      { chain: 'ethereum', tokenAddress: '0xprofile' },
+      { chain: 'ethereum', tokenAddress: '0xboost' },
+      { chain: 'ethereum', tokenAddress: '0xtopboost' },
+      { chain: 'ethereum', tokenAddress: '0xcommunity' },
+      { chain: 'ethereum', tokenAddress: '0xad' },
+    ]);
+  });
+
+  it('DexScreener pass dedupes the same token across all discovery feeds', async () => {
+    dsMock.getLatestProfileAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xDupe' },
+    ]);
+    dsMock.getLatestBoostAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xdupe' },
+    ]);
+    dsMock.getTopBoostAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xDUPE' },
+    ]);
+    dsMock.getLatestCommunityTakeoverAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xdupe' },
+    ]);
+    dsMock.getLatestAdAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xdupe' },
+    ]);
+
+    await service.runCollectionCycle();
+
+    expect(dsMock.getPairsForTokens).toHaveBeenCalledWith([
+      { chain: 'ethereum', tokenAddress: '0xdupe' },
+    ]);
+  });
+
   // ── Overlapping cycle guard ───────────────────────────────────────────────
 
   it('skips overlapping cycles and logs a warning', async () => {
@@ -545,6 +618,134 @@ describe('CollectorService', () => {
     expect(lines[1]).toContain('0xdeadbeef');
   });
 
+  it('CONTRACT_UNKNOWN with clean trade signals is written to research_candidates.csv only as WATCH_ONLY', async () => {
+    riskMock.checkToken.mockResolvedValue(CLEAN_UNKNOWN_RISK);
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+    await service.runCollectionCycle();
+
+    const researchPath = path.join(tempDir, 'decisions', 'research_candidates.csv');
+    expect(fs.existsSync(researchPath)).toBe(true);
+    const lines = fs.readFileSync(researchPath, 'utf8').trim().split('\n');
+    expect(lines[0]).toContain('NOT CONTRACT_SAFE');
+    expect(lines[2]).toContain('WATCH_ONLY');
+    expect(lines[2]).toContain('GOPLUS_PARTIAL');
+
+    expect(fs.existsSync(path.join(tempDir, 'raw', 'new_pools.csv'))).toBe(false);
+    expect(prismaMock.pool.upsert).not.toHaveBeenCalled();
+    expect(paperMock.recordEntry).not.toHaveBeenCalled();
+    expect(paperMock.recordResearchEntry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        riskStatus: 'GOPLUS_PARTIAL',
+        researchReason: 'contract_unknown_clean_trade_signals',
+      }),
+    );
+  });
+
+  it('clean CONTRACT_UNKNOWN with verified liquidity is promoted into the normal survivor pipeline', async () => {
+    (service as any).promoteCleanUnknownEnabled = true;
+    riskMock.checkToken.mockResolvedValue(CLEAN_UNKNOWN_RISK);
+    liquidityMock.verify.mockResolvedValueOnce({
+      liquidityModel: 'V2',
+      liquidityVerified: true,
+      onchainTvlUsd: 12_345,
+      reportedVsOnchainPct: 0.01,
+      executableDepthUsd: 500,
+      slip50: 0.01,
+      slip100: 0.02,
+      slip500: 0.08,
+      slip1000: 0.15,
+      spotPriceUsd: 0.001,
+      error: null,
+    });
+    scoringMock.score.mockReturnValueOnce({
+      finalScore: 71,
+      liquidityScore: 70,
+      depthScore: 65,
+      ageScore: 80,
+      tractionScore: 75,
+      divergenceScore: 60,
+      componentsPresent: ['liquidity', 'depth', 'age', 'traction', 'divergence'],
+      componentsMissing: [],
+      scoreConfidence: 0.5,
+      band: 'candidate',
+    });
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+
+    await service.runCollectionCycle();
+
+    const speculativePath = path.join(tempDir, 'decisions', 'speculative_candidates.csv');
+    expect(fs.existsSync(speculativePath)).toBe(true);
+    const lines = fs.readFileSync(speculativePath, 'utf8').trim().split('\n');
+    expect(lines[0]).toContain('NOT CONTRACT_SAFE');
+    expect(lines[2]).toContain('CONTRACT_UNKNOWN_LIQUIDITY_VERIFIED');
+    expect(lines[2]).toContain('CONTRACT_UNKNOWN');
+    expect(lines[2]).toContain('GOPLUS_PARTIAL');
+
+    const newPoolsPath = path.join(tempDir, 'raw', 'new_pools.csv');
+    expect(fs.existsSync(newPoolsPath)).toBe(true);
+    expect(fs.readFileSync(newPoolsPath, 'utf8')).toContain('CONTRACT_UNKNOWN_PROMOTED_CLEAN_PARTIAL');
+
+    expect(fs.existsSync(path.join(tempDir, 'decisions', 'candidates.csv'))).toBe(true);
+    expect(prismaMock.pool.upsert).toHaveBeenCalled();
+    expect(paperMock.recordEntry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenId: 'tok-cuid',
+        poolId: 'pool-cuid',
+        buyTax: 0,
+      }),
+    );
+    expect(paperMock.recordResearchEntry).toHaveBeenCalled();
+  });
+
+  it('clean CONTRACT_UNKNOWN with verified liquidity stays speculative by default', async () => {
+    riskMock.checkToken.mockResolvedValue(CLEAN_UNKNOWN_RISK);
+    liquidityMock.verify.mockResolvedValueOnce({
+      liquidityModel: 'V2',
+      liquidityVerified: true,
+      onchainTvlUsd: 12_345,
+      reportedVsOnchainPct: 0.01,
+      executableDepthUsd: 500,
+      slip50: 0.01,
+      slip100: 0.02,
+      slip500: 0.08,
+      slip1000: 0.15,
+      spotPriceUsd: 0.001,
+      error: null,
+    });
+    scoringMock.score.mockReturnValueOnce({
+      finalScore: 71,
+      liquidityScore: 70,
+      depthScore: 65,
+      ageScore: 80,
+      tractionScore: 75,
+      divergenceScore: 60,
+      componentsPresent: ['liquidity', 'depth', 'age', 'traction', 'divergence'],
+      componentsMissing: [],
+      scoreConfidence: 0.5,
+      band: 'candidate',
+    });
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+
+    await service.runCollectionCycle();
+
+    expect(fs.existsSync(path.join(tempDir, 'decisions', 'speculative_candidates.csv'))).toBe(true);
+    expect(fs.existsSync(path.join(tempDir, 'raw', 'new_pools.csv'))).toBe(false);
+    expect(fs.existsSync(path.join(tempDir, 'decisions', 'candidates.csv'))).toBe(false);
+    expect(prismaMock.pool.upsert).not.toHaveBeenCalled();
+    expect(paperMock.recordEntry).not.toHaveBeenCalled();
+    expect(paperMock.recordResearchEntry).toHaveBeenCalled();
+  });
+
+  it('CONTRACT_UNKNOWN without any clean trade signal is quarantined but not research-listed', async () => {
+    riskMock.checkToken.mockResolvedValue(UNKNOWN_RISK);
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+    await service.runCollectionCycle();
+
+    expect(fs.existsSync(path.join(tempDir, 'decisions', 'quarantine_tokens.csv'))).toBe(true);
+    expect(fs.existsSync(path.join(tempDir, 'decisions', 'research_candidates.csv'))).toBe(false);
+  });
+
   it('CONTRACT_UNKNOWN — QuarantineToken persisted to DB', async () => {
     riskMock.checkToken.mockResolvedValue(UNKNOWN_RISK);
     gtMock.getNewPools.mockResolvedValue([buildResult()]);
@@ -638,11 +839,97 @@ describe('CollectorService', () => {
     expect(row).toContain('deployer_repeat_rugger');
   });
 
+  it('deployer blocklist rejects before liquidity/scoring even when contract risk is SAFE', async () => {
+    (service as any).blockedDeployers = new Set(['ethereum:0xblocked']);
+    riskMock.checkToken.mockResolvedValue({
+      ...SAFE_RISK,
+      merged: { ...SAFE_RISK.merged, deployerAddress: '0xBlocked' },
+    });
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+
+    await service.runCollectionCycle();
+
+    expect(prismaMock.pool.upsert).not.toHaveBeenCalled();
+    expect(liquidityMock.verify).not.toHaveBeenCalled();
+    expect(prismaMock.contractRiskCheck.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          tokenAddress: '0xdeadbeef',
+          decision: 'CONTRACT_REJECT',
+          rejectReason: 'deployer_blocklisted',
+          tokenId: undefined,
+        }),
+      }),
+    );
+  });
+
+  it('same token identity does not reject when the deployer is clean', async () => {
+    const candidate = buildResult({}, '0xfeed000000000000000000000000000000000001');
+    candidate.token.symbol = 'openhuman';
+    candidate.token.name = 'openhuman';
+    riskMock.checkToken.mockResolvedValue({
+      ...SAFE_RISK,
+      merged: { ...SAFE_RISK.merged, deployerAddress: '0xClean' },
+    });
+    deployerReputationMock.summarize.mockResolvedValue(null);
+    gtMock.getNewPools.mockResolvedValue([candidate]);
+
+    await service.runCollectionCycle();
+
+    expect(deployerReputationMock.summarize).toHaveBeenCalledWith('ethereum', '0xclean');
+    expect(prismaMock.pool.upsert).toHaveBeenCalled();
+    expect(prismaMock.contractRiskCheck.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          tokenAddress: '0xfeed000000000000000000000000000000000001',
+          decision: 'CONTRACT_SAFE',
+          rejectReason: null,
+          tokenId: 'tok-cuid',
+        }),
+      }),
+    );
+  });
+
   it('risk engine is NOT called for Stage-0-rejected candidates', async () => {
     gtMock.getNewPools.mockResolvedValue([buildResult({ liquidityUsd: 1 })]); // below floor
     await service.runCollectionCycle();
 
     expect(riskMock.checkToken).not.toHaveBeenCalled();
+  });
+
+  it('old token contract with a fresh pool is allowed through by default', async () => {
+    tokenAgeMock.getTokenAgeDays.mockResolvedValue(30);
+    riskMock.checkToken.mockResolvedValue(SAFE_RISK);
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+
+    await service.runCollectionCycle();
+
+    expect(riskMock.checkToken).toHaveBeenCalledWith(
+      'ethereum',
+      '0xdeadbeef',
+      'GEM',
+      'Gem Token',
+      expect.any(String),
+    );
+    expect(prismaMock.pool.upsert).toHaveBeenCalled();
+
+    const rejectedPath = path.join(tempDir, 'decisions', 'rejected_tokens.csv');
+    if (fs.existsSync(rejectedPath)) {
+      expect(fs.readFileSync(rejectedPath, 'utf8')).not.toContain('token_too_old');
+    }
+  });
+
+  it('old token contract is rejected only when the token-age hard gate is explicitly enabled', async () => {
+    (service as any).tokenAgeHardGateEnabled = true;
+    tokenAgeMock.getTokenAgeDays.mockResolvedValue(30);
+    gtMock.getNewPools.mockResolvedValue([buildResult()]);
+
+    await service.runCollectionCycle();
+
+    expect(riskMock.checkToken).not.toHaveBeenCalled();
+
+    const rejectedPath = path.join(tempDir, 'decisions', 'rejected_tokens.csv');
+    expect(fs.readFileSync(rejectedPath, 'utf8')).toContain('token_too_old');
   });
 
   it('CONTRACT_SAFE — risk check written to DB with tokenId', async () => {

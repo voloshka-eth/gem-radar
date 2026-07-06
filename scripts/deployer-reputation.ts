@@ -6,6 +6,7 @@
  * - gem_shadow_ticks.rug_flag=true via gem_candidates.deployer_address
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { DeployerReputationService } from '../src/deployer/deployer-reputation.service';

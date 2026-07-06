@@ -22,6 +22,12 @@ interface CandidateStats {
   totalRows: number;
   survivors: SurvivorRow[]; // distinct by chain:token_address, latest row kept
 }
+interface ResearchStats {
+  totalRows: number;
+  uniqueTokens: number;
+  entered: number;
+  notEntered: number;
+}
 
 @Injectable()
 export class ReportService implements OnModuleDestroy {
@@ -193,6 +199,23 @@ export class ReportService implements OnModuleDestroy {
       windowStart,
       windowEnd,
     );
+    const speculativeCandidates = this.parseSpeculativeCsv(
+      path.join(this.fileLogger.logDir, 'decisions', 'speculative_candidates.csv'),
+      windowStart,
+      windowEnd,
+    );
+    const researchCandidates = this.parseResearchCsv(
+      path.join(this.fileLogger.logDir, 'decisions', 'research_candidates.csv'),
+      windowStart,
+      windowEnd,
+      { chainIndex: 3, tokenIndex: 4 },
+    );
+    const researchPaper = this.parseResearchCsv(
+      path.join(this.fileLogger.logDir, 'decisions', 'research_paper_entries.csv'),
+      windowStart,
+      windowEnd,
+      { chainIndex: 4, tokenIndex: 5, enteredIndex: 24 },
+    );
 
     // ── Formatting helpers ─────────────────────────────────────────────────────
     const pct = (n: number, total: number): string =>
@@ -297,6 +320,43 @@ export class ReportService implements OnModuleDestroy {
       }
     }
 
+    lines.push('', 'SPECULATIVE CANDIDATES  (CONTRACT_UNKNOWN + liquidity_verified)');
+    lines.push('  High-risk moonshot/probe lane. NOT CONTRACT_SAFE and not mixed into verified survivor stats.');
+    if (speculativeCandidates === null || speculativeCandidates.survivors.length === 0) {
+      lines.push('  Distinct speculative tokens: 0');
+    } else {
+      lines.push(
+        `  Distinct speculative tokens: ${speculativeCandidates.survivors.length}   (from ${speculativeCandidates.totalRows} rows)`,
+        '',
+        `    ${'chain'.padEnd(9)}${'symbol'.padEnd(14)}${'onchain_tvl_usd'.padStart(16)}${'slip_1000'.padStart(12)}`,
+      );
+      for (const s of speculativeCandidates.survivors) {
+        const tvl  = s.tvlUsd  !== '' ? `$${Number(s.tvlUsd).toFixed(0)}` : '?';
+        const slip = s.slip1000 !== '' ? `${(Number(s.slip1000) * 100).toFixed(2)}%` : '?';
+        lines.push(`    ${s.chain.padEnd(9)}${(s.symbol || '?').padEnd(14)}${tvl.padStart(16)}${slip.padStart(12)}`);
+      }
+    }
+
+    lines.push('', 'RESEARCH CANDIDATES  (CONTRACT_UNKNOWN watch-only)');
+    lines.push('  These are NOT CONTRACT_SAFE and are NOT included in normal edge/postmortem stats.');
+    if (!researchCandidates || researchCandidates.totalRows === 0) {
+      lines.push('  Research candidates: 0');
+    } else {
+      lines.push(
+        `  Research rows:        ${researchCandidates.totalRows}`,
+        `  Distinct tokens:      ${researchCandidates.uniqueTokens}`,
+      );
+    }
+    if (!researchPaper || researchPaper.totalRows === 0) {
+      lines.push('  Research paper rows: 0');
+    } else {
+      lines.push(
+        `  Research paper rows:  ${researchPaper.totalRows}`,
+        `  Modeled entered:      ${researchPaper.entered}`,
+        `  Modeled not_entered:  ${researchPaper.notEntered}`,
+      );
+    }
+
     // ── Scoring (M4) ────────────────────────────────────────────────────────────
     // Dedup to the best (highest finalScore) row per distinct token in the window.
     const bestByToken = new Map<string, typeof scoringRows[0]>();
@@ -378,7 +438,10 @@ export class ReportService implements OnModuleDestroy {
       '  Discovery log:         logs/raw/new_pools.csv',
       '  Liquidity snapshots:   logs/raw/pool_liquidity_snapshots.csv',
       '  Survivor watchlist:    logs/decisions/candidates.csv',
+      '  Speculative candidates: logs/decisions/speculative_candidates.csv',
       '  Scoring history:       logs/decisions/scoring_history.csv',
+      '  Research candidates:   logs/decisions/research_candidates.csv',
+      '  Research paper:        logs/decisions/research_paper_entries.csv',
       '',
     );
 
@@ -478,6 +541,89 @@ export class ReportService implements OnModuleDestroy {
         latestByToken.set(key, {
           ts: ts.getTime(),
           row: { chain: f[2], symbol: f[4], tvlUsd: f[7], slip1000: f[10] },
+        });
+      }
+    }
+
+    if (totalRows === 0) return null;
+    return { totalRows, survivors: [...latestByToken.values()].map((v) => v.row) };
+  }
+
+  private parseResearchCsv(
+    filePath: string,
+    windowStart: Date,
+    windowEnd: Date,
+    columns: { chainIndex: number; tokenIndex: number; enteredIndex?: number },
+  ): ResearchStats | null {
+    if (!fs.existsSync(filePath)) return null;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      return null;
+    }
+
+    let totalRows = 0;
+    let entered = 0;
+    let notEntered = 0;
+    const uniqueTokens = new Set<string>();
+
+    for (const rawLine of raw.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#') || line.startsWith('ts,')) continue;
+
+      const f = parseCsvLine(line);
+      const ts = new Date(f[0]);
+      if (isNaN(ts.getTime())) continue;
+      if (ts < windowStart || ts >= windowEnd) continue;
+
+      totalRows++;
+      uniqueTokens.add(`${f[columns.chainIndex]}:${f[columns.tokenIndex]}`);
+      if (columns.enteredIndex !== undefined) {
+        if (f[columns.enteredIndex] === 'true') entered++;
+        if (f[columns.enteredIndex] === 'false') notEntered++;
+      }
+    }
+
+    return { totalRows, uniqueTokens: uniqueTokens.size, entered, notEntered };
+  }
+
+  private parseSpeculativeCsv(
+    filePath: string,
+    windowStart: Date,
+    windowEnd: Date,
+  ): CandidateStats | null {
+    if (!fs.existsSync(filePath)) return null;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      return null;
+    }
+
+    let totalRows = 0;
+    const latestByToken = new Map<string, { ts: number; row: SurvivorRow }>();
+
+    for (const rawLine of raw.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#') || line.startsWith('ts,')) continue;
+
+      const f = parseCsvLine(line);
+      if (f.length < 19) continue;
+
+      const ts = new Date(f[0]);
+      if (isNaN(ts.getTime())) continue;
+      if (ts < windowStart || ts >= windowEnd) continue;
+
+      totalRows++;
+      const key = `${f[4]}:${f[5]}`;
+      const prev = latestByToken.get(key);
+      if (!prev || ts.getTime() >= prev.ts) {
+        latestByToken.set(key, {
+          ts: ts.getTime(),
+          row: { chain: f[4], symbol: f[6], tvlUsd: f[16], slip1000: f[18] },
         });
       }
     }

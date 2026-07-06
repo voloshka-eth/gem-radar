@@ -3,6 +3,7 @@
  * Headline expectancy is NET of all modeled costs. "No edge" is a valid outcome.
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { EdgeService } from '../src/edge/edge.service';

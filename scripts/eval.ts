@@ -6,6 +6,7 @@
  * prints the intuitive (facts-only) table. NOT a daemon — it runs once and exits.
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import * as fs from 'fs';
 import * as path from 'path';
 import { NestFactory } from '@nestjs/core';

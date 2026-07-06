@@ -16,6 +16,18 @@ export interface CandidateResult {
 }
 
 /** One row for the intuitive eval view (facts only — never a recommendation). */
+export interface ResearchCandidatePaperResult {
+  pool: CandidatePool;
+  token: CandidateToken;
+  liq: LiquidityCheckResult;
+  score: ScoreResult;
+  ageDays: number | null;
+  runId: string;
+  buyTax: number | null | undefined;
+  riskStatus: string;
+  researchReason: string;
+}
+
 export interface EvalViewRow {
   symbol: string;
   chain: string;

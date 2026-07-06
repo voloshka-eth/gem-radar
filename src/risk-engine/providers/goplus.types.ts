@@ -40,3 +40,18 @@ export interface GoPlusApiResponse {
   message: string;
   result?: Record<string, GoPlusTokenResult>;
 }
+
+export interface GoPlusAccessTokenResponse {
+  code: number;
+  message: string;
+  result?: {
+    access_token?: string;
+    token?: string;
+    expires_in?: number | string;
+    expire_time?: number | string;
+  };
+  access_token?: string;
+  token?: string;
+  expires_in?: number | string;
+  expire_time?: number | string;
+}

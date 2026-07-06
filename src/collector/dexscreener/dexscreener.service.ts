@@ -4,6 +4,8 @@ import axios, { AxiosInstance } from 'axios';
 import axiosRetry from 'axios-retry';
 import {
   DsTokenProfilesResponse,
+  DsTokenBoostsResponse,
+  DsTokenAdsResponse,
   DsTokenResponse,
   DsPair,
   DS_CHAIN_MAP,
@@ -53,16 +55,87 @@ export class DexScreenerService {
       const profiles = res.data ?? [];
 
       return profiles
-        .filter((p) => {
-          const mapped = DS_CHAIN_MAP[p.chainId];
-          return mapped && (chains as string[]).includes(mapped);
-        })
-        .map((p) => ({
-          chain: DS_CHAIN_MAP[p.chainId] as SupportedChain,
-          tokenAddress: p.tokenAddress.toLowerCase(),
-        }));
+        .map((p) => ({ chainId: p.chainId, tokenAddress: p.tokenAddress }))
+        .filter((p) => this.isSupportedChainProfile(p, chains))
+        .map((p) => this.toTokenAddress(p));
     } catch (err) {
       this.logger.error(`DexScreener /token-profiles/latest/v1 failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  async getLatestBoostAddresses(chains: SupportedChain[]): Promise<
+    Array<{ chain: SupportedChain; tokenAddress: string }>
+  > {
+    try {
+      const res = await this.http.get<DsTokenBoostsResponse>(
+        '/token-boosts/latest/v1',
+      );
+      const boosts = res.data ?? [];
+
+      return boosts
+        .map((b) => ({ chainId: b.chainId, tokenAddress: b.tokenAddress }))
+        .filter((b) => this.isSupportedChainProfile(b, chains))
+        .map((b) => this.toTokenAddress(b));
+    } catch (err) {
+      this.logger.error(`DexScreener /token-boosts/latest/v1 failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  async getTopBoostAddresses(chains: SupportedChain[]): Promise<
+    Array<{ chain: SupportedChain; tokenAddress: string }>
+  > {
+    try {
+      const res = await this.http.get<DsTokenBoostsResponse>(
+        '/token-boosts/top/v1',
+      );
+      const boosts = res.data ?? [];
+
+      return boosts
+        .map((b) => ({ chainId: b.chainId, tokenAddress: b.tokenAddress }))
+        .filter((b) => this.isSupportedChainProfile(b, chains))
+        .map((b) => this.toTokenAddress(b));
+    } catch (err) {
+      this.logger.error(`DexScreener /token-boosts/top/v1 failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  async getLatestCommunityTakeoverAddresses(chains: SupportedChain[]): Promise<
+    Array<{ chain: SupportedChain; tokenAddress: string }>
+  > {
+    try {
+      const res = await this.http.get<DsTokenProfilesResponse>(
+        '/community-takeovers/latest/v1',
+      );
+      const takeovers = res.data ?? [];
+
+      return takeovers
+        .map((t) => ({ chainId: t.chainId, tokenAddress: t.tokenAddress }))
+        .filter((t) => this.isSupportedChainProfile(t, chains))
+        .map((t) => this.toTokenAddress(t));
+    } catch (err) {
+      this.logger.error(`DexScreener /community-takeovers/latest/v1 failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  async getLatestAdAddresses(chains: SupportedChain[]): Promise<
+    Array<{ chain: SupportedChain; tokenAddress: string }>
+  > {
+    try {
+      const res = await this.http.get<DsTokenAdsResponse>(
+        '/ads/latest/v1',
+      );
+      const ads = res.data ?? [];
+
+      return ads
+        .map((a) => ({ chainId: a.chainId, tokenAddress: a.tokenAddress }))
+        .filter((a) => this.isSupportedChainProfile(a, chains))
+        .map((a) => this.toTokenAddress(a));
+    } catch (err) {
+      this.logger.error(`DexScreener /ads/latest/v1 failed: ${(err as Error).message}`);
       return [];
     }
   }
@@ -131,6 +204,24 @@ export class DexScreenerService {
       );
       return [];
     }
+  }
+
+  private isSupportedChainProfile(
+    item: { chainId: string; tokenAddress: string },
+    chains: SupportedChain[],
+  ): boolean {
+    const mapped = DS_CHAIN_MAP[item.chainId];
+    return Boolean(mapped && (chains as string[]).includes(mapped));
+  }
+
+  private toTokenAddress(item: { chainId: string; tokenAddress: string }): {
+    chain: SupportedChain;
+    tokenAddress: string;
+  } {
+    return {
+      chain: DS_CHAIN_MAP[item.chainId] as SupportedChain,
+      tokenAddress: item.tokenAddress.toLowerCase(),
+    };
   }
 
   private normalisePair(chain: SupportedChain, pair: DsPair): CollectorResult | null {

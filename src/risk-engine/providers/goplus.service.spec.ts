@@ -22,6 +22,7 @@ function buildGoPlusResponse(token: Record<string, unknown>) {
 describe('GoPlusService', () => {
   let service: GoPlusService;
   let mockGet: jest.Mock;
+  let mockPost: jest.Mock;
 
   beforeEach(() => {
     service = new GoPlusService({
@@ -34,7 +35,8 @@ describe('GoPlusService', () => {
     (service as any).retryDelayMs = 0;
 
     mockGet = jest.fn();
-    (service as any).http = { get: mockGet };
+    mockPost = jest.fn();
+    (service as any).http = { get: mockGet, post: mockPost };
   });
 
   // ── Safe token ──────────────────────────────────────────────────────────────
@@ -142,7 +144,7 @@ describe('GoPlusService', () => {
     expect(result!.honeypot).toBeUndefined();
   });
 
-  it('trade-only GoPlus payload without owner capability fields -> GOPLUS_PARTIAL', async () => {
+  it('trade-only GoPlus payload without security fields -> GOPLUS_TRADE_ONLY_PARTIAL', async () => {
     mockGet.mockResolvedValueOnce({
       data: buildGoPlusResponse({
         token_name: 'Trade Only',
@@ -159,7 +161,7 @@ describe('GoPlusService', () => {
     const result = await service.checkToken('base', TOKEN_ADDR);
 
     expect(result).not.toBeNull();
-    expect(result!.providerStatus).toBe('GOPLUS_PARTIAL');
+    expect(result!.providerStatus).toBe('GOPLUS_TRADE_ONLY_PARTIAL');
     expect(result!.buyTax).toBe(0);
     expect(result!.sellTax).toBe(0);
     expect(result!.deployerAddress).toBe('0xc0ffee0000000000000000000000000000000000');
@@ -296,15 +298,65 @@ describe('GoPlusService', () => {
     expect(result!.lpLockedOrBurned).toBe(false);
   });
 
-  // ── Auth header (access-token flow not yet implemented) ──────────────────────
+  // ── Auth header ──────────────────────────────────────────────────────────────
 
-  it('never sends Authorization header — anon tier until access-token flow is implemented', async () => {
+  it('does not send Authorization header when app credentials are missing', async () => {
     mockGet.mockResolvedValueOnce({ data: safeFixture });
     await service.checkToken('ethereum', TOKEN_ADDR);
 
     const callOptions = mockGet.mock.calls[0][1];
-    // Raw API key in Authorization would return 401 (worse than anon tier).
-    // The proper flow is sha1(app_key+time+app_secret) → access_token — not yet implemented.
     expect(callOptions).not.toHaveProperty('headers');
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('uses cached GoPlus access token when app credentials are configured', async () => {
+    service = new GoPlusService({
+      get: (k: string) => {
+        if (k === 'api.goplusBaseUrl') return 'https://api.gopluslabs.io';
+        if (k === 'api.goplusAppKey') return 'app-key';
+        if (k === 'api.goplusAppSecret') return 'app-secret';
+        return undefined;
+      },
+    } as unknown as ConfigService);
+    (service as any).minIntervalMs = 0;
+    (service as any).retryDelayMs = 0;
+    mockGet = jest.fn().mockResolvedValue({ data: safeFixture });
+    mockPost = jest.fn().mockResolvedValue({
+      data: {
+        code: 1,
+        message: 'ok',
+        result: { access_token: 'access-token', expires_in: 60 },
+      },
+    });
+    (service as any).http = { get: mockGet, post: mockPost };
+
+    await service.checkToken('ethereum', TOKEN_ADDR);
+    await service.checkToken('ethereum', TOKEN_ADDR);
+
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockGet.mock.calls[0][1].headers.Authorization).toBe('access-token');
+    expect(mockGet.mock.calls[1][1].headers.Authorization).toBe('access-token');
+  });
+
+  it('falls back to anonymous tier if access-token request fails', async () => {
+    service = new GoPlusService({
+      get: (k: string) => {
+        if (k === 'api.goplusBaseUrl') return 'https://api.gopluslabs.io';
+        if (k === 'api.goplusAppKey') return 'app-key';
+        if (k === 'api.goplusAppSecret') return 'app-secret';
+        return undefined;
+      },
+    } as unknown as ConfigService);
+    (service as any).minIntervalMs = 0;
+    (service as any).retryDelayMs = 0;
+    mockGet = jest.fn().mockResolvedValue({ data: safeFixture });
+    mockPost = jest.fn().mockRejectedValue(new Error('auth unavailable'));
+    (service as any).http = { get: mockGet, post: mockPost };
+
+    const result = await service.checkToken('ethereum', TOKEN_ADDR);
+
+    expect(result).not.toBeNull();
+    expect(mockGet.mock.calls[0][1]).not.toHaveProperty('headers');
   });
 });

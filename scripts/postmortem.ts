@@ -4,6 +4,7 @@
  * a LOUD overfitting warning fires when a group has too few samples.
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { PostmortemService } from '../src/postmortem/postmortem.service';

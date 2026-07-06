@@ -29,6 +29,8 @@ export const apiConfig = registerAs('api', () => ({
     process.env.GECKOTERMINAL_BASE_URL ?? 'https://api.geckoterminal.com/api/v2',
   goplusBaseUrl: process.env.GOPLUS_BASE_URL ?? 'https://api.gopluslabs.io',
   goplusApiKey: process.env.GOPLUS_API_KEY,
+  goplusAppKey: process.env.GOPLUS_APP_KEY ?? process.env.GOPLUS_API_KEY,
+  goplusAppSecret: process.env.GOPLUS_APP_SECRET,
   goplusMinIntervalMs: parseInt(process.env.GOPLUS_MIN_INTERVAL_MS ?? '2000', 10),
   goplusMaxAttempts: parseInt(process.env.GOPLUS_MAX_ATTEMPTS ?? '2', 10),
   goplusRetryDelayMs: parseInt(process.env.GOPLUS_RETRY_DELAY_MS ?? '2500', 10),
@@ -36,19 +38,40 @@ export const apiConfig = registerAs('api', () => ({
 }));
 
 export const collectorConfig = registerAs('collector', () => ({
+  autoStart: process.env.COLLECTOR_AUTOSTART !== 'false',
   pollIntervalMs: parseInt(process.env.COLLECTOR_POLL_INTERVAL_MS ?? '120000', 10),
   newPoolMaxAgeHours: parseInt(process.env.NEW_POOL_MAX_AGE_HOURS ?? '6', 10),
   tokenMaxAgeDays: parseFloat(process.env.TOKEN_MAX_AGE_DAYS ?? '7'),
+  tokenAgeHardGateEnabled: process.env.TOKEN_AGE_HARD_GATE_ENABLED === 'true',
   moonshotStage0Enabled: process.env.MOONSHOT_STAGE0_ENABLED !== 'false',
   moonshotMinLiquidityUsd: parseFloat(process.env.MOONSHOT_MIN_LIQUIDITY_USD ?? '1000'),
   moonshotMinFdvUsd: parseFloat(process.env.MOONSHOT_MIN_FDV_USD ?? '1000'),
   moonshotMinVol1hUsd: parseFloat(process.env.MOONSHOT_MIN_VOL_1H_USD ?? '1000'),
   moonshotMinTx1h: parseInt(process.env.MOONSHOT_MIN_TX_1H ?? '30', 10),
   moonshotMinBuys1h: parseInt(process.env.MOONSHOT_MIN_BUYS_1H ?? '15', 10),
+  promoteCleanUnknownEnabled: process.env.PROMOTE_CLEAN_UNKNOWN_ENABLED === 'true',
   deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
-  deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '2', 10),
-  deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '2', 10),
+  deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
+  deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '1', 10),
   deployerGateMinRugRate: parseFloat(process.env.DEPLOYER_GATE_MIN_RUG_RATE ?? '0.5'),
+  blockedDeployers: (process.env.BLOCKED_DEPLOYERS ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [chain, tokenAddress] = entry.split(':');
+      return { chain, tokenAddress: tokenAddress?.toLowerCase() };
+    })
+    .filter((entry) => entry.chain && entry.tokenAddress),
+  manualProbeTokens: (process.env.MANUAL_PROBE_TOKENS ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [chain, tokenAddress] = entry.split(':');
+      return { chain, tokenAddress: tokenAddress?.toLowerCase() };
+    })
+    .filter((entry) => entry.chain && entry.tokenAddress),
 }));
 
 // Block-explorer APIs (Etherscan V2 unified API).
@@ -120,6 +143,8 @@ export const paperConfig = registerAs('paper', () => ({
   rugLiqUsd:             parseFloat(process.env.PAPER_RUG_LIQ_USD         ?? '50'),   // liq ≤ this → rug
   sellTaxSpikePct:       parseFloat(process.env.PAPER_SELL_TAX_SPIKE_PCT  ?? '0.50'), // sell tax ≥ 50% → unsellable
   maxDrawdownInvalidate: parseFloat(process.env.PAPER_MAX_DRAWDOWN        ?? '0.70'), // drawdown > 70% → invalidate
+  priceReadFailureRugThreshold: parseInt(process.env.PAPER_PRICE_READ_FAILURE_RUG_THRESHOLD ?? '3', 10),
+  evalMaxOpenPositions: parseInt(process.env.PAPER_EVAL_MAX_OPEN_POSITIONS ?? '50', 10),
   // Analysis gates.
   edgeScoreThreshold:    parseFloat(process.env.PAPER_EDGE_SCORE_THRESHOLD ?? '70'),  // "candidate" band min
   minClosedForEdge:      parseInt(  process.env.PAPER_MIN_CLOSED_FOR_EDGE  ?? '50', 10),

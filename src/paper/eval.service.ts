@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../database/prisma.service';
 import { FileLoggerService } from '../file-logger/file-logger.service';
@@ -18,6 +19,12 @@ import type { EvalViewRow } from './paper.types';
 import { DeployerReputationService } from '../deployer/deployer-reputation.service';
 
 const num = (d: unknown): number | null => (d == null ? null : Number(d));
+const DEFAULT_PRICE_READ_FAILURE_RUG_THRESHOLD = 3;
+
+type OnchainReadResult = {
+  liq: LiquidityCheckResult | null;
+  error: string | null;
+};
 
 /**
  * M5 — ON-DEMAND re-evaluation. NOT a daemon. When `npm run eval` runs, it re-reads
@@ -53,9 +60,14 @@ export class EvalService {
     rugLikeTokens: number;
   }> {
     const runId = `eval-${randomUUID().slice(0, 8)}`;
+    const evalMaxOpenPositions = this.config.get<number>('paper.evalMaxOpenPositions');
     const open = await this.prisma.paperPosition.findMany({
       where: { status: 'OPEN' },
       include: { pool: true, token: true },
+      orderBy: { openedAt: 'desc' },
+      ...(evalMaxOpenPositions && evalMaxOpenPositions > 0
+        ? { take: Math.floor(evalMaxOpenPositions) }
+        : {}),
     });
 
     const sandwichPct  = this.config.get<number>('paper.sandwichPct') ?? 0.01;
@@ -67,6 +79,11 @@ export class EvalService {
       sellTaxSpikePct: this.config.get<number>('paper.sellTaxSpikePct') ?? 0.5,
     };
     const maxDrawdownInvalidate = this.config.get<number>('paper.maxDrawdownInvalidate') ?? 0.7;
+    const priceReadFailureRugThreshold = Math.max(
+      1,
+      this.config.get<number>('paper.priceReadFailureRugThreshold') ??
+        DEFAULT_PRICE_READ_FAILURE_RUG_THRESHOLD,
+    );
 
     const rows: EvalViewRow[] = [];
     let closed = 0;
@@ -79,10 +96,23 @@ export class EvalService {
       const liqEntry = num(pos.onchainLiqEntryUsd) ?? 0;
 
       // ── Re-read CURRENT on-chain state ────────────────────────────────────────
-      const liq = await this.reReadOnchain(chain, pos.pool, pos.token?.decimals ?? undefined);
+      const onchainRead = await this.reReadOnchain(chain, pos.pool, pos.token?.decimals ?? undefined);
+      const liq = onchainRead.liq;
       const priceNow = liq?.spotPriceUsd ?? null;
       const liqNow   = liq?.onchainTvlUsd ?? null;
       const sellable = liq != null && liq.liquidityVerified && (liq.onchainTvlUsd ?? 0) > 0;
+      const priceUnreadable = priceNow == null || !(priceNow > 0);
+      const entryFeatures = this.entryFeaturesRecord(pos.entryFeatures);
+      const priceReadFailureCount = priceUnreadable
+        ? this.readPriceFailureCount(entryFeatures.priceReadFailureCount) + 1
+        : 0;
+      const priceFailureReached =
+        priceUnreadable && priceReadFailureCount >= priceReadFailureRugThreshold;
+      const nextEntryFeatures = this.withPriceReadFailure(
+        pos.entryFeatures,
+        priceReadFailureCount,
+        priceUnreadable ? (onchainRead.error ?? 'no_price') : null,
+      );
 
       // RE-RUN sell simulation against current state (existing exit behavior unchanged).
       const { sellSimOk, sellTaxNow } = await this.reCheckSell(chain, pos.tokenAddress, pos.symbol ?? '');
@@ -94,10 +124,29 @@ export class EvalService {
       const sellersToBuyersRatio =
         uniqueBuyers != null && uniqueSellers != null ? uniqueSellers / Math.max(uniqueBuyers, 1) : null;
 
-      const status = detectStatus(
-        { liqEntryUsd: liqEntry, liqNowUsd: liqNow, priceNowUsd: priceNow, sellable, sellTaxNowPct: sellTaxNow },
-        statusParams,
-      );
+      const sellSideInvalid =
+        sellSimOk === false ||
+        (sellTaxNow != null && sellTaxNow >= statusParams.sellTaxSpikePct);
+      const liquidityGone = liqNow != null && liqNow <= statusParams.rugLiqUsd;
+      const liquidityPulled =
+        liqNow != null && liqEntry > 0 && liqNow < liqEntry * (1 - statusParams.liqPullDropPct);
+      const status = priceUnreadable
+        ? liquidityGone
+          ? 'rug'
+          : liquidityPulled
+            ? 'liquidity_pulled'
+            : sellSideInvalid
+              ? 'unsellable'
+              : priceFailureReached
+                ? 'rug'
+                : 'alive'
+        : detectStatus(
+          { liqEntryUsd: liqEntry, liqNowUsd: liqNow, priceNowUsd: priceNow, sellable, sellTaxNowPct: sellTaxNow },
+          statusParams,
+        );
+      const tickStatus = priceUnreadable && status === 'alive'
+        ? `price_unreadable_${priceReadFailureCount}/${priceReadFailureRugThreshold}`
+        : status;
 
       // ── Multiple / drawdown ───────────────────────────────────────────────────
       const currentMultiple = entryEff && priceNow != null ? priceNow / entryEff : null;
@@ -136,7 +185,7 @@ export class EvalService {
 
       // ── Invalidation exit ─────────────────────────────────────────────────────
       const invalidate = isInvalidating(status) || drawdown > maxDrawdownInvalidate;
-      let finalStatus: string = status;
+      let finalStatus: string = tickStatus;
       if (invalidate) {
         const tokensToSell = tokensBought * remainingFraction;
         // On a rug, priceNow≈0 and depth is gone → modeled proceeds ≈ 0 (pessimistic).
@@ -146,8 +195,12 @@ export class EvalService {
         realizedValueUsd += fill.netUsd;
         const reason = drawdown > maxDrawdownInvalidate && !isInvalidating(status) ? 'drawdown' : status;
         const realizedMultiple = realizedValueUsd / sizeUsd;
+        const closeOutcomeClass = outcomeClass(reason as PositionStatus | 'drawdown', realizedMultiple);
+        const invalidationReason = priceFailureReached && status === 'rug'
+          ? `price_unreadable_${priceReadFailureCount}x${onchainRead.error ? `: ${onchainRead.error}` : ''}`
+          : reason;
         await this.writeExit(runId, pos, 'INVALIDATE_SELL', status, priceNow, currentMultiple, remainingFraction,
-          tokensToSell, fill.netUsd, exitSlip, realizedMultiple, `invalidation: ${reason}`);
+          tokensToSell, fill.netUsd, exitSlip, realizedMultiple, `invalidation: ${invalidationReason}`, closeOutcomeClass);
         remainingFraction = 0;
 
         await this.prisma.paperPosition.update({
@@ -155,14 +208,15 @@ export class EvalService {
           data: {
             status: 'CLOSED', closedAt: new Date(),
             realizedMultiple, realizedValueUsd, remainingFraction: 0,
-            outcomeClass: outcomeClass(reason as PositionStatus | 'drawdown', realizedMultiple),
+            outcomeClass: closeOutcomeClass,
             executedRungs: executed.join(','), lastEvalAt: new Date(),
             priceNowUsd: priceNow, onchainLiqNowUsd: liqNow, currentMultiple,
             maxMultipleObserved: maxMult, maxDrawdownObserved: drawdown,
+            entryFeatures: nextEntryFeatures,
             ...lastTickData,
           },
         });
-        finalStatus = `closed:${outcomeClass(reason as PositionStatus | 'drawdown', realizedMultiple)}`;
+        finalStatus = `closed:${closeOutcomeClass}`;
         closed++;
       } else {
         await this.prisma.paperPosition.update({
@@ -171,6 +225,7 @@ export class EvalService {
             lastEvalAt: new Date(), priceNowUsd: priceNow, onchainLiqNowUsd: liqNow,
             currentMultiple, maxMultipleObserved: maxMult, maxDrawdownObserved: drawdown,
             remainingFraction, realizedValueUsd, executedRungs: executed.join(','),
+            entryFeatures: nextEntryFeatures,
             ...lastTickData,
           },
         });
@@ -191,7 +246,7 @@ export class EvalService {
         sell_sim_ok: sellSimOk == null ? '' : String(sellSimOk),
         sell_tax_now: sellTaxNow != null ? sellTaxNow.toFixed(6) : '',
         multiple_vs_entry: currentMultiple != null ? currentMultiple.toFixed(4) : '',
-        status,
+        status: tickStatus,
       });
 
       const feats = pos.entryFeatures as { finalScore?: number; scoreConfidence?: number } | null;
@@ -228,16 +283,16 @@ export class EvalService {
     };
   }
 
-  // Re-verify the pool's CURRENT on-chain liquidity/price. Returns null if unreadable.
+  // Re-verify the pool's CURRENT on-chain liquidity/price. Includes a failure reason.
   private async reReadOnchain(
     chain: SupportedChain,
     pool: { poolAddress: string; dex: string; token0: string; token1: string; quoteAsset: string } | null,
     decimals: number | undefined,
-  ): Promise<LiquidityCheckResult | null> {
-    if (!pool) return null;
+  ): Promise<OnchainReadResult> {
+    if (!pool) return { liq: null, error: 'missing_pool' };
     const quoteMap = QUOTE_ASSET_MAP[chain] ?? {};
     const quoteAddr = [pool.token0, pool.token1].find((a) => quoteMap[a.toLowerCase()] != null);
-    if (!quoteAddr) return null;
+    if (!quoteAddr) return { liq: null, error: 'quote_asset_not_found' };
     const candidate: CandidatePool = {
       chain,
       poolAddress: pool.poolAddress,
@@ -249,10 +304,16 @@ export class EvalService {
       source: 'paper-eval',
     };
     try {
-      return await this.liquidityVerifier.verify(candidate, decimals);
+      const liq = await this.liquidityVerifier.verify(candidate, decimals);
+      return {
+        liq,
+        error: liq.spotPriceUsd != null && liq.spotPriceUsd > 0
+          ? null
+          : (liq.error ?? 'no_price'),
+      };
     } catch (err) {
       this.logger.debug(`Eval re-read failed for ${chain}:${pool.poolAddress}: ${(err as Error).message}`);
-      return null;
+      return { liq: null, error: (err as Error).message };
     }
   }
 
@@ -274,6 +335,31 @@ export class EvalService {
     }
   }
 
+  private entryFeaturesRecord(value: unknown): Record<string, unknown> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return { ...(value as Record<string, unknown>) };
+  }
+
+  private readPriceFailureCount(value: unknown): number {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+
+  private withPriceReadFailure(
+    rawFeatures: unknown,
+    count: number,
+    error: string | null,
+  ): Prisma.InputJsonValue {
+    const next = this.entryFeaturesRecord(rawFeatures);
+    next.priceReadFailureCount = count;
+    if (count > 0 && error) {
+      next.lastPriceReadError = error.slice(0, 180);
+    } else {
+      delete next.lastPriceReadError;
+    }
+    return next as Prisma.InputJsonValue;
+  }
+
   private async writeExit(
     runId: string,
     pos: { id: string; chain: string; tokenAddress: string; symbol: string | null; poolAddress: string },
@@ -287,6 +373,7 @@ export class EvalService {
     slipPct: number | null,
     realizedMultipleTotal: number,
     note: string,
+    outcomeClassValue = '',
   ): Promise<void> {
     await this.prisma.paperEvent.create({
       data: {
@@ -310,7 +397,7 @@ export class EvalService {
       deployer_address: '',
       deployer_deployments_count: '',
       deployer_rug_count: '',
-      outcome_class: '',
+      outcome_class: outcomeClassValue,
     });
   }
 }

@@ -11,7 +11,7 @@ import { RISK_REDIS_CLIENT } from './risk-engine.constants';
 
 const CACHE_TTL_SECONDS = 45 * 60;
 // Bump this string whenever gate rules change — otherwise stale decisions live in cache.
-const CACHE_KEY_PREFIX = 'risk:v3:';
+const CACHE_KEY_PREFIX = 'risk:v4:';
 
 @Injectable()
 export class RiskEngineService {
@@ -126,7 +126,7 @@ export class RiskEngineService {
     const finalDecision =
       decision === 'CONTRACT_REJECT'
         ? 'CONTRACT_REJECT'
-        : providerStatus === 'OK'
+        : providerStatus === 'OK' || this.isCleanPartialWithCriticalFields(providerStatus, merged)
           ? 'CONTRACT_SAFE'
           : 'CONTRACT_UNKNOWN';
     const result: ContractRiskResult = {
@@ -149,6 +149,13 @@ export class RiskEngineService {
     return result;
   }
 
+  private isCleanPartialWithCriticalFields(
+    providerStatus: RiskDataStatus,
+    merged: NormalizedRiskData,
+  ): boolean {
+    return providerStatus === 'GOPLUS_PARTIAL' && this.allCriticalRiskFieldsPresent(merged);
+  }
+
   private resolveProviderStatus(
     goplusData: NormalizedRiskData,
     merged: NormalizedRiskData,
@@ -156,6 +163,7 @@ export class RiskEngineService {
     const explicitStatus = goplusData.providerStatus ?? 'OK';
     if (explicitStatus === 'GOPLUS_PARSE_FAILED') return explicitStatus;
     if (explicitStatus === 'GOPLUS_PARTIAL') return explicitStatus;
+    if (explicitStatus === 'GOPLUS_TRADE_ONLY_PARTIAL') return explicitStatus;
     if (this.allCriticalRiskFieldsUnknown(goplusData)) return 'GOPLUS_PARSE_FAILED';
     if (this.allCriticalRiskFieldsUnknown(merged)) return 'GOPLUS_PARSE_FAILED';
     return 'OK';
@@ -167,6 +175,15 @@ export class RiskEngineService {
       data.blacklistRisk === undefined &&
       data.proxyRisk === undefined &&
       data.honeypot === undefined
+    );
+  }
+
+  private allCriticalRiskFieldsPresent(data: NormalizedRiskData): boolean {
+    return (
+      data.mintRisk !== undefined &&
+      data.blacklistRisk !== undefined &&
+      data.proxyRisk !== undefined &&
+      data.honeypot !== undefined
     );
   }
 

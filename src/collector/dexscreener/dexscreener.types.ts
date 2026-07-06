@@ -12,6 +12,32 @@ export interface DsTokenProfile {
 
 export type DsTokenProfilesResponse = DsTokenProfile[];
 
+export interface DsTokenBoost {
+  url: string;
+  chainId: string;
+  tokenAddress: string;
+  amount?: number;
+  totalAmount?: number;
+  icon?: string | null;
+  header?: string | null;
+  description?: string | null;
+  links?: Array<{ label: string; type: string; url: string }> | null;
+}
+
+export type DsTokenBoostsResponse = DsTokenBoost[];
+
+export interface DsTokenAd {
+  url: string;
+  chainId: string;
+  tokenAddress: string;
+  date?: string;
+  type?: string;
+  durationHours?: number | null;
+  impressions?: number | null;
+}
+
+export type DsTokenAdsResponse = DsTokenAd[];
+
 // Pair data returned by /latest/dex/tokens/{address}
 export interface DsPairTransaction {
   buys: number;

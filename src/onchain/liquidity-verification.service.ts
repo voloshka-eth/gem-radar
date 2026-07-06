@@ -16,6 +16,31 @@ const UNSUPPORTED_RESULT = (model: string, error: string): LiquidityCheckResult 
   error,
 });
 
+const IMPLAUSIBLE_RESULT = (
+  model: 'V2' | 'V3',
+  error: string,
+  onchainTvlUsd: number,
+  reportedVsOnchainPct: number | null,
+  r: {
+    spotPriceUsd: number;
+    slip50: number | null; slip100: number | null;
+    slip500: number | null; slip1000: number | null;
+    executableDepthUsd: number;
+  },
+): LiquidityCheckResult => ({
+  liquidityModel:       model,
+  liquidityVerified:    false,
+  onchainTvlUsd,
+  reportedVsOnchainPct,
+  executableDepthUsd:   r.executableDepthUsd,
+  slip50:               r.slip50,
+  slip100:              r.slip100,
+  slip500:              r.slip500,
+  slip1000:             r.slip1000,
+  spotPriceUsd:         null,
+  error,
+});
+
 @Injectable()
 export class LiquidityVerificationService {
   private readonly logger = new Logger(LiquidityVerificationService.name);
@@ -100,7 +125,13 @@ export class LiquidityVerificationService {
         `${model} physicality guard → implausible_read: ${physFail} ` +
         `(onchain=$${onchainTvlUsd.toFixed(2)} reported=$${reportedUsd?.toFixed(0) ?? '?'})`,
       );
-      return UNSUPPORTED_RESULT(model, 'implausible_read');
+      return IMPLAUSIBLE_RESULT(
+        model,
+        `implausible_read: ${physFail}`,
+        onchainTvlUsd,
+        reportedVsOnchainPct,
+        r,
+      );
     }
 
     this.logger.log(

@@ -9,10 +9,13 @@ import {
   ScoringHistoryRow, SCORING_HISTORY_HEADERS,
   WatchlistTokenRow, WATCHLIST_TOKEN_HEADERS,
   PaperEntryRow, PAPER_ENTRY_HEADERS,
+  ResearchPaperEntryRow, RESEARCH_PAPER_ENTRY_HEADERS,
   PaperExitRow, PAPER_EXIT_HEADERS,
   ContractRiskRow, CONTRACT_RISK_HEADERS,
   ContractRejectedTokenRow, CONTRACT_REJECTED_TOKEN_HEADERS,
   QuarantineTokenRow, QUARANTINE_TOKEN_HEADERS,
+  ResearchCandidateRow, RESEARCH_CANDIDATE_HEADERS, RESEARCH_CANDIDATE_CAVEAT,
+  SpeculativeCandidateRow, SPECULATIVE_CANDIDATE_HEADERS, SPECULATIVE_CANDIDATE_CAVEAT,
   PoolSnapshotRow, POOL_SNAPSHOT_HEADERS,
   PoolLiquiditySnapshotRow, POOL_LIQUIDITY_SNAPSHOT_HEADERS,
   CandidateRow, CANDIDATE_HEADERS, CANDIDATE_CAVEAT,
@@ -55,6 +58,10 @@ export class FileLoggerService implements OnModuleInit {
     this.writeCsvRow('decisions/paper_entries.csv', PAPER_ENTRY_HEADERS, row);
   }
 
+  logResearchPaperEntry(row: ResearchPaperEntryRow): void {
+    this.writeCsvRow('decisions/research_paper_entries.csv', RESEARCH_PAPER_ENTRY_HEADERS, row);
+  }
+
   logPositionTick(row: PositionTickRow): void {
     this.writeCsvRow('decisions/position_ticks.csv', POSITION_TICK_HEADERS, row);
   }
@@ -73,6 +80,24 @@ export class FileLoggerService implements OnModuleInit {
 
   logQuarantineToken(row: QuarantineTokenRow): void {
     this.writeCsvRow('decisions/quarantine_tokens.csv', QUARANTINE_TOKEN_HEADERS, row);
+  }
+
+  logResearchCandidate(row: ResearchCandidateRow): void {
+    this.writeCsvRow(
+      'decisions/research_candidates.csv',
+      RESEARCH_CANDIDATE_HEADERS,
+      row,
+      RESEARCH_CANDIDATE_CAVEAT,
+    );
+  }
+
+  logSpeculativeCandidate(row: SpeculativeCandidateRow): void {
+    this.writeCsvRow(
+      'decisions/speculative_candidates.csv',
+      SPECULATIVE_CANDIDATE_HEADERS,
+      row,
+      SPECULATIVE_CANDIDATE_CAVEAT,
+    );
   }
 
   logPoolSnapshot(row: PoolSnapshotRow): void {

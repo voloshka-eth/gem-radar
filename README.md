@@ -25,18 +25,23 @@ persisted to the database.
 
 **Decision values:** `CONTRACT_SAFE` | `CONTRACT_REJECT` | `CONTRACT_UNKNOWN`
 
-`CONTRACT_UNKNOWN` = GoPlus was unavailable; the token still passes through (collection
-continues without blocking on API failures).
+`CONTRACT_UNKNOWN` = the providers did not return enough data to prove `CONTRACT_SAFE`.
+Unknown tokens normally go to quarantine/research. Clean GoPlus partials with
+`liquidity_verified=true` are logged to the speculative/research lane only by default.
+The old promotion path is behind `PROMOTE_CLEAN_UNKNOWN_ENABLED=true`; if enabled, it
+requires no reject reasons, clean trade/honeypot signal, on-chain liquidity, and a score
+band above `reject_band`, then writes `risk_decision=CONTRACT_UNKNOWN_PROMOTED_CLEAN_PARTIAL`.
 
 Every entry in `logs/raw/new_pools.csv` now means: *"this pool passed Stage 0 AND was not
-hard-rejected by the contract risk engine."*
+hard-rejected by the contract risk engine."* Normal operation should be `CONTRACT_SAFE`;
+promoted partials are opt-in and explicitly distinguished by `risk_decision`.
 
 ---
 
 ## Architecture
 
 ```
-Collectors (GeckoTerminal + DexScreener, every COLLECTOR_POLL_INTERVAL_MS)
+Collectors (GeckoTerminal + DexScreener feeds, every COLLECTOR_POLL_INTERVAL_MS)
         │
         ▼
 Stage 0  Cheap gate  ← deterministic filter on REPORTED data only
@@ -50,13 +55,14 @@ Risk Engine (M2A)   ← GoPlus + Honeypot.is contract safety check
 Persist to PostgreSQL + logs/raw/new_pools.csv
                      + logs/raw/contract_risk_checks.csv
 
-[M2B] On-chain liquidity verify → viem reads against actual reserves
-[M2C] Scoring Engine → finalGemScore
-[M2D] Paper Trading → open/track/exit simulated positions
-[M3]  On-chain slippage simulator
-[M4]  Reporting, Telegram alerts
-[M5]  Holder distribution, deployer reputation
+[M3A] On-chain liquidity/slippage verify -> V2/V3 viem reads against actual reserves
+[M4]  Scoring + daily reports -> ranking hypothesis, not a buy signal
+[M5]  Paper entry/eval/edge/postmortem + deployer reputation research
 ```
+
+DexScreener discovery uses multiple no-key feeds before pair enrichment:
+latest token profiles, latest boosts, top boosts, community takeovers, latest ads,
+and optional `MANUAL_PROBE_TOKENS`.
 
 ---
 
@@ -283,9 +289,6 @@ summary rows use `chain = "multi"`. GeckoTerminal rows use the actual chain name
 |---|---|
 | **M1** ✅ | Collectors, Stage 0 gate, DB persistence, CSV logger, 69 tests |
 | **M2A** ✅ | Contract Risk Engine: GoPlus + Honeypot.is, hard-reject gate, `contract_risk_checks` table, 115 tests |
-| M2B | On-chain liquidity verify (viem reads against actual reserves) |
-| M2C | Scoring Engine → finalGemScore |
-| M2D | Paper Trading → open/track/exit simulated positions |
-| M3 | On-chain slippage simulator |
-| M4 | Reporting (daily TXT), Telegram alerts |
-| M5 | Holder distribution, deployer reputation |
+| **M3A** ✅ | V2/V3 on-chain liquidity + slippage verification. V4/Aerodrome stable remain unsupported and are not treated as verified. |
+| **M4** ✅ | Scoring + daily TXT reports. Scores are hypotheses, not edge or recommendations. Telegram config exists but alert delivery is not wired. |
+| **M5** ◐ | Paper entries, newest-first on-demand eval, edge/postmortem reports, deployer reputation/blocklist. Holder concentration, wash-trade, smart-wallet, unique-buyer signals are still missing from scoring confidence. |

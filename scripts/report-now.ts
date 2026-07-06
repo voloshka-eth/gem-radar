@@ -5,6 +5,7 @@
  * Usage:  npm run report:now
  */
 import 'reflect-metadata';
+process.env.COLLECTOR_AUTOSTART = 'false';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { ReportService } from '../src/report/report.service';
