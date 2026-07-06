@@ -167,6 +167,7 @@ describe('CollectorService', () => {
     recordResearchEntry: jest.fn().mockResolvedValue(undefined),
   };
   const deployerReputationMock = {
+    findBlocklistHit: jest.fn().mockResolvedValue(null),
     summarize: jest.fn().mockResolvedValue(null),
     isRepeatRugger: jest.fn().mockReturnValue(false),
   };
@@ -185,6 +186,7 @@ describe('CollectorService', () => {
     prismaMock.rawCollectorPayload.create.mockResolvedValue({});
     prismaMock.contractRiskCheck.create.mockResolvedValue({});
     prismaMock.quarantineToken.create.mockResolvedValue({ id: 'quat-id' });
+    deployerReputationMock.findBlocklistHit.mockResolvedValue(null);
     deployerReputationMock.summarize.mockResolvedValue(null);
     deployerReputationMock.isRepeatRugger.mockReturnValue(false);
     gtMock.getNewPools.mockResolvedValue([]);
@@ -840,7 +842,12 @@ describe('CollectorService', () => {
   });
 
   it('deployer blocklist rejects before liquidity/scoring even when contract risk is SAFE', async () => {
-    (service as any).blockedDeployers = new Set(['ethereum:0xblocked']);
+    deployerReputationMock.findBlocklistHit.mockResolvedValue({
+      chain: 'ethereum',
+      address: '0xblocked',
+      source: 'test',
+      reason: 'manual_block',
+    });
     riskMock.checkToken.mockResolvedValue({
       ...SAFE_RISK,
       merged: { ...SAFE_RISK.merged, deployerAddress: '0xBlocked' },
@@ -849,6 +856,8 @@ describe('CollectorService', () => {
 
     await service.runCollectionCycle();
 
+    expect(deployerReputationMock.findBlocklistHit).toHaveBeenCalledWith('ethereum', '0xblocked');
+    expect(deployerReputationMock.summarize).not.toHaveBeenCalled();
     expect(prismaMock.pool.upsert).not.toHaveBeenCalled();
     expect(liquidityMock.verify).not.toHaveBeenCalled();
     expect(prismaMock.contractRiskCheck.create).toHaveBeenCalledWith(

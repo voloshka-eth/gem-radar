@@ -98,6 +98,7 @@ function harness(
 ) {
   const prisma = {
     paperPosition: {
+      count: jest.fn().mockResolvedValue(1),
       findMany: jest.fn().mockResolvedValue([position]),
       update: jest.fn().mockResolvedValue({}),
     },
@@ -158,17 +159,24 @@ describe('EvalService price-read failures', () => {
     expect(result.rows[0].status).toBe('price_unreadable_2/3');
   });
 
-  it('evaluates newest OPEN positions first and respects the configured cap', async () => {
+  it('evaluates oldest OPEN positions first and reports deferred positions when capped', async () => {
     const { service, prisma } = harness(openPosition(), healthyLiquidity(), {
       'paper.evalMaxOpenPositions': 25,
     });
+    prisma.paperPosition.count.mockResolvedValue(30);
 
-    await service.evaluateOpenPositions();
+    const result = await service.evaluateOpenPositions();
 
+    expect(result.openTotal).toBe(30);
+    expect(result.evaluated).toBe(1);
+    expect(result.deferred).toBe(29);
+    expect(prisma.paperPosition.count).toHaveBeenCalledWith({
+      where: { status: 'OPEN' },
+    });
     expect(prisma.paperPosition.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { status: 'OPEN' },
-        orderBy: { openedAt: 'desc' },
+        orderBy: { openedAt: 'asc' },
         take: 25,
       }),
     );

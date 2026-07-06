@@ -1,7 +1,12 @@
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { DeployerReputationService } from './deployer-reputation.service';
 
 describe('DeployerReputationService', () => {
+  let tempDir: string;
+
   const prismaMock = {
     deployer: {
       findUnique: jest.fn(),
@@ -21,6 +26,8 @@ describe('DeployerReputationService', () => {
         'collector.deployerGateMinDeployments': 2,
         'collector.deployerGateMinRugLike': 2,
         'collector.deployerGateMinRugRate': 0.5,
+        'collector.blockedDeployers': [],
+        'app.logDir': tempDir,
       };
       return cfg[key];
     }),
@@ -29,6 +36,7 @@ describe('DeployerReputationService', () => {
   let service: DeployerReputationService;
 
   beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deployer-reputation-test-'));
     jest.clearAllMocks();
     prismaMock.deployer.findUnique.mockResolvedValue(null);
     prismaMock.deployer.upsert.mockResolvedValue({});
@@ -38,6 +46,24 @@ describe('DeployerReputationService', () => {
       prismaMock as any,
       configMock as unknown as ConfigService,
     );
+  });
+
+  it('persists and reads manual deployer blocklist entries', async () => {
+    await service.addBlocklistEntry(
+      'base',
+      '0xF7FB648752D1cF4B18fCbA3D3F33D2C44e4E80fC',
+      'repeat openhuman rugs',
+      'operator',
+    );
+
+    await expect(
+      service.findBlocklistHit('base', '0xf7fb648752d1cf4b18fcba3d3f33d2c44e4e80fc'),
+    ).resolves.toEqual({
+      chain: 'base',
+      address: '0xf7fb648752d1cf4b18fcba3d3f33d2c44e4e80fc',
+      source: 'operator',
+      reason: 'repeat openhuman rugs',
+    });
   });
 
   it('summarizes paper and shadow rug-like history for one deployer', async () => {

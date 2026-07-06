@@ -21,6 +21,7 @@ import { PaperService } from '../paper/paper.service';
 import {
   DeployerReputationService,
   DeployerReputationSummary,
+  DeployerBlocklistHit,
 } from '../deployer/deployer-reputation.service';
 
 type CandidateProcessingResult = {
@@ -54,7 +55,6 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly tokenAgeHardGateEnabled: boolean;
   private readonly promoteCleanUnknownEnabled: boolean;
   private readonly deployerGateEnabled: boolean;
-  private readonly blockedDeployers: Set<string>;
   private readonly manualProbeTokens: TokenProbe[];
 
   constructor(
@@ -99,10 +99,6 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       this.config.get<boolean>('collector.promoteCleanUnknownEnabled') ?? false;
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
-    this.blockedDeployers = new Set(
-      (this.config.get<TokenProbe[]>('collector.blockedDeployers') ?? [])
-        .map((probe) => `${probe.chain}:${probe.tokenAddress.toLowerCase()}`),
-    );
     this.manualProbeTokens =
       (this.config.get<TokenProbe[]>('collector.manualProbeTokens') ?? [])
         .filter((probe): probe is TokenProbe =>
@@ -305,7 +301,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       const deployerReject = await this.checkDeployerReject(candidate);
       if (deployerReject) {
         riskResult = deployerReject.kind === 'blocklist'
-          ? this.rejectForBlockedDeployer(riskResult, deployerReject.address)
+          ? this.rejectForBlockedDeployer(riskResult, deployerReject.hit)
           : this.rejectForDeployerReputation(riskResult, deployerReject.summary);
       }
     }
@@ -502,16 +498,18 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
   private rejectForBlockedDeployer(
     riskResult: ContractRiskResult,
-    address: string,
+    hit: DeployerBlocklistHit,
   ): ContractRiskResult {
-    this.logger.warn(`Blocked deployer gate: ${address} rejected by local blocklist`);
+    this.logger.warn(
+      `Blocked deployer gate: ${hit.address} rejected by ${hit.source} blocklist (${hit.reason})`,
+    );
     return {
       ...riskResult,
       decision: 'CONTRACT_REJECT',
       rejectReasons: [...riskResult.rejectReasons, 'deployer_blocklisted'],
       merged: {
         ...riskResult.merged,
-        deployerAddress: address,
+        deployerAddress: hit.address,
       },
     };
   }
@@ -519,7 +517,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private async checkDeployerReject(
     candidate: CollectorResult,
   ): Promise<
-    | { kind: 'blocklist'; address: string }
+    | { kind: 'blocklist'; hit: DeployerBlocklistHit }
     | { kind: 'reputation'; summary: DeployerReputationSummary }
     | null
   > {
@@ -527,8 +525,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     const address = candidate.token.deployerAddress?.toLowerCase();
     if (!address) return null;
-    if (this.blockedDeployers.has(`${candidate.token.chain}:${address}`)) {
-      return { kind: 'blocklist', address };
+    const blocklistHit = await this.deployerReputation.findBlocklistHit(
+      candidate.token.chain,
+      address,
+    );
+    if (blocklistHit) {
+      return { kind: 'blocklist', hit: blocklistHit };
     }
 
     try {

@@ -25,6 +25,7 @@
     "postmortem": "ts-node scripts/postmortem.ts",
     "edge": "ts-node scripts/edge.ts",
     "deployers:refresh": "ts-node scripts/deployer-reputation.ts",
+    "deployers:block": "ts-node scripts/block-deployer.ts",
     "gem:screen": "ts-node scripts/gem-screen.ts",
     "gem:shadow": "ts-node scripts/gem-shadow.ts",
     "gem:report": "ts-node scripts/gem-report.ts",

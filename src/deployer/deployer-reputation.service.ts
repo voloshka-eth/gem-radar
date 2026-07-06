@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { PrismaService } from '../database/prisma.service';
 import { SupportedChain } from '../collector/collector.types';
 
@@ -20,6 +22,18 @@ export interface DeployerReputationRefreshResult {
   rugLikeTokens: number;
 }
 
+export interface DeployerBlocklistHit {
+  chain: SupportedChain;
+  address: string;
+  source: string;
+  reason: string;
+}
+
+interface DeployerBlocklistRecord extends DeployerBlocklistHit {
+  ts: string;
+  active?: boolean;
+}
+
 interface MutableSummary {
   chain: SupportedChain;
   address: string;
@@ -33,6 +47,10 @@ export class DeployerReputationService {
   private readonly minDeployments: number;
   private readonly minRugLike: number;
   private readonly minRugRate: number;
+  private readonly envBlocklist = new Map<string, DeployerBlocklistHit>();
+  private readonly blocklistPath: string;
+  private cachedBlocklistMtimeMs = -1;
+  private cachedFileBlocklist = new Map<string, DeployerBlocklistHit>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -44,6 +62,19 @@ export class DeployerReputationService {
       this.config.get<number>('collector.deployerGateMinRugLike') ?? 2;
     this.minRugRate =
       this.config.get<number>('collector.deployerGateMinRugRate') ?? 0.5;
+    const logDir = this.config.get<string>('app.logDir') ?? './logs';
+    this.blocklistPath = path.join(logDir, 'state', 'deployer_blocklist.jsonl');
+    for (const entry of this.config.get<Array<{ chain: string; tokenAddress: string }>>('collector.blockedDeployers') ?? []) {
+      const chain = entry.chain as SupportedChain;
+      const address = this.normalizeAddress(entry.tokenAddress);
+      if (!address) continue;
+      this.envBlocklist.set(this.key(chain, address), {
+        chain,
+        address,
+        source: 'env',
+        reason: 'BLOCKED_DEPLOYERS',
+      });
+    }
   }
 
   isRepeatRugger(summary: DeployerReputationSummary): boolean {
@@ -126,6 +157,44 @@ export class DeployerReputationService {
       rugRate: deploymentsCount > 0 ? rugLikeCount / deploymentsCount : 0,
       riskScore,
     };
+  }
+
+  async findBlocklistHit(
+    chain: SupportedChain,
+    deployerAddress: string,
+  ): Promise<DeployerBlocklistHit | null> {
+    const address = this.normalizeAddress(deployerAddress);
+    if (!address) return null;
+
+    const key = this.key(chain, address);
+    const envHit = this.envBlocklist.get(key);
+    if (envHit) return envHit;
+
+    const fileBlocklist = await this.loadFileBlocklist();
+    return fileBlocklist.get(key) ?? null;
+  }
+
+  async addBlocklistEntry(
+    chain: SupportedChain,
+    deployerAddress: string,
+    reason: string,
+    source = 'manual',
+  ): Promise<DeployerBlocklistHit> {
+    const address = this.normalizeAddress(deployerAddress);
+    if (!address) throw new Error('Missing deployer address');
+
+    const record: DeployerBlocklistRecord = {
+      ts: new Date().toISOString(),
+      chain,
+      address,
+      source,
+      reason: reason.trim() || 'manual_block',
+      active: true,
+    };
+    await fs.mkdir(path.dirname(this.blocklistPath), { recursive: true });
+    await fs.appendFile(this.blocklistPath, `${JSON.stringify(record)}\n`, 'utf8');
+    this.cachedBlocklistMtimeMs = -1;
+    return { chain, address, source: record.source, reason: record.reason };
   }
 
   async refreshAll(): Promise<DeployerReputationRefreshResult> {
@@ -244,6 +313,54 @@ export class DeployerReputationService {
 
   private normalizeAddress(value?: string | null): string | null {
     return value ? value.toLowerCase() : null;
+  }
+
+  private key(chain: SupportedChain, address: string): string {
+    return `${chain}:${address.toLowerCase()}`;
+  }
+
+  private async loadFileBlocklist(): Promise<Map<string, DeployerBlocklistHit>> {
+    let stat;
+    try {
+      stat = await fs.stat(this.blocklistPath);
+    } catch {
+      this.cachedBlocklistMtimeMs = -1;
+      this.cachedFileBlocklist = new Map();
+      return this.cachedFileBlocklist;
+    }
+
+    if (stat.mtimeMs === this.cachedBlocklistMtimeMs) {
+      return this.cachedFileBlocklist;
+    }
+
+    const next = new Map<string, DeployerBlocklistHit>();
+    const raw = await fs.readFile(this.blocklistPath, 'utf8');
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line) as DeployerBlocklistRecord;
+        const chain = record.chain as SupportedChain;
+        const address = this.normalizeAddress(record.address);
+        if (!chain || !address) continue;
+        const key = this.key(chain, address);
+        if (record.active === false) {
+          next.delete(key);
+          continue;
+        }
+        next.set(key, {
+          chain,
+          address,
+          source: record.source || 'file',
+          reason: record.reason || 'manual_block',
+        });
+      } catch (err) {
+        this.logger.warn(`Ignoring malformed deployer blocklist row: ${(err as Error).message}`);
+      }
+    }
+
+    this.cachedBlocklistMtimeMs = stat.mtimeMs;
+    this.cachedFileBlocklist = next;
+    return next;
   }
 
   private riskScore(deploymentsCount: number, rugLikeCount: number): number {

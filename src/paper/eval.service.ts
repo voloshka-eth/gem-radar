@@ -55,20 +55,32 @@ export class EvalService {
   async evaluateOpenPositions(): Promise<{
     rows: EvalViewRow[];
     evaluated: number;
+    openTotal: number;
+    deferred: number;
     closed: number;
     deployersRefreshed: number;
     rugLikeTokens: number;
   }> {
     const runId = `eval-${randomUUID().slice(0, 8)}`;
     const evalMaxOpenPositions = this.config.get<number>('paper.evalMaxOpenPositions');
+    const openTotal = await this.prisma.paperPosition.count({
+      where: { status: 'OPEN' },
+    });
     const open = await this.prisma.paperPosition.findMany({
       where: { status: 'OPEN' },
       include: { pool: true, token: true },
-      orderBy: { openedAt: 'desc' },
+      orderBy: { openedAt: 'asc' },
       ...(evalMaxOpenPositions && evalMaxOpenPositions > 0
         ? { take: Math.floor(evalMaxOpenPositions) }
         : {}),
     });
+    const deferred = Math.max(0, openTotal - open.length);
+    if (deferred > 0) {
+      this.logger.warn(
+        `Paper eval capped: evaluating ${open.length}/${openTotal} OPEN positions; ` +
+        `${deferred} deferred until next run`,
+      );
+    }
 
     const sandwichPct  = this.config.get<number>('paper.sandwichPct') ?? 0.01;
     const gasUsd       = this.config.get<number>('paper.gasUsd') ?? 1.5;
@@ -277,6 +289,8 @@ export class EvalService {
     return {
       rows,
       evaluated: open.length,
+      openTotal,
+      deferred,
       closed,
       deployersRefreshed: reputation.deployersUpdated,
       rugLikeTokens: reputation.rugLikeTokens,

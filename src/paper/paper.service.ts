@@ -144,6 +144,7 @@ export class PaperService {
       }
     } catch (err) {
       this.logger.warn(`Paper entry DB write failed (${pool.chain}:${token.tokenAddress}): ${(err as Error).message}`);
+      return;
     }
 
     this.fileLogger.logPaperEntry({

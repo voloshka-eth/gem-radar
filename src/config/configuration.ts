@@ -144,7 +144,7 @@ export const paperConfig = registerAs('paper', () => ({
   sellTaxSpikePct:       parseFloat(process.env.PAPER_SELL_TAX_SPIKE_PCT  ?? '0.50'), // sell tax ≥ 50% → unsellable
   maxDrawdownInvalidate: parseFloat(process.env.PAPER_MAX_DRAWDOWN        ?? '0.70'), // drawdown > 70% → invalidate
   priceReadFailureRugThreshold: parseInt(process.env.PAPER_PRICE_READ_FAILURE_RUG_THRESHOLD ?? '3', 10),
-  evalMaxOpenPositions: parseInt(process.env.PAPER_EVAL_MAX_OPEN_POSITIONS ?? '50', 10),
+  evalMaxOpenPositions: parseInt(process.env.PAPER_EVAL_MAX_OPEN_POSITIONS ?? '0', 10),
   // Analysis gates.
   edgeScoreThreshold:    parseFloat(process.env.PAPER_EDGE_SCORE_THRESHOLD ?? '70'),  // "candidate" band min
   minClosedForEdge:      parseInt(  process.env.PAPER_MIN_CLOSED_FOR_EDGE  ?? '50', 10),
