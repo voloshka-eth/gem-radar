@@ -7,7 +7,9 @@ import { FileLoggerService } from '../file-logger/file-logger.service';
 import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
 import { GeckoTerminalService } from './geckoterminal/geckoterminal.service';
 import { DexScreenerService } from './dexscreener/dexscreener.service';
-import { CollectorResult, SupportedChain } from './collector.types';
+import { CollectorResult, SupportedChain, TokenProbe } from './collector.types';
+import { MoralisService } from './moralis/moralis.service';
+import { BirdeyeService } from './birdeye/birdeye.service';
 import { applyStage0Gate, filterDuplicates, Stage0Config } from './stage0-gate';
 import { RiskEngineService } from '../risk-engine/risk-engine.service';
 import { ContractRiskResult, NormalizedRiskData } from '../risk-engine/risk-engine.types';
@@ -29,7 +31,6 @@ type CandidateProcessingResult = {
   riskResult: ContractRiskResult;
 };
 
-type TokenProbe = { chain: SupportedChain; tokenAddress: string };
 type ResearchEvaluation = {
   liq: LiquidityCheckResult;
   ageDays: number | null;
@@ -63,6 +64,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     private readonly fileLogger: FileLoggerService,
     private readonly geckoTerminal: GeckoTerminalService,
     private readonly dexScreener: DexScreenerService,
+    private readonly moralis: MoralisService,
+    private readonly birdeye: BirdeyeService,
     private readonly riskEngine: RiskEngineService,
     private readonly tokenAge: TokenAgeService,
     private readonly liquidityVerifier: LiquidityVerificationService,
@@ -160,7 +163,9 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     // ── GeckoTerminal pass (per chain) ──
     for (const chain of this.enabledChains) {
-      const gtNormalized = await this.geckoTerminal.getNewPools(chain);
+      const gtNewPools = await this.geckoTerminal.getNewPools(chain);
+      const gtTrendingPools = await this.geckoTerminal.getTrendingPools(chain);
+      const gtNormalized = [...gtNewPools, ...gtTrendingPools];
       const candidates = filterDuplicates(gtNormalized, seenThisCycle);
 
       this.fileLogger.logRawPayload({
@@ -168,11 +173,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         ts: new Date().toISOString(),
         chain,
         source: 'geckoterminal',
+        new_pools_count: gtNewPools.length,
+        trending_pools_count: gtTrendingPools.length,
         pool_count: gtNormalized.length,
         deduped_count: candidates.length,
       });
       await this.storeRawPayload(runId, chain, 'geckoterminal', {
         payload_type: 'cycle_summary',
+        new_pools_count: gtNewPools.length,
+        trending_pools_count: gtTrendingPools.length,
         pool_count: gtNormalized.length,
         deduped_count: candidates.length,
         pool_addresses: candidates.map((c) => c.pool.poolAddress).slice(0, 100),
@@ -207,12 +216,16 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     const dsTopBoostAddresses = await this.dexScreener.getTopBoostAddresses(this.enabledChains);
     const dsCommunityAddresses = await this.dexScreener.getLatestCommunityTakeoverAddresses(this.enabledChains);
     const dsAdAddresses = await this.dexScreener.getLatestAdAddresses(this.enabledChains);
+    const moralisTrendingAddresses = await this.moralis.getTrendingTokenAddresses(this.enabledChains);
+    const birdeyeVolumeAddresses = await this.birdeye.getVolumeTokenAddresses(this.enabledChains);
     const dsAddresses = this.dedupeTokenProbes([
       ...dsProfileAddresses,
       ...dsBoostAddresses,
       ...dsTopBoostAddresses,
       ...dsCommunityAddresses,
       ...dsAdAddresses,
+      ...moralisTrendingAddresses,
+      ...birdeyeVolumeAddresses,
       ...this.manualProbeTokens,
     ]);
     const dsCandidates = await this.dexScreener.getPairsForTokens(dsAddresses);
@@ -227,6 +240,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       top_boost_addresses: dsTopBoostAddresses.length,
       community_takeover_addresses: dsCommunityAddresses.length,
       ad_addresses: dsAdAddresses.length,
+      moralis_trending_addresses: moralisTrendingAddresses.length,
+      birdeye_volume_addresses: birdeyeVolumeAddresses.length,
       manual_addresses: this.manualProbeTokens.length,
       token_addresses: dsAddresses.length,
       raw_count: dsCandidates.length,
@@ -239,6 +254,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       top_boost_addresses: dsTopBoostAddresses.length,
       community_takeover_addresses: dsCommunityAddresses.length,
       ad_addresses: dsAdAddresses.length,
+      moralis_trending_addresses: moralisTrendingAddresses.length,
+      birdeye_volume_addresses: birdeyeVolumeAddresses.length,
       manual_addresses: this.manualProbeTokens.length,
       token_addresses_count: dsAddresses.length,
       raw_count: dsCandidates.length,
@@ -530,11 +547,13 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       address,
     );
     if (blocklistHit) {
+      candidate.token.deployerBlocklisted = true;
       return { kind: 'blocklist', hit: blocklistHit };
     }
 
     try {
       const summary = await this.deployerReputation.summarize(candidate.token.chain, address);
+      if (summary) this.enrichCandidateDeployerReputation(candidate, summary);
       return summary && this.deployerReputation.isRepeatRugger(summary)
         ? { kind: 'reputation', summary }
         : null;
@@ -545,6 +564,16 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     return null;
+  }
+
+  private enrichCandidateDeployerReputation(
+    candidate: CollectorResult,
+    summary: DeployerReputationSummary,
+  ): void {
+    candidate.token.deployerDeploymentsCount = summary.deploymentsCount;
+    candidate.token.deployerRugLikeCount = summary.rugLikeCount;
+    candidate.token.deployerRiskScore = summary.riskScore;
+    candidate.token.deployerBlocklisted = false;
   }
 
   private shouldLogResearchCandidate(
@@ -1155,7 +1184,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     liq: LiquidityCheckResult,
     ageDays: number | null,
   ): ScoreSnapshot {
-    const { pool } = candidate;
+    const { pool, token } = candidate;
     return {
       liquidityModel:       liq.liquidityModel,
       onchainTvlUsd:        liq.onchainTvlUsd,
@@ -1173,6 +1202,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       vol24h:               pool.vol24h  ?? null,
       buys1h:               pool.buys1h  ?? null,
       sells1h:              pool.sells1h ?? null,
+      deployerDeploymentsCount: token.deployerDeploymentsCount ?? null,
+      deployerRugLikeCount: token.deployerRugLikeCount ?? null,
+      deployerRiskScore: token.deployerRiskScore ?? null,
+      deployerBlocklisted: token.deployerBlocklisted ?? null,
     };
   }
 
@@ -1234,6 +1267,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       age_score:          num(r.ageScore),
       traction_score:     num(r.tractionScore),
       divergence_score:   num(r.divergenceScore),
+      deployer_reputation_score: num(r.deployerReputationScore),
       final_score:        r.finalScore.toFixed(2),
       band:               r.band,
       score_confidence:   r.scoreConfidence.toFixed(3),

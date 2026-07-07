@@ -77,8 +77,13 @@ export class PaperService {
       depthScore: score.depthScore,
       ageScore: score.ageScore,
       tractionScore: score.tractionScore,
+      deployerReputationScore: score.deployerReputationScore,
       scoreConfidence: score.scoreConfidence,
       band: score.band,
+      deployerDeploymentsCount: token.deployerDeploymentsCount ?? null,
+      deployerRugLikeCount: token.deployerRugLikeCount ?? null,
+      deployerRiskScore: token.deployerRiskScore ?? null,
+      deployerBlocklisted: token.deployerBlocklisted ?? null,
     };
 
     const status = fill.entered ? 'OPEN' : 'NOT_ENTERED';
@@ -174,8 +179,8 @@ export class PaperService {
       band: score.band,
       score_confidence: score.scoreConfidence.toFixed(3),
       deployer_address: token.deployerAddress ?? '',
-      deployer_deployments_count: '',
-      deployer_rug_count: '',
+      deployer_deployments_count: token.deployerDeploymentsCount != null ? String(token.deployerDeploymentsCount) : '',
+      deployer_rug_count: token.deployerRugLikeCount != null ? String(token.deployerRugLikeCount) : '',
       lp_locked: '',
       lp_lock_source: '',
       lp_lock_fraction: '',

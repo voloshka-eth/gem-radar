@@ -72,8 +72,7 @@ export class DexResolverService {
    *
    * Probe order:
    *   1. getReserves() → V2-style (Uniswap V2, Aerodrome volatile/stable)
-   *      → if stable() == true → UNSUPPORTED_AERODROME_STABLE
-   *      → otherwise V2
+   *      → stable pools are verified from reserves with conservative CP depth approximation
    *   2. slot0() + liquidity() → V3-style
    *   3. Both fail → UNSUPPORTED_V4 (if dexName hints V4) or UNSUPPORTED_UNKNOWN
    *
@@ -103,12 +102,12 @@ export class DexResolverService {
     if (p1.ok) {
       // Check if Aerodrome stable pool (different math — not supported in M3A)
       const stableResult = await this.tryCallBool(client, addr, STABLE_ABI, 'stable');
-      if (stableResult.value === true) {
-        return { model: 'UNSUPPORTED_AERODROME_STABLE' };
-      }
       // Volatile Aerodrome or Uniswap V2 — try to read fee (Aerodrome only; V2 = 30 BPS)
       const feeResult = await this.tryCallUint(client, addr, FEE_ABI, 'fee');
       const feeBps = feeResult.value ?? 30;
+      if (stableResult.value === true) {
+        this.logger.debug(`${chain}:${poolAddress} -> V2 (Aerodrome stable; conservative CP depth approximation)`);
+      }
       return { model: 'V2', feeBps };
     }
 

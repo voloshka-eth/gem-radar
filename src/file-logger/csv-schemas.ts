@@ -2,7 +2,7 @@
 // Adding a field: extend the interface, add an entry to the headers array,
 // bump CSV_SCHEMA_VERSION.  Never reorder existing columns — append only.
 
-export const CSV_SCHEMA_VERSION = '1.4.0'; // GoPlus fail-closed parser quality status
+export const CSV_SCHEMA_VERSION = '1.5.0'; // deployer score + shadow horizon CSV exports
 
 export interface CsvHeader {
   id: string;   // matches the key in the row object
@@ -149,6 +149,7 @@ export interface ScoringHistoryRow {
   score_confidence: string;      // computed / FULL intended model (0–1); ~0.5 today, never 1.0
   components_present: string;    // semicolon-joined component keys
   components_missing: string;    // implemented-without-data + unimplemented rug-vector components
+  deployer_reputation_score: string;
 }
 
 export const SCORING_HISTORY_HEADERS: CsvHeader[] = [
@@ -169,6 +170,7 @@ export const SCORING_HISTORY_HEADERS: CsvHeader[] = [
   { id: 'score_confidence', title: 'score_confidence' },
   { id: 'components_present', title: 'components_present' },
   { id: 'components_missing', title: 'components_missing' },
+  { id: 'deployer_reputation_score', title: 'deployer_reputation_score' },
 ];
 
 // ─── decisions/watchlist_tokens.csv ───────────────────────────────────────────
@@ -378,6 +380,63 @@ export const POSITION_TICK_HEADERS: CsvHeader[] = [
   { id: 'sell_tax_now', title: 'sell_tax_now' },
   { id: 'multiple_vs_entry', title: 'multiple_vs_entry' },
   { id: 'status', title: 'status' },
+];
+
+// ─── decisions/gem_shadow_ticks.csv ───────────────────────────────────────────
+// Shadow tracker horizon observations. Observation only: these rows test delayed-entry
+// hypotheses (T+15m/T+1h/...) and must never be read as live entry/exit signals.
+export interface GemShadowTickRow {
+  ts: string;
+  run_id: string;
+  schema_version: string;
+  candidate_id: string;
+  chain: string;
+  token_address: string;
+  symbol: string;
+  pool_address: string;
+  deployer_address: string;
+  t0_ts: string;
+  horizon: string;
+  due_at: string;
+  captured_at: string;
+  elapsed_min: string;
+  status: string;
+  price_usd: string;
+  fdv_usd: string;
+  entry_fdv_usd: string;
+  multiple_vs_t0: string;
+  onchain_liq_usd: string;
+  unique_buyers: string;
+  unique_sellers: string;
+  sell_sim_ok: string;
+  rug_flag: string;
+}
+
+export const GEM_SHADOW_TICK_HEADERS: CsvHeader[] = [
+  { id: 'ts', title: 'ts' },
+  { id: 'run_id', title: 'run_id' },
+  { id: 'schema_version', title: 'schema_version' },
+  { id: 'candidate_id', title: 'candidate_id' },
+  { id: 'chain', title: 'chain' },
+  { id: 'token_address', title: 'token_address' },
+  { id: 'symbol', title: 'symbol' },
+  { id: 'pool_address', title: 'pool_address' },
+  { id: 'deployer_address', title: 'deployer_address' },
+  { id: 't0_ts', title: 't0_ts' },
+  { id: 'horizon', title: 'horizon' },
+  { id: 'due_at', title: 'due_at' },
+  { id: 'captured_at', title: 'captured_at' },
+  { id: 'elapsed_min', title: 'elapsed_min' },
+  { id: 'status', title: 'status' },
+  { id: 'price_usd', title: 'price_usd' },
+  { id: 'fdv_usd', title: 'fdv_usd' },
+  { id: 'entry_fdv_usd', title: 'entry_fdv_usd' },
+  { id: 'multiple_vs_t0', title: 'multiple_vs_t0' },
+  { id: 'onchain_liq_usd', title: 'onchain_liq_usd' },
+  { id: 'unique_buyers', title: 'unique_buyers' },
+  { id: 'unique_sellers', title: 'unique_sellers' },
+  { id: 'sell_sim_ok', title: 'sell_sim_ok' },
+  { id: 'rug_flag', title: 'rug_flag' },
 ];
 
 // ─── decisions/paper_exits.csv ────────────────────────────────────────────────

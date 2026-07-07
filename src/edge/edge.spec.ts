@@ -2,8 +2,8 @@ import { computeEdge, ClosedPosition, EdgeParams } from './edge';
 
 const P: EdgeParams = { minClosed: 50, scoreThreshold: 70 };
 
-function mk(realizedMultiple: number, finalScore: number, band: string): ClosedPosition {
-  return { realizedMultiple, finalScore, band };
+function mk(realizedMultiple: number, finalScore: number, band: string, fdvUsd?: number): ClosedPosition {
+  return { realizedMultiple, finalScore, band, fdvUsd };
 }
 
 describe('computeEdge — verdict wiring', () => {
@@ -40,6 +40,20 @@ describe('computeEdge — verdict wiring', () => {
   it('expectancy is net per $1 (multiple − 1)', () => {
     const r = computeEdge(Array.from({ length: 50 }, () => mk(1.5, 80, 'high_band')), P);
     expect(r.expectancyEnterAll).toBeCloseTo(0.5, 6);
+  });
+
+  it('groups closed positions by entry FDV for hypothesis analysis', () => {
+    const r = computeEdge([
+      mk(2.0, 80, 'candidate', 25_000),
+      mk(0.5, 80, 'candidate', 75_000),
+      mk(1.5, 80, 'candidate', 750_000),
+    ], { minClosed: 1, scoreThreshold: 70 });
+
+    expect(r.fdvBuckets).toEqual([
+      { bucket: '<$50k', n: 1, expectancyPer$1: 1 },
+      { bucket: '$50k-$100k', n: 1, expectancyPer$1: -0.5 },
+      { bucket: '$300k-$1M', n: 1, expectancyPer$1: 0.5 },
+    ]);
   });
 
   it('only a genuinely superior, monotonic, profitable, large sample survives', () => {

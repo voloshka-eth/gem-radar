@@ -5,6 +5,7 @@ import {
   ageScore,
   tractionScore,
   divergenceScore,
+  deployerReputationScore,
   bandFor,
   DEFAULT_SCORING_PARAMS,
   INTENDED_COMPONENT_KEYS,
@@ -31,6 +32,10 @@ const fullV2: ScoreSnapshot = {
   vol24h: 200_000,
   buys1h: 60,
   sells1h: 40,
+  deployerDeploymentsCount: 3,
+  deployerRugLikeCount: 0,
+  deployerRiskScore: 0,
+  deployerBlocklisted: false,
 };
 
 // Same, but V3 with a large STRUCTURAL gap → divergence is omitted (neutral).
@@ -60,10 +65,10 @@ describe('scoreSnapshot — determinism / replay (PURITY CONTRACT)', () => {
 });
 
 describe('scoreSnapshot — honest confidence over the FULL intended model', () => {
-  it('never reads 1.0: even a fully-populated V2 is ~0.5 because rug-vector components are unwired', () => {
+  it('never reads 1.0: even a fully-populated V2 is ~0.6 because rug-vector components are still partly unwired', () => {
     const r = scoreSnapshot(fullV2);
-    // 5 implemented present / 10 intended.
-    expect(r.scoreConfidence).toBeCloseTo(0.5, 5);
+    // 6 implemented present / 10 intended.
+    expect(r.scoreConfidence).toBeCloseTo(0.6, 5);
     expect(r.scoreConfidence).toBeLessThan(1.0);
   });
 
@@ -76,10 +81,10 @@ describe('scoreSnapshot — honest confidence over the FULL intended model', () 
     }
   });
 
-  it('intended set is the 5 implemented + 5 unimplemented (size 10)', () => {
+  it('intended set is the 6 implemented + 4 unimplemented (size 10)', () => {
     expect(INTENDED_COMPONENT_KEYS).toHaveLength(10);
     expect(UNIMPLEMENTED_COMPONENT_KEYS).toEqual([
-      'holder_concentration', 'deployer_reputation', 'wash_trade', 'smart_wallet', 'unique_buyers',
+      'holder_concentration', 'wash_trade', 'smart_wallet', 'unique_buyers',
     ]);
   });
 });
@@ -96,13 +101,13 @@ describe('scoreSnapshot — missing data is omitted, never faked', () => {
     };
     const r = scoreSnapshot(partial);
 
-    expect(r.componentsPresent.sort()).toEqual(['depth', 'divergence', 'liquidity']);
+    expect(r.componentsPresent.sort()).toEqual(['deployer_reputation', 'depth', 'divergence', 'liquidity']);
     expect(r.ageScore).toBeNull();
     expect(r.tractionScore).toBeNull();
     expect(r.componentsMissing).toContain('age');
     expect(r.componentsMissing).toContain('traction');
-    // 3 implemented present / 10 intended.
-    expect(r.scoreConfidence).toBeCloseTo(0.3, 5);
+    // 4 implemented present / 10 intended.
+    expect(r.scoreConfidence).toBeCloseTo(0.4, 5);
     expect(r.finalScore).toBeGreaterThan(0);
     expect(r.finalScore).toBeLessThanOrEqual(100);
   });
@@ -184,9 +189,32 @@ describe('divergenceScore — higher = healthier; V2 penalized, V3 neutral (omit
     expect(asV2.divergenceScore!).toBeLessThan(100);   // V2 penalized for the 1.4 gap
     expect(asV3.finalScore).toBeGreaterThan(asV2.finalScore);
     // V3 also reports lower confidence (divergence omitted → 4/10 vs 5/10).
-    expect(asV3.scoreConfidence).toBeCloseTo(0.4, 5);
-    expect(asV2.scoreConfidence).toBeCloseTo(0.5, 5);
+    expect(asV3.scoreConfidence).toBeCloseTo(0.5, 5);
+    expect(asV2.scoreConfidence).toBeCloseTo(0.6, 5);
     expect(asV3.componentsMissing).toContain('divergence');
+  });
+});
+
+describe('deployerReputationScore - higher = healthier deployer history', () => {
+  it('omits the component when no deployer data is present', () => {
+    expect(deployerReputationScore(null, null, null, null)).toBeNull();
+
+    const r = scoreSnapshot({
+      ...fullV2,
+      deployerDeploymentsCount: null,
+      deployerRugLikeCount: null,
+      deployerRiskScore: null,
+      deployerBlocklisted: null,
+    });
+
+    expect(r.deployerReputationScore).toBeNull();
+    expect(r.componentsMissing).toContain('deployer_reputation');
+  });
+
+  it('penalizes repeat rug-like deployer history and hard-blocks blocklisted deployers', () => {
+    expect(deployerReputationScore(4, 0, 0, false)).toBe(100);
+    expect(deployerReputationScore(4, 2, 50, false)).toBe(50);
+    expect(deployerReputationScore(1, 1, 100, true)).toBe(0);
   });
 });
 

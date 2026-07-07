@@ -23,6 +23,10 @@ export interface CandidateToken {
   name: string;
   decimals?: number;
   deployerAddress?: string;
+  deployerDeploymentsCount?: number | null;
+  deployerRugLikeCount?: number | null;
+  deployerRiskScore?: number | null;
+  deployerBlocklisted?: boolean | null;
   source: string;
 }
 
@@ -53,6 +57,8 @@ export interface CollectorResult {
   token: CandidateToken;
   pool: CandidatePool;
 }
+
+export type TokenProbe = { chain: SupportedChain; tokenAddress: string };
 
 // Stage 0 rejection reasons
 export type Stage0RejectReason =

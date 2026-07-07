@@ -11,10 +11,17 @@ export interface ClosedPosition {
   realizedMultiple: number; // realized value / size (1.0 = break-even net of costs)
   finalScore: number | null;
   band: string | null;
+  fdvUsd?: number | null;
 }
 
 export interface BandExpectancy {
   band: string;
+  n: number;
+  expectancyPer$1: number | null;
+}
+
+export interface BucketExpectancy {
+  bucket: string;
   n: number;
   expectancyPer$1: number | null;
 }
@@ -32,6 +39,7 @@ export interface EdgeResult {
   nScoreFiltered: number;
   scoreBeatsBaseline: boolean;
   bands: BandExpectancy[];                   // ordered worst → best band
+  fdvBuckets: BucketExpectancy[];
   bandsMonotonic: boolean;
   verdict: string;
   reasons: string[];
@@ -39,6 +47,13 @@ export interface EdgeResult {
 
 // Band order from worst to best — expectancy should rise along this if the score ranks.
 const BAND_ORDER = ['reject_band', 'watchlist', 'candidate', 'high_band'];
+const FDV_BUCKETS = [
+  { label: '<$50k', min: 0, max: 50_000 },
+  { label: '$50k-$100k', min: 50_000, max: 100_000 },
+  { label: '$100k-$300k', min: 100_000, max: 300_000 },
+  { label: '$300k-$1M', min: 300_000, max: 1_000_000 },
+  { label: '$1M+', min: 1_000_000, max: Infinity },
+] as const;
 
 const per$1 = (xs: number[]): number | null =>
   xs.length === 0 ? null : xs.reduce((a, m) => a + (m - 1), 0) / xs.length;
@@ -62,6 +77,16 @@ export function computeEdge(positions: ReadonlyArray<ClosedPosition>, params: Ed
   const bandVals = bands.map((b) => b.expectancyPer$1 ?? 0);
   const bandsMonotonic = bandVals.every((v, i) => i === 0 || v >= bandVals[i - 1] - 1e-9);
 
+  const fdvBuckets: BucketExpectancy[] = [];
+  for (const bucket of FDV_BUCKETS) {
+    const inBucket = positions
+      .filter((p) => p.fdvUsd != null && p.fdvUsd >= bucket.min && p.fdvUsd < bucket.max)
+      .map((p) => p.realizedMultiple);
+    if (inBucket.length > 0) {
+      fdvBuckets.push({ bucket: bucket.label, n: inBucket.length, expectancyPer$1: per$1(inBucket) });
+    }
+  }
+
   const scoreBeatsBaseline =
     expectancyScoreFiltered != null && expectancyEnterAll != null &&
     expectancyScoreFiltered > expectancyEnterAll;
@@ -83,7 +108,7 @@ export function computeEdge(positions: ReadonlyArray<ClosedPosition>, params: Ed
   return {
     nClosed, insufficientSample,
     expectancyEnterAll, expectancyScoreFiltered, nScoreFiltered: filtered.length,
-    scoreBeatsBaseline, bands, bandsMonotonic, verdict, reasons,
+    scoreBeatsBaseline, bands, fdvBuckets, bandsMonotonic, verdict, reasons,
   };
 }
 
@@ -120,6 +145,17 @@ export function renderEdgeReport(r: EdgeResult, params: EdgeParams, dateLabel: s
   } else {
     for (const b of r.bands) lines.push(`  ${b.band.padEnd(14)} n=${String(b.n).padStart(4)}   ${pct(b.expectancyPer$1)}`);
     lines.push(`  Monotonic non-decreasing?            ${r.bandsMonotonic ? 'yes' : 'NO — score looks like noise'}`);
+  }
+  lines.push(
+    '',
+    'FDV BUCKETS (entry FDV; analysis only, no gate change)',
+  );
+  if (r.fdvBuckets.length === 0) {
+    lines.push('  (no FDV data)');
+  } else {
+    for (const b of r.fdvBuckets) {
+      lines.push(`  ${b.bucket.padEnd(12)} n=${String(b.n).padStart(4)}   ${pct(b.expectancyPer$1)}`);
+    }
   }
   lines.push(
     '',

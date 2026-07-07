@@ -20,6 +20,7 @@ import {
   PoolLiquiditySnapshotRow, POOL_LIQUIDITY_SNAPSHOT_HEADERS,
   CandidateRow, CANDIDATE_HEADERS, CANDIDATE_CAVEAT,
   PositionTickRow, POSITION_TICK_HEADERS,
+  GemShadowTickRow, GEM_SHADOW_TICK_HEADERS,
 } from './csv-schemas';
 
 @Injectable()
@@ -64,6 +65,10 @@ export class FileLoggerService implements OnModuleInit {
 
   logPositionTick(row: PositionTickRow): void {
     this.writeCsvRow('decisions/position_ticks.csv', POSITION_TICK_HEADERS, row);
+  }
+
+  logGemShadowTick(row: GemShadowTickRow): void {
+    this.writeCsvRow('decisions/gem_shadow_ticks.csv', GEM_SHADOW_TICK_HEADERS, row);
   }
 
   logPaperExit(row: PaperExitRow): void {

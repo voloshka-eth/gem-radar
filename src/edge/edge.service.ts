@@ -27,11 +27,12 @@ export class EdgeService {
     });
 
     const positions: ClosedPosition[] = closed.map((c) => {
-      const f = (c.entryFeatures ?? {}) as { finalScore?: number; band?: string };
+      const f = (c.entryFeatures ?? {}) as { finalScore?: number; band?: string; fdvUsd?: number | null };
       return {
         realizedMultiple: c.realizedMultiple != null ? Number(c.realizedMultiple) : 0,
         finalScore: f.finalScore ?? null,
         band: f.band ?? null,
+        fdvUsd: f.fdvUsd ?? null,
       };
     });
 

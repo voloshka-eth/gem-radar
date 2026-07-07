@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../database/prisma.service';
+import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
+import { FileLoggerService } from '../file-logger/file-logger.service';
 import { LiquidityVerificationService } from '../onchain/liquidity-verification.service';
 import { RiskEngineService } from '../risk-engine/risk-engine.service';
 import { GeckoTerminalService } from '../collector/geckoterminal/geckoterminal.service';
 import { QUOTE_ASSET_MAP, SupportedChain, CandidatePool } from '../collector/collector.types';
 
 const num = (d: unknown): number | null => (d == null ? null : Number(d));
+const csvNum = (n: number | null | undefined): string => (n == null || !Number.isFinite(n) ? '' : String(n));
 const horizonLabel = (min: number): string => (min < 60 ? `${min}m` : `${min / 60}h`);
 
 interface ForwardState {
@@ -37,12 +41,14 @@ export class ShadowTrackerService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly fileLogger: FileLoggerService,
     private readonly liquidityVerifier: LiquidityVerificationService,
     private readonly riskEngine: RiskEngineService,
     private readonly geckoTerminal: GeckoTerminalService,
   ) {}
 
   async track(): Promise<{ candidates: number; captured: number; missed: number }> {
+    const runId = `shadow-${randomUUID().slice(0, 8)}`;
     const horizonsMin = (this.config.get<number[]>('gem.horizonsMin') ?? [15, 60, 360, 1440, 4320]);
     const rugLiqUsd = this.config.get<number>('gem.rugLiqUsd') ?? 50;
     const now = Date.now();
@@ -71,23 +77,29 @@ export class ShadowTrackerService {
           if (!state) state = await this.captureState(c.chain as SupportedChain, c.poolAddress, c.tokenAddress, c.symbol ?? '', rugLiqUsd);
           const fdvNow = state.fdvUsd;
           const multiple = fdvNow != null && entryFdv != null && entryFdv > 0 ? fdvNow / entryFdv : null;
+          const capturedAt = new Date();
           await this.prisma.gemShadowTick.create({
             data: {
               candidateId: c.id, chain: c.chain, tokenAddress: c.tokenAddress, poolAddress: c.poolAddress,
-              horizon, dueAt, capturedAt: new Date(), elapsedMin, status: 'captured',
+              horizon, dueAt, capturedAt, elapsedMin, status: 'captured',
               priceUsd: state.priceUsd, fdvUsd: state.fdvUsd, onchainLiqUsd: state.onchainLiqUsd,
               multipleVsT0: multiple, uniqueBuyers: state.uniqueBuyers, uniqueSellers: state.uniqueSellers,
               sellSimOk: state.sellSimOk, rugFlag: state.rugFlag,
             },
+          }).then(() => {
+            this.logShadowTick(runId, c, horizon, dueAt, capturedAt, elapsedMin, 'captured', state!, multiple);
           }).catch((e) => this.logger.warn(`tick write failed ${c.tokenAddress} ${horizon}: ${(e as Error).message}`));
           captured++;
         } else {
+          const capturedAt = new Date();
           // Horizon elapsed before we started tracking → honest "missed" (no fabricated reading).
           await this.prisma.gemShadowTick.create({
             data: {
               candidateId: c.id, chain: c.chain, tokenAddress: c.tokenAddress, poolAddress: c.poolAddress,
-              horizon, dueAt, capturedAt: new Date(), elapsedMin, status: 'missed', rugFlag: false,
+              horizon, dueAt, capturedAt, elapsedMin, status: 'missed', rugFlag: false,
             },
+          }).then(() => {
+            this.logShadowTick(runId, c, horizon, dueAt, capturedAt, elapsedMin, 'missed', null, null);
           }).catch(() => undefined);
           missed++;
         }
@@ -103,6 +115,54 @@ export class ShadowTrackerService {
     }
 
     return { candidates: candidates.length, captured, missed };
+  }
+
+  private logShadowTick(
+    runId: string,
+    candidate: {
+      id: string;
+      chain: string;
+      tokenAddress: string;
+      symbol: string | null;
+      poolAddress: string;
+      deployerAddress: string | null;
+      t0Ts: Date;
+      entryFdvUsd: unknown;
+    },
+    horizon: string,
+    dueAt: Date,
+    capturedAt: Date,
+    elapsedMin: number,
+    status: 'captured' | 'missed',
+    state: ForwardState | null,
+    multiple: number | null,
+  ): void {
+    this.fileLogger.logGemShadowTick({
+      ts: new Date().toISOString(),
+      run_id: runId,
+      schema_version: CSV_SCHEMA_VERSION,
+      candidate_id: candidate.id,
+      chain: candidate.chain,
+      token_address: candidate.tokenAddress,
+      symbol: candidate.symbol ?? '',
+      pool_address: candidate.poolAddress,
+      deployer_address: candidate.deployerAddress ?? '',
+      t0_ts: candidate.t0Ts.toISOString(),
+      horizon,
+      due_at: dueAt.toISOString(),
+      captured_at: capturedAt.toISOString(),
+      elapsed_min: String(elapsedMin),
+      status,
+      price_usd: csvNum(state?.priceUsd),
+      fdv_usd: csvNum(state?.fdvUsd),
+      entry_fdv_usd: csvNum(num(candidate.entryFdvUsd)),
+      multiple_vs_t0: csvNum(multiple),
+      onchain_liq_usd: csvNum(state?.onchainLiqUsd),
+      unique_buyers: csvNum(state?.uniqueBuyers),
+      unique_sellers: csvNum(state?.uniqueSellers),
+      sell_sim_ok: state?.sellSimOk == null ? '' : String(state.sellSimOk),
+      rug_flag: state == null ? 'false' : String(state.rugFlag),
+    });
   }
 
   private async captureState(

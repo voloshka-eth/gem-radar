@@ -7,6 +7,8 @@ import { CollectorService } from './collector.service';
 import { FileLoggerService } from '../file-logger/file-logger.service';
 import { GeckoTerminalService } from './geckoterminal/geckoterminal.service';
 import { DexScreenerService } from './dexscreener/dexscreener.service';
+import { MoralisService } from './moralis/moralis.service';
+import { BirdeyeService } from './birdeye/birdeye.service';
 import { PrismaService } from '../database/prisma.service';
 import { RiskEngineService } from '../risk-engine/risk-engine.service';
 import { CollectorResult, SupportedChain } from './collector.types';
@@ -124,7 +126,10 @@ describe('CollectorService', () => {
     scoringHistory: { create: jest.fn().mockResolvedValue({}) },
   };
 
-  const gtMock = { getNewPools: jest.fn().mockResolvedValue([]) };
+  const gtMock = {
+    getNewPools: jest.fn().mockResolvedValue([]),
+    getTrendingPools: jest.fn().mockResolvedValue([]),
+  };
   const dsMock = {
     getLatestProfileAddresses: jest.fn().mockResolvedValue([]),
     getLatestBoostAddresses: jest.fn().mockResolvedValue([]),
@@ -132,6 +137,12 @@ describe('CollectorService', () => {
     getLatestCommunityTakeoverAddresses: jest.fn().mockResolvedValue([]),
     getLatestAdAddresses: jest.fn().mockResolvedValue([]),
     getPairsForTokens: jest.fn().mockResolvedValue([]),
+  };
+  const moralisMock = {
+    getTrendingTokenAddresses: jest.fn().mockResolvedValue([]),
+  };
+  const birdeyeMock = {
+    getVolumeTokenAddresses: jest.fn().mockResolvedValue([]),
   };
   const riskMock = { checkToken: jest.fn().mockResolvedValue(SAFE_RISK) };
   // M3A mocks — token age returns "2 days" (passes the 7-day gate); liquidity returns UNSUPPORTED
@@ -154,9 +165,9 @@ describe('CollectorService', () => {
     score: jest.fn().mockReturnValue({
       finalScore: 0,
       liquidityScore: null, depthScore: null, ageScore: null,
-      tractionScore: null, divergenceScore: null,
+      tractionScore: null, divergenceScore: null, deployerReputationScore: null,
       componentsPresent: [],
-      componentsMissing: ['liquidity', 'depth', 'age', 'traction', 'divergence'],
+      componentsMissing: ['liquidity', 'depth', 'age', 'traction', 'divergence', 'deployer_reputation'],
       scoreConfidence: 0,
       band: 'reject_band',
     }),
@@ -190,12 +201,15 @@ describe('CollectorService', () => {
     deployerReputationMock.summarize.mockResolvedValue(null);
     deployerReputationMock.isRepeatRugger.mockReturnValue(false);
     gtMock.getNewPools.mockResolvedValue([]);
+    gtMock.getTrendingPools.mockResolvedValue([]);
     dsMock.getLatestProfileAddresses.mockResolvedValue([]);
     dsMock.getLatestBoostAddresses.mockResolvedValue([]);
     dsMock.getTopBoostAddresses.mockResolvedValue([]);
     dsMock.getLatestCommunityTakeoverAddresses.mockResolvedValue([]);
     dsMock.getLatestAdAddresses.mockResolvedValue([]);
     dsMock.getPairsForTokens.mockResolvedValue([]);
+    moralisMock.getTrendingTokenAddresses.mockResolvedValue([]);
+    birdeyeMock.getVolumeTokenAddresses.mockResolvedValue([]);
     riskMock.checkToken.mockResolvedValue(SAFE_RISK);
     tokenAgeMock.getTokenAgeDays.mockResolvedValue(2);
 
@@ -215,6 +229,8 @@ describe('CollectorService', () => {
         },
         { provide: GeckoTerminalService, useValue: gtMock },
         { provide: DexScreenerService, useValue: dsMock },
+        { provide: MoralisService, useValue: moralisMock },
+        { provide: BirdeyeService, useValue: birdeyeMock },
         { provide: RiskEngineService, useValue: riskMock },
         { provide: TokenAgeService, useValue: tokenAgeMock },
         { provide: LiquidityVerificationService, useValue: liquidityMock },
@@ -479,6 +495,12 @@ describe('CollectorService', () => {
     dsMock.getLatestAdAddresses.mockResolvedValue([
       { chain: 'ethereum', tokenAddress: '0xad' },
     ]);
+    moralisMock.getTrendingTokenAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xmoralis' },
+    ]);
+    birdeyeMock.getVolumeTokenAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xbirdeye' },
+    ]);
 
     await service.runCollectionCycle();
 
@@ -488,6 +510,8 @@ describe('CollectorService', () => {
       { chain: 'ethereum', tokenAddress: '0xtopboost' },
       { chain: 'ethereum', tokenAddress: '0xcommunity' },
       { chain: 'ethereum', tokenAddress: '0xad' },
+      { chain: 'ethereum', tokenAddress: '0xmoralis' },
+      { chain: 'ethereum', tokenAddress: '0xbirdeye' },
     ]);
   });
 
@@ -505,6 +529,12 @@ describe('CollectorService', () => {
       { chain: 'ethereum', tokenAddress: '0xdupe' },
     ]);
     dsMock.getLatestAdAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xdupe' },
+    ]);
+    moralisMock.getTrendingTokenAddresses.mockResolvedValue([
+      { chain: 'ethereum', tokenAddress: '0xdupe' },
+    ]);
+    birdeyeMock.getVolumeTokenAddresses.mockResolvedValue([
       { chain: 'ethereum', tokenAddress: '0xdupe' },
     ]);
 

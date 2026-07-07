@@ -55,6 +55,14 @@ export class GeckoTerminalService {
   }
 
   async getNewPools(chain: SupportedChain): Promise<CollectorResult[]> {
+    return this.getPoolsByPath(chain, 'new_pools');
+  }
+
+  async getTrendingPools(chain: SupportedChain): Promise<CollectorResult[]> {
+    return this.getPoolsByPath(chain, 'trending_pools');
+  }
+
+  private async getPoolsByPath(chain: SupportedChain, path: 'new_pools' | 'trending_pools'): Promise<CollectorResult[]> {
     const network = GT_NETWORK[chain];
     if (!network) {
       this.logger.warn(`No GeckoTerminal network mapping for chain: ${chain}`);
@@ -64,13 +72,13 @@ export class GeckoTerminalService {
     let data: GtNewPoolsResponse;
     try {
       const res = await this.http.get<GtNewPoolsResponse>(
-        `/networks/${network}/new_pools`,
+        `/networks/${network}/${path}`,
         { params: { include: 'base_token,quote_token,dex', page: 1 } },
       );
       data = res.data;
     } catch (err) {
       this.logger.error(
-        `GeckoTerminal new_pools fetch failed for ${chain}: ${(err as Error).message}`,
+        `GeckoTerminal ${path} fetch failed for ${chain}: ${(err as Error).message}`,
       );
       return [];
     }
@@ -83,7 +91,7 @@ export class GeckoTerminalService {
       if (result) results.push(result);
     }
 
-    this.logger.debug(`GeckoTerminal fetched ${results.length} pools for ${chain}`);
+    this.logger.debug(`GeckoTerminal ${path} fetched ${results.length} pools for ${chain}`);
     return results;
   }
 

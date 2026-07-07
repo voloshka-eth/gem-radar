@@ -43,6 +43,10 @@ export interface ScoreSnapshot {
   vol24h: number | null;
   buys1h: number | null;
   sells1h: number | null;
+  deployerDeploymentsCount?: number | null;
+  deployerRugLikeCount?: number | null;
+  deployerRiskScore?: number | null; // 0-100, higher = worse deployer history
+  deployerBlocklisted?: boolean | null;
 }
 
 export type Band = 'reject_band' | 'watchlist' | 'candidate' | 'high_band';
@@ -50,7 +54,9 @@ export type Band = 'reject_band' | 'watchlist' | 'candidate' | 'high_band';
 /**
  * Components M4 ACTUALLY computes — the only ones with a data source + a weight.
  */
-export const IMPLEMENTED_COMPONENT_KEYS = ['liquidity', 'depth', 'age', 'traction', 'divergence'] as const;
+export const IMPLEMENTED_COMPONENT_KEYS = [
+  'liquidity', 'depth', 'age', 'traction', 'divergence', 'deployer_reputation',
+] as const;
 export type ImplementedComponentKey = typeof IMPLEMENTED_COMPONENT_KEYS[number];
 
 /**
@@ -58,11 +64,11 @@ export type ImplementedComponentKey = typeof IMPLEMENTED_COMPONENT_KEYS[number];
  * declared here on purpose: they are ALWAYS missing today, so they permanently drag
  * scoreConfidence below 1.0 and appear in componentsMissing. This is what stops the
  * model from falsely reading "fully confident" while it is blind to holder
- * concentration, deployer history, wash trading, smart money and unique buyers.
+ * concentration, wash trading, smart money and unique buyers.
  * (Adding the data sources is a future milestone — NOT done here.)
  */
 export const UNIMPLEMENTED_COMPONENT_KEYS = [
-  'holder_concentration', 'deployer_reputation', 'wash_trade', 'smart_wallet', 'unique_buyers',
+  'holder_concentration', 'wash_trade', 'smart_wallet', 'unique_buyers',
 ] as const;
 export type UnimplementedComponentKey = typeof UNIMPLEMENTED_COMPONENT_KEYS[number];
 
@@ -80,6 +86,7 @@ export interface ScoreResult {
   ageScore: number | null;
   tractionScore: number | null;
   divergenceScore: number | null;        // 0–100, higher = healthier (V3 → null, structural/neutral)
+  deployerReputationScore: number | null; // 0–100, higher = healthier deployer history
   componentsPresent: ImplementedComponentKey[];
   componentsMissing: ComponentKey[];     // implemented-but-no-data THIS run + all unimplemented
   scoreConfidence: number;               // computed / FULL intended set (0–1); ~0.5 today, never 1.0
@@ -94,7 +101,14 @@ export interface ScoringParams {
 // HYPOTHESIS weights — relative importance of each component. Renormalized over the
 // components that actually have data. Tuned by judgement, NOT validated by outcomes.
 export const DEFAULT_SCORING_PARAMS: ScoringParams = {
-  weights: { liquidity: 0.30, depth: 0.25, age: 0.15, traction: 0.20, divergence: 0.10 },
+  weights: {
+    liquidity: 0.30,
+    depth: 0.25,
+    age: 0.15,
+    traction: 0.20,
+    divergence: 0.10,
+    deployer_reputation: 0.15,
+  },
   bands:   { watchlistMin: 50, candidateMin: 70, highMin: 85 },
 };
 
@@ -212,6 +226,27 @@ export function divergenceScore(
   return round2(clamp((1 - reportedVsOnchainPct / V2_DIVERGENCE_ZERO_AT) * 100, 0, 100));
 }
 
+/**
+ * Deployer reputation SCORE — 0–100 where HIGHER = HEALTHIER.
+ * Missing deployer data is omitted; a known blocklisted deployer is 0.
+ */
+export function deployerReputationScore(
+  deploymentsCount: number | null | undefined,
+  rugLikeCount: number | null | undefined,
+  riskScore: number | null | undefined,
+  blocklisted: boolean | null | undefined,
+): number | null {
+  if (blocklisted === true) return 0;
+  if (deploymentsCount == null && rugLikeCount == null && riskScore == null) return null;
+
+  const deployments = Math.max(0, deploymentsCount ?? 0);
+  const rugs = Math.max(0, rugLikeCount ?? 0);
+  const rugRatePct = deployments > 0 ? (rugs / deployments) * 100 : 0;
+  const riskPct = riskScore != null && Number.isFinite(riskScore) ? riskScore : rugRatePct;
+  const penalty = Math.max(rugRatePct, riskPct);
+  return round2(clamp(100 - penalty, 0, 100));
+}
+
 // ─── Band classifier ──────────────────────────────────────────────────────────
 export function bandFor(finalScore: number, bands: ScoringParams['bands']): Band {
   if (finalScore >= bands.highMin)      return 'high_band';
@@ -231,6 +266,12 @@ export function scoreSnapshot(
     age:        ageScore(snapshot.ageDays),
     traction:   tractionScore(snapshot.vol1h, snapshot.onchainTvlUsd, snapshot.buys1h, snapshot.sells1h),
     divergence: divergenceScore(snapshot.liquidityModel, snapshot.reportedVsOnchainPct),
+    deployer_reputation: deployerReputationScore(
+      snapshot.deployerDeploymentsCount,
+      snapshot.deployerRugLikeCount,
+      snapshot.deployerRiskScore,
+      snapshot.deployerBlocklisted,
+    ),
   };
 
   // Present = implemented components with data this run. Missing = implemented-without-data
@@ -262,6 +303,7 @@ export function scoreSnapshot(
     ageScore:        scores.age,
     tractionScore:   scores.traction,
     divergenceScore: scores.divergence,
+    deployerReputationScore: scores.deployer_reputation,
     componentsPresent,
     componentsMissing,
     scoreConfidence,

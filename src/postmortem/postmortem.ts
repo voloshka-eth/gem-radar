@@ -20,24 +20,41 @@ export interface FeatureComparison {
   separates: boolean;
 }
 
+export interface FdvBucketPostmortem {
+  bucket: string;
+  bad: number;
+  good: number;
+  total: number;
+  badRate: number | null;
+}
+
 export interface PostmortemResult {
   nBad: number;
   nGood: number;
   underpowered: boolean;       // either group < minPerGroup
   minPerGroup: number;
   features: FeatureComparison[];
+  fdvBuckets: FdvBucketPostmortem[];
 }
 
 // Outcome → group.
 const BAD = new Set(['RUG', 'UNSELLABLE', 'LIQ_PULL', 'LOSS']);
 const GOOD = new Set(['WIN']);
+const FDV_BUCKETS = [
+  { label: '<$50k', min: 0, max: 50_000 },
+  { label: '$50k-$100k', min: 50_000, max: 100_000 },
+  { label: '$100k-$300k', min: 100_000, max: 300_000 },
+  { label: '$300k-$1M', min: 300_000, max: 1_000_000 },
+  { label: '$1M+', min: 1_000_000, max: Infinity },
+] as const;
 
 // Features compared between groups. The first block is t0 (entry-time); the last two
 // are POST-t0 rug signals captured during eval (last tick before close) — added so that,
 // once enough positions close, we can see whether they separate rugs from survivors.
 export const POSTMORTEM_T0_FEATURES = [
   'onchainTvlUsd', 'slip1000', 'ageDays', 'fdvUsd', 'divergenceScore',
-  'finalScore', 'liquidityScore', 'depthScore', 'ageScore', 'tractionScore', 'scoreConfidence',
+  'finalScore', 'liquidityScore', 'depthScore', 'ageScore', 'tractionScore',
+  'deployerReputationScore', 'scoreConfidence',
 ];
 export const POSTMORTEM_LASTTICK_FEATURES = ['sellersToBuyersRatioLast', 'sellSimOkLast'];
 export const POSTMORTEM_FEATURES = [...POSTMORTEM_T0_FEATURES, ...POSTMORTEM_LASTTICK_FEATURES];
@@ -66,12 +83,31 @@ export function computePostmortem(
     return { feature: f, bad: bDist, good: gDist, separates: separates(bDist, gDist) };
   });
 
+  const fdvBuckets: FdvBucketPostmortem[] = [];
+  for (const bucket of FDV_BUCKETS) {
+    const inBucket = rows.filter((r) => {
+      const fdv = r.features.fdvUsd;
+      return fdv != null && fdv >= bucket.min && fdv < bucket.max;
+    });
+    if (inBucket.length === 0) continue;
+    const nBad = inBucket.filter((r) => BAD.has(r.outcomeClass)).length;
+    const nGood = inBucket.filter((r) => GOOD.has(r.outcomeClass)).length;
+    fdvBuckets.push({
+      bucket: bucket.label,
+      bad: nBad,
+      good: nGood,
+      total: inBucket.length,
+      badRate: nBad / inBucket.length,
+    });
+  }
+
   return {
     nBad: bad.length,
     nGood: good.length,
     underpowered: bad.length < minPerGroup || good.length < minPerGroup,
     minPerGroup,
     features,
+    fdvBuckets,
   };
 }
 
@@ -109,6 +145,23 @@ export function renderPostmortem(r: PostmortemResult, dateLabel: string): string
       `  ${f.feature.padEnd(18)}${fnum(f.bad.mean)}${fnum(f.good.mean)}${fnum(f.bad.median)}${fnum(f.good.median)}` +
       `   ${f.separates && !r.underpowered ? 'HYPOTHESIS' : (f.separates ? 'sep(noise?)' : 'no')}`,
     );
+  }
+  lines.push(
+    '',
+    'FDV BUCKETS (entry FDV; analysis only, no gate change)',
+    `  ${'bucket'.padEnd(12)}${'total'.padStart(8)}${'bad'.padStart(8)}${'good'.padStart(8)}${'bad%'.padStart(9)}`,
+    '  ' + '-'.repeat(45),
+  );
+  if (r.fdvBuckets.length === 0) {
+    lines.push('  (no FDV data)');
+  } else {
+    for (const b of r.fdvBuckets) {
+      const badPct = b.badRate == null ? '?' : `${(b.badRate * 100).toFixed(1)}%`;
+      lines.push(
+        `  ${b.bucket.padEnd(12)}${String(b.total).padStart(8)}` +
+        `${String(b.bad).padStart(8)}${String(b.good).padStart(8)}${badPct.padStart(9)}`,
+      );
+    }
   }
   lines.push('', '═'.repeat(78));
   return lines.join('\n');

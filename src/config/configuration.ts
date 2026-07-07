@@ -27,6 +27,12 @@ export const apiConfig = registerAs('api', () => ({
     process.env.DEXSCREENER_BASE_URL ?? 'https://api.dexscreener.com',
   geckoterminalBaseUrl:
     process.env.GECKOTERMINAL_BASE_URL ?? 'https://api.geckoterminal.com/api/v2',
+  moralisBaseUrl: process.env.MORALIS_BASE_URL ?? 'https://deep-index.moralis.io/api/v2.2',
+  moralisApiKey: process.env.MORALIS_API_KEY,
+  moralisTrendingLimit: parseInt(process.env.MORALIS_TRENDING_LIMIT ?? '50', 10),
+  birdeyeBaseUrl: process.env.BIRDEYE_BASE_URL ?? 'https://public-api.birdeye.so',
+  birdeyeApiKey: process.env.BIRDEYE_API_KEY,
+  birdeyeTokenListLimit: parseInt(process.env.BIRDEYE_TOKENLIST_LIMIT ?? '50', 10),
   goplusBaseUrl: process.env.GOPLUS_BASE_URL ?? 'https://api.gopluslabs.io',
   goplusApiKey: process.env.GOPLUS_API_KEY,
   goplusAppKey: process.env.GOPLUS_APP_KEY ?? process.env.GOPLUS_API_KEY,
@@ -113,6 +119,7 @@ export const scoringConfig = registerAs('scoring', () => ({
     age:        parseFloat(process.env.SCORE_W_AGE        ?? '0.15'),
     traction:   parseFloat(process.env.SCORE_W_TRACTION   ?? '0.20'),
     divergence: parseFloat(process.env.SCORE_W_DIVERGENCE ?? '0.10'),
+    deployer_reputation: parseFloat(process.env.SCORE_W_DEPLOYER_REPUTATION ?? '0.15'),
   },
   // Band thresholds (unvalidated): <50 reject_band, 50–70 watchlist, 70–85 candidate, 85+ high_band.
   scoreBands: {
