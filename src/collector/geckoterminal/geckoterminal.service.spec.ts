@@ -16,9 +16,19 @@ describe('GeckoTerminalService — normalise (fixture-based)', () => {
   let mockGet: jest.Mock;
 
   beforeEach(() => {
+    (GeckoTerminalService as any).lastRequestAt = 0;
+    (GeckoTerminalService as any).rateLimitBackoffUntil = 0;
+    (GeckoTerminalService as any).statsCache = new Map();
+
     service = new GeckoTerminalService({
-      get: (k: string) =>
-        k === 'api.geckoterminalBaseUrl' ? 'https://api.geckoterminal.com/api/v2' : undefined,
+      get: (k: string) => {
+        if (k === 'api.geckoterminalBaseUrl') return 'https://api.geckoterminal.com/api/v2';
+        if (k === 'collector.geckoTerminalPages') return 1;
+        if (k === 'collector.geckoTerminalRequestDelayMs') return 0;
+        if (k === 'collector.geckoTerminalRateLimitBackoffMs') return 300_000;
+        if (k === 'collector.geckoTerminalStatsCacheTtlMs') return 600_000;
+        return undefined;
+      },
     } as unknown as ConfigService);
 
     mockGet = jest.fn().mockResolvedValue({ data: gtFixture });
@@ -88,6 +98,29 @@ describe('GeckoTerminalService — normalise (fixture-based)', () => {
     expect(results[0].pool.poolCreatedAt).toBeUndefined();
   });
 
+  it('fetches multiple GeckoTerminal pages when configured', async () => {
+    service = new GeckoTerminalService({
+      get: (k: string) => {
+        if (k === 'api.geckoterminalBaseUrl') return 'https://api.geckoterminal.com/api/v2';
+        if (k === 'collector.geckoTerminalPages') return 2;
+        if (k === 'collector.geckoTerminalRequestDelayMs') return 0;
+        return undefined;
+      },
+    } as unknown as ConfigService);
+
+    mockGet = jest.fn()
+      .mockResolvedValueOnce({ data: gtFixture })
+      .mockResolvedValueOnce({ data: { ...gtFixture, data: [] } });
+    (service as any).http = { get: mockGet };
+
+    const results = await service.getNewPools('ethereum');
+
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockGet.mock.calls[0][1].params.page).toBe(1);
+    expect(mockGet.mock.calls[1][1].params.page).toBe(2);
+    expect(results).toHaveLength(2);
+  });
+
   it('returns undefined liquidityUsd and fdvUsd when API fields are null', async () => {
     const fixture = {
       ...gtFixture,
@@ -120,5 +153,40 @@ describe('GeckoTerminalService — normalise (fixture-based)', () => {
     mockGet.mockRejectedValueOnce(new Error('Network error'));
     const results = await service.getNewPools('ethereum');
     expect(results).toEqual([]);
+  });
+
+  it('opens shared backoff after GeckoTerminal 429 and skips the next request', async () => {
+    const rateLimitErr = {
+      isAxiosError: true,
+      message: 'Request failed with status code 429',
+      response: { status: 429, headers: { 'retry-after': '2' } },
+    };
+    mockGet.mockRejectedValueOnce(rateLimitErr);
+
+    const first = await service.getNewPools('ethereum');
+    const second = await service.getTrendingPools('ethereum');
+
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('caches per-pool trade stats to avoid repeated eval calls', async () => {
+    mockGet.mockResolvedValue({
+      data: { data: gtFixture.data[0] },
+    });
+
+    const first = await service.getPoolTradeStats('ethereum', POOL_NORMAL);
+    const second = await service.getPoolTradeStats('ethereum', POOL_NORMAL);
+
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({
+      buys: 40,
+      sells: 20,
+      uniqueBuyers: 30,
+      uniqueSellers: 15,
+      window: 'h1',
+    });
+    expect(mockGet).toHaveBeenCalledTimes(1);
   });
 });

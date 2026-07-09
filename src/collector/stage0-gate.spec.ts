@@ -56,6 +56,18 @@ describe('applyStage0Gate', () => {
     expect(result).toEqual({ pass: false, reason: 'quote_asset_not_accepted' });
   });
 
+  it('rejects explicitly blocklisted tickers before liquidity and FDV checks', () => {
+    const candidate = buildCandidate({ liquidityUsd: 50_000, fdvUsd: 1_000_000 });
+    candidate.token.symbol = '$OPENHUMAN';
+
+    const result = applyStage0Gate(candidate, {
+      ...BASE_CONFIG,
+      blockedTokenSymbols: ['openhuman'],
+    });
+
+    expect(result).toEqual({ pass: false, reason: 'ticker_blocklisted' });
+  });
+
   it('rejects a pool older than maxPoolAgeMs', () => {
     const oldDate = new Date(Date.now() - 7 * 60 * 60 * 1000); // 7h ago
     const result = applyStage0Gate(buildCandidate({ poolCreatedAt: oldDate }), BASE_CONFIG);

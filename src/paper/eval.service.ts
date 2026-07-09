@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -39,8 +39,11 @@ type OnchainReadResult = {
  * realized multiples are conservative/coarse, not tick-accurate.
  */
 @Injectable()
-export class EvalService {
+export class EvalService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(EvalService.name);
+  private evalTimeout: ReturnType<typeof setTimeout> | null = null;
+  private evalInterval: ReturnType<typeof setInterval> | null = null;
+  private isScheduledEvalRunning = false;
 
   constructor(
     private readonly config: ConfigService,
@@ -51,6 +54,53 @@ export class EvalService {
     private readonly geckoTerminal: GeckoTerminalService,
     private readonly deployerReputation: DeployerReputationService,
   ) {}
+
+  onModuleInit(): void {
+    const autostart = this.config.get<boolean>('paper.evalAutostart') ?? true;
+    if (!autostart) {
+      this.logger.log('Paper eval autostart disabled');
+      return;
+    }
+
+    const intervalMs = Math.max(60_000, this.config.get<number>('paper.evalIntervalMs') ?? 300_000);
+    const initialDelayMs = Math.max(0, this.config.get<number>('paper.evalInitialDelayMs') ?? 120_000);
+    this.evalTimeout = setTimeout(() => void this.runScheduledEval(), initialDelayMs);
+    this.evalInterval = setInterval(() => void this.runScheduledEval(), intervalMs);
+    this.logger.log(
+      `Paper eval scheduled - interval: ${intervalMs}ms, initial delay: ${initialDelayMs}ms`,
+    );
+  }
+
+  onModuleDestroy(): void {
+    if (this.evalTimeout) {
+      clearTimeout(this.evalTimeout);
+      this.evalTimeout = null;
+    }
+    if (this.evalInterval) {
+      clearInterval(this.evalInterval);
+      this.evalInterval = null;
+    }
+  }
+
+  private async runScheduledEval(): Promise<void> {
+    if (this.isScheduledEvalRunning) {
+      this.logger.warn('Paper eval already in progress - skipping scheduled tick');
+      return;
+    }
+
+    this.isScheduledEvalRunning = true;
+    try {
+      const result = await this.evaluateOpenPositions();
+      this.logger.log(
+        `Scheduled paper eval done: evaluated ${result.evaluated}/${result.openTotal}, ` +
+        `closed=${result.closed}, deferred=${result.deferred}`,
+      );
+    } catch (err) {
+      this.logger.error(`Scheduled paper eval failed: ${(err as Error).message}`);
+    } finally {
+      this.isScheduledEvalRunning = false;
+    }
+  }
 
   async evaluateOpenPositions(): Promise<{
     rows: EvalViewRow[];

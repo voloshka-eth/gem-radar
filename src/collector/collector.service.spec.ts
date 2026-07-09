@@ -258,8 +258,9 @@ describe('CollectorService', () => {
               const cfg: Record<string, unknown> = {
                 'chain.enabledChains': ['ethereum'],
                 'collector.pollIntervalMs': 9_999_999, // effectively never fires in tests
-                'collector.newPoolMaxAgeHours': 6,
+                'collector.newPoolMaxAgeHours': 24,
                 'collector.tokenMaxAgeDays': 7,
+                'collector.blockedTokenSymbols': ['openhuman'],
                 'scoring.minLiquidityUsd': 5_000,
                 'scoring.minFdvUsd': 10_000,
                 'scoring.maxFdvUsd': 50_000_000,
@@ -366,9 +367,27 @@ describe('CollectorService', () => {
     expect(lines[1]).toContain('liquidity_too_low');
   });
 
+  it('default-blocked openhuman ticker is rejected before expensive checks', async () => {
+    const blocked = buildResult();
+    blocked.token.symbol = 'OPENHUMAN';
+    gtMock.getNewPools.mockResolvedValue([blocked]);
+
+    await service.runCollectionCycle();
+
+    expect(tokenAgeMock.getTokenAgeDays).not.toHaveBeenCalled();
+    expect(riskMock.checkToken).not.toHaveBeenCalled();
+    expect(liquidityMock.verify).not.toHaveBeenCalled();
+    expect(paperMock.recordEntry).not.toHaveBeenCalled();
+
+    const csvPath = path.join(tempDir, 'decisions', 'rejected_tokens.csv');
+    const lines = fs.readFileSync(csvPath, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain('ticker_blocklisted');
+  });
+
   it('pool_too_old still writes a trajectory snapshot', async () => {
     const oldPool = buildResult({
-      poolCreatedAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+      poolCreatedAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
     });
     gtMock.getNewPools.mockResolvedValue([oldPool]);
 
@@ -950,8 +969,8 @@ describe('CollectorService', () => {
 
   it('same token identity does not reject when the deployer is clean', async () => {
     const candidate = buildResult({}, '0xfeed000000000000000000000000000000000001');
-    candidate.token.symbol = 'openhuman';
-    candidate.token.name = 'openhuman';
+    candidate.token.symbol = 'SAME';
+    candidate.token.name = 'SAME';
     riskMock.checkToken.mockResolvedValue({
       ...SAFE_RISK,
       merged: { ...SAFE_RISK.merged, deployerAddress: '0xClean' },

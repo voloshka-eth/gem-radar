@@ -48,7 +48,7 @@ export class PaperService {
     }
 
     const sizeUsd      = this.config.get<number>('paper.positionSizeUsd') ?? 20;
-    const delaySec     = this.config.get<number>('paper.detectionDelaySec') ?? 300;
+    const delaySec     = this.config.get<number>('paper.detectionDelaySec') ?? 0;
     const sandwichPct  = this.config.get<number>('paper.sandwichPct') ?? 0.01;
     const gasUsd       = this.config.get<number>('paper.gasUsd') ?? 1.5;
     const maxEntrySlip = this.config.get<number>('paper.maxEntrySlipPct') ?? 0.5;
@@ -196,7 +196,7 @@ export class PaperService {
     const { pool, token, liq, score, runId, buyTax, riskStatus, researchReason } = c;
 
     const sizeUsd      = this.config.get<number>('paper.positionSizeUsd') ?? 20;
-    const delaySec     = this.config.get<number>('paper.detectionDelaySec') ?? 300;
+    const delaySec     = this.config.get<number>('paper.detectionDelaySec') ?? 0;
     const sandwichPct  = this.config.get<number>('paper.sandwichPct') ?? 0.01;
     const gasUsd       = this.config.get<number>('paper.gasUsd') ?? 1.5;
     const maxEntrySlip = this.config.get<number>('paper.maxEntrySlipPct') ?? 0.5;

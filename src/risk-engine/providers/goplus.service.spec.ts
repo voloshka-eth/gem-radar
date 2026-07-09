@@ -181,6 +181,17 @@ describe('GoPlusService', () => {
     expect(result!.mintRisk).toBe(false);
   });
 
+  it('opens a short circuit breaker after repeated GoPlus server errors', async () => {
+    mockGet.mockResolvedValue({ data: { code: 5000, message: 'server error' } });
+
+    const first = await service.checkToken('ethereum', TOKEN_ADDR);
+    const second = await service.checkToken('ethereum', TOKEN_ADDR);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(mockGet).toHaveBeenCalledTimes(2);
+  });
+
   it('missing tax fields with critical booleans present -> GOPLUS_PARTIAL', async () => {
     mockGet.mockResolvedValueOnce({
       data: buildGoPlusResponse({

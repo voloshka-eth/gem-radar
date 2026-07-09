@@ -14,6 +14,7 @@ export interface Stage0Config {
   moonshotMinVol1hUsd?: number;
   moonshotMinTx1h?: number;
   moonshotMinBuys1h?: number;
+  blockedTokenSymbols?: string[];
 }
 
 export interface Stage0Result {
@@ -32,7 +33,15 @@ export interface Stage0Result {
  * fake liquidity, contract risk.  All of those belong in M2+.
  */
 export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): Stage0Result {
-  const { pool } = candidate;
+  const { pool, token } = candidate;
+
+  const blockedSymbols = new Set((cfg.blockedTokenSymbols ?? []).map(normalizeSymbol).filter(Boolean));
+  if (blockedSymbols.size > 0) {
+    const symbol = normalizeSymbol(token.symbol);
+    if (symbol && blockedSymbols.has(symbol)) {
+      return { pass: false, reason: 'ticker_blocklisted' };
+    }
+  }
 
   if (!pool.quoteAsset) {
     return { pass: false, reason: 'quote_asset_not_accepted' };
@@ -60,6 +69,10 @@ export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): 
   }
 
   return { pass: true };
+}
+
+function normalizeSymbol(symbol: string | null | undefined): string {
+  return (symbol ?? '').trim().replace(/^\$/, '').toLowerCase();
 }
 
 function isMoonshotProbeCandidate(candidate: CollectorResult, cfg: Stage0Config): boolean {

@@ -67,6 +67,7 @@ export type Stage0RejectReason =
   | 'liquidity_too_low'
   | 'fdv_too_low'
   | 'fdv_too_high'
+  | 'ticker_blocklisted'
   | 'duplicate';
 
 // Token-age gate rejection reasons (M3A — runs after Stage 0, before risk engine)

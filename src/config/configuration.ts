@@ -1,4 +1,9 @@
 import { registerAs } from '@nestjs/config';
+import tokenSymbolBlocklist from './token-symbol-blocklist.json';
+
+const blockedTokenSymbols = tokenSymbolBlocklist.symbols
+  .map((entry) => entry.symbol.trim().replace(/^\$/, '').toLowerCase())
+  .filter(Boolean);
 
 export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -40,13 +45,18 @@ export const apiConfig = registerAs('api', () => ({
   goplusMinIntervalMs: parseInt(process.env.GOPLUS_MIN_INTERVAL_MS ?? '2000', 10),
   goplusMaxAttempts: parseInt(process.env.GOPLUS_MAX_ATTEMPTS ?? '2', 10),
   goplusRetryDelayMs: parseInt(process.env.GOPLUS_RETRY_DELAY_MS ?? '2500', 10),
+  goplusCircuitBreakerMs: parseInt(process.env.GOPLUS_CIRCUIT_BREAKER_MS ?? '60000', 10),
   honeypotBaseUrl: process.env.HONEYPOT_BASE_URL ?? 'https://api.honeypot.is',
 }));
 
 export const collectorConfig = registerAs('collector', () => ({
   autoStart: process.env.COLLECTOR_AUTOSTART !== 'false',
   pollIntervalMs: parseInt(process.env.COLLECTOR_POLL_INTERVAL_MS ?? '120000', 10),
-  newPoolMaxAgeHours: parseInt(process.env.NEW_POOL_MAX_AGE_HOURS ?? '6', 10),
+  newPoolMaxAgeHours: parseInt(process.env.NEW_POOL_MAX_AGE_HOURS ?? '24', 10),
+  geckoTerminalPages: parseInt(process.env.GECKOTERMINAL_PAGES ?? '1', 10),
+  geckoTerminalRequestDelayMs: parseInt(process.env.GECKOTERMINAL_REQUEST_DELAY_MS ?? '5000', 10),
+  geckoTerminalRateLimitBackoffMs: parseInt(process.env.GECKOTERMINAL_RATE_LIMIT_BACKOFF_MS ?? '300000', 10),
+  geckoTerminalStatsCacheTtlMs: parseInt(process.env.GECKOTERMINAL_STATS_CACHE_TTL_MS ?? '600000', 10),
   tokenMaxAgeDays: parseFloat(process.env.TOKEN_MAX_AGE_DAYS ?? '7'),
   tokenAgeHardGateEnabled: process.env.TOKEN_AGE_HARD_GATE_ENABLED === 'true',
   moonshotStage0Enabled: process.env.MOONSHOT_STAGE0_ENABLED !== 'false',
@@ -60,6 +70,7 @@ export const collectorConfig = registerAs('collector', () => ({
   deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
   deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '1', 10),
   deployerGateMinRugRate: parseFloat(process.env.DEPLOYER_GATE_MIN_RUG_RATE ?? '0.5'),
+  blockedTokenSymbols,
   blockedDeployers: (process.env.BLOCKED_DEPLOYERS ?? '')
     .split(',')
     .map((entry) => entry.trim())
@@ -134,7 +145,12 @@ export const scoringConfig = registerAs('scoring', () => ({
 // Mid-price is forbidden. These are modeling assumptions, documented as such.
 export const paperConfig = registerAs('paper', () => ({
   positionSizeUsd:    parseFloat(process.env.PAPER_POSITION_SIZE_USD   ?? '20'),   // matches user's real sizing
-  detectionDelaySec:  parseInt(  process.env.PAPER_DETECTION_DELAY_SEC ?? '300', 10), // 5 min detect→act lag
+  detectionDelaySec:  parseInt(  process.env.PAPER_DETECTION_DELAY_SEC ?? '0', 10), // enter as soon as a candidate survives
+  evalAutostart:      process.env.PAPER_EVAL_AUTOSTART != null
+    ? process.env.PAPER_EVAL_AUTOSTART !== 'false'
+    : process.env.COLLECTOR_AUTOSTART !== 'false',
+  evalIntervalMs:     parseInt(process.env.PAPER_EVAL_INTERVAL_MS ?? '300000', 10),
+  evalInitialDelayMs: parseInt(process.env.PAPER_EVAL_INITIAL_DELAY_MS ?? '120000', 10),
   sandwichPct:        parseFloat(process.env.PAPER_SANDWICH_PCT        ?? '0.01'),  // 1% MEV/sandwich haircut
   gasUsd:             parseFloat(process.env.PAPER_GAS_USD             ?? '1.5'),   // modeled gas per tx (each way)
   maxEntrySlipPct:    parseFloat(process.env.PAPER_MAX_ENTRY_SLIP_PCT  ?? '0.50'),  // > this at entry → not_entered

@@ -73,7 +73,7 @@ Stage 0 is a cheap pre-filter using only reported API data. It is NOT a safety c
 | Check | What it uses | What it cannot tell you |
 |---|---|---|
 | Quote asset membership | API-reported pair metadata | Whether the pair is genuine |
-| Pool age ≤ `NEW_POOL_MAX_AGE_HOURS` | API-reported `pool_created_at` | Whether the timestamp is accurate |
+| Pool age ≤ `NEW_POOL_MAX_AGE_HOURS` (default 24h) | API-reported `pool_created_at` | Whether the timestamp is accurate |
 | Reported liquidity ≥ `MIN_LIQUIDITY_USD` | API-reported `reserve_in_usd` | Whether liquidity is real or fake |
 | FDV within `[MIN_FDV_USD, MAX_FDV_USD]` | API-reported `fdv_usd` | Whether FDV is inflated by wash trades |
 

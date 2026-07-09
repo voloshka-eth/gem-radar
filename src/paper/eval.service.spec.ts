@@ -247,3 +247,48 @@ describe('EvalService price-read failures', () => {
     expect(result.rows[0].status).toBe('alive');
   });
 });
+
+describe('EvalService scheduling', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('does not schedule background eval when autostart is disabled', () => {
+    const { service } = harness(openPosition(), healthyLiquidity(), {
+      'paper.evalAutostart': false,
+    });
+    const runSpy = jest.spyOn(service as any, 'runScheduledEval');
+
+    service.onModuleInit();
+    jest.advanceTimersByTime(10 * 60_000);
+
+    expect(runSpy).not.toHaveBeenCalled();
+    service.onModuleDestroy();
+  });
+
+  it('schedules background eval when autostart is enabled', () => {
+    const { service } = harness(openPosition(), healthyLiquidity(), {
+      'paper.evalAutostart': true,
+      'paper.evalInitialDelayMs': 1_000,
+      'paper.evalIntervalMs': 60_000,
+    });
+    const runSpy = jest
+      .spyOn(service as any, 'runScheduledEval')
+      .mockResolvedValue(undefined);
+
+    service.onModuleInit();
+    jest.advanceTimersByTime(999);
+    expect(runSpy).not.toHaveBeenCalled();
+
+    jest.advanceTimersByTime(1);
+    expect(runSpy).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(60_000);
+    expect(runSpy).toHaveBeenCalledTimes(2);
+    service.onModuleDestroy();
+  });
+});

@@ -24,6 +24,7 @@
     "eval": "ts-node scripts/eval.ts",
     "postmortem": "ts-node scripts/postmortem.ts",
     "edge": "ts-node scripts/edge.ts",
+    "benchmark": "ts-node scripts/benchmark.ts",
     "deployers:refresh": "ts-node scripts/deployer-reputation.ts",
     "deployers:block": "ts-node scripts/block-deployer.ts",
     "gem:screen": "ts-node scripts/gem-screen.ts",

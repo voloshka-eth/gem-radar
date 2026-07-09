@@ -28,10 +28,18 @@ export interface PoolTradeStats {
   reserveUsd: number | null;
 }
 
+type GtStatsCacheEntry = {
+  expiresAt: number;
+  value: PoolTradeStats | null;
+};
+
 @Injectable()
 export class GeckoTerminalService {
   private readonly logger = new Logger(GeckoTerminalService.name);
   private readonly http: AxiosInstance;
+  private static lastRequestAt = 0;
+  private static rateLimitBackoffUntil = 0;
+  private static statsCache = new Map<string, GtStatsCacheEntry>();
 
   constructor(private readonly config: ConfigService) {
     const baseURL = this.config.get<string>('api.geckoterminalBaseUrl');
@@ -43,8 +51,11 @@ export class GeckoTerminalService {
     });
 
     axiosRetry(this.http, {
-      retries: 3,
-      retryDelay: (count) => axiosRetry.exponentialDelay(count) + Math.random() * 1000,
+      retries: 1,
+      retryDelay: (count, err) => {
+        this.recordRateLimitBackoff(err);
+        return this.retryAfterDelayMs(err) ?? axiosRetry.exponentialDelay(count) + Math.random() * 1000;
+      },
       retryCondition: (err) =>
         axiosRetry.isNetworkOrIdempotentRequestError(err) ||
         err.response?.status === 429 ||
@@ -69,29 +80,36 @@ export class GeckoTerminalService {
       return [];
     }
 
-    let data: GtNewPoolsResponse;
+    const pageCount = Math.max(1, this.config.get<number>('collector.geckoTerminalPages') ?? 1);
+    const results: CollectorResult[] = [];
+
     try {
-      const res = await this.http.get<GtNewPoolsResponse>(
-        `/networks/${network}/${path}`,
-        { params: { include: 'base_token,quote_token,dex', page: 1 } },
-      );
-      data = res.data;
+      for (let page = 1; page <= pageCount; page++) {
+        if (!this.canRequest('pools')) return results;
+        await this.throttle();
+        const res = await this.http.get<GtNewPoolsResponse>(
+          `/networks/${network}/${path}`,
+          { params: { include: 'base_token,quote_token,dex', page } },
+        );
+
+        const data = res.data;
+        const includedMap = this.buildIncludedMap(data.included ?? []);
+        for (const pool of data.data) {
+          const result = this.normalise(chain, pool, includedMap);
+          if (result) results.push(result);
+        }
+
+        if ((data.data ?? []).length === 0) break;
+      }
     } catch (err) {
+      this.recordRateLimitBackoff(err);
       this.logger.error(
         `GeckoTerminal ${path} fetch failed for ${chain}: ${(err as Error).message}`,
       );
       return [];
     }
 
-    const includedMap = this.buildIncludedMap(data.included ?? []);
-    const results: CollectorResult[] = [];
-
-    for (const pool of data.data) {
-      const result = this.normalise(chain, pool, includedMap);
-      if (result) results.push(result);
-    }
-
-    this.logger.debug(`GeckoTerminal ${path} fetched ${results.length} pools for ${chain}`);
+    this.logger.debug(`GeckoTerminal ${path} fetched ${results.length} pools for ${chain} across ${pageCount} page(s)`);
     return results;
   }
 
@@ -108,7 +126,15 @@ export class GeckoTerminalService {
   ): Promise<PoolTradeStats | null> {
     const network = GT_NETWORK[chain];
     if (!network) return null;
+    const cacheKey = `${chain}:${poolAddress.toLowerCase()}`;
+    const cached = GeckoTerminalService.statsCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.value;
+    }
+    if (!this.canRequest('pool stats')) return null;
+
     try {
+      await this.throttle();
       const res = await this.http.get<{ data?: GtPool }>(
         `/networks/${network}/pools/${poolAddress.toLowerCase()}`,
       );
@@ -121,7 +147,7 @@ export class GeckoTerminalService {
         total(t.h6) > 0 ? { ...t.h6, window: 'h6' as const } :
         { ...t.h24, window: 'h24' as const };
       const vol = { h1: a.volume_usd.h1, h6: a.volume_usd.h6, h24: a.volume_usd.h24 }[bucket.window];
-      return {
+      const stats = {
         buys: bucket.buys,
         sells: bucket.sells,
         uniqueBuyers: bucket.buyers,
@@ -132,8 +158,12 @@ export class GeckoTerminalService {
         fdvUsd: this.parseNum(a.fdv_usd) ?? null,
         reserveUsd: this.parseNum(a.reserve_in_usd) ?? null,
       };
+      this.writeStatsCache(cacheKey, stats);
+      return stats;
     } catch (err) {
+      this.recordRateLimitBackoff(err);
       this.logger.debug(`GeckoTerminal pool stats failed for ${chain}:${poolAddress}: ${(err as Error).message}`);
+      this.writeStatsCache(cacheKey, null);
       return null;
     }
   }
@@ -233,5 +263,77 @@ export class GeckoTerminalService {
     if (!value) return undefined;
     const n = parseFloat(value);
     return isNaN(n) ? undefined : n;
+  }
+
+  private async throttle(): Promise<void> {
+    const delayMs = Math.max(0, this.config.get<number>('collector.geckoTerminalRequestDelayMs') ?? 5000);
+    if (delayMs <= 0) return;
+
+    const now = Date.now();
+    const waitMs = GeckoTerminalService.lastRequestAt + delayMs - now;
+    if (waitMs > 0) {
+      await this.delay(waitMs);
+    }
+    GeckoTerminalService.lastRequestAt = Date.now();
+  }
+
+  private canRequest(label: string): boolean {
+    const backoffRemainingMs = GeckoTerminalService.rateLimitBackoffUntil - Date.now();
+    if (backoffRemainingMs <= 0) return true;
+
+    this.logger.warn(
+      `GeckoTerminal rate-limit backoff active for ${Math.ceil(backoffRemainingMs / 1000)}s - skipping ${label}`,
+    );
+    return false;
+  }
+
+  private recordRateLimitBackoff(err: unknown): void {
+    if (!axios.isAxiosError(err) || err.response?.status !== 429) return;
+
+    const retryAfterMs = this.retryAfterDelayMs(err);
+    const fallbackMs = Math.max(
+      0,
+      this.config.get<number>('collector.geckoTerminalRateLimitBackoffMs') ?? 300_000,
+    );
+    const backoffMs = Math.max(retryAfterMs ?? 0, fallbackMs);
+    if (backoffMs <= 0) return;
+
+    GeckoTerminalService.rateLimitBackoffUntil = Math.max(
+      GeckoTerminalService.rateLimitBackoffUntil,
+      Date.now() + backoffMs,
+    );
+    this.logger.warn(
+      `GeckoTerminal 429 - opening shared backoff for ${Math.ceil(backoffMs / 1000)}s`,
+    );
+  }
+
+  private writeStatsCache(cacheKey: string, value: PoolTradeStats | null): void {
+    const ttlMs = Math.max(
+      0,
+      this.config.get<number>('collector.geckoTerminalStatsCacheTtlMs') ?? 600_000,
+    );
+    if (ttlMs <= 0) return;
+
+    GeckoTerminalService.statsCache.set(cacheKey, {
+      expiresAt: Date.now() + ttlMs,
+      value,
+    });
+  }
+
+  private retryAfterDelayMs(err: unknown): number | null {
+    if (!axios.isAxiosError(err)) return null;
+    const raw = err.response?.headers?.['retry-after'];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (!value) return null;
+
+    const seconds = Number(value);
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+
+    const dateMs = Date.parse(value);
+    return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : null;
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

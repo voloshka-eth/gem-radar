@@ -82,7 +82,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     this.pollIntervalMs =
       this.config.get<number>('collector.pollIntervalMs') ?? 120_000;
 
-    const maxAgeHours = this.config.get<number>('collector.newPoolMaxAgeHours') ?? 6;
+    const maxAgeHours = this.config.get<number>('collector.newPoolMaxAgeHours') ?? 24;
     this.stage0Config = {
       maxPoolAgeMs: maxAgeHours * 60 * 60 * 1000,
       minLiquidityUsd: this.config.get<number>('scoring.minLiquidityUsd') ?? 5_000,
@@ -94,6 +94,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       moonshotMinVol1hUsd: this.config.get<number>('collector.moonshotMinVol1hUsd') ?? 1_000,
       moonshotMinTx1h: this.config.get<number>('collector.moonshotMinTx1h') ?? 30,
       moonshotMinBuys1h: this.config.get<number>('collector.moonshotMinBuys1h') ?? 15,
+      blockedTokenSymbols: this.config.get<string[]>('collector.blockedTokenSymbols') ?? [],
     };
     this.tokenMaxAgeDays = this.config.get<number>('collector.tokenMaxAgeDays') ?? 7;
     this.tokenAgeHardGateEnabled =

@@ -69,6 +69,8 @@ const TRADE_SIGNAL_FIELDS: Array<keyof GoPlusTokenResult> = [
   'holders',
 ];
 
+const GOPLUS_BACKOFF_CODES = new Set(['4029', '5000']);
+
 @Injectable()
 export class GoPlusService {
   private readonly logger = new Logger(GoPlusService.name);
@@ -85,6 +87,8 @@ export class GoPlusService {
   private minIntervalMs: number;
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
+  private readonly circuitBreakerMs: number;
+  private providerBackoffUntil = 0;
 
   constructor(private readonly config: ConfigService) {
     this.baseUrl =
@@ -99,6 +103,8 @@ export class GoPlusService {
       Math.max(1, this.config.get<number>('api.goplusMaxAttempts') ?? 2);
     this.retryDelayMs =
       this.config.get<number>('api.goplusRetryDelayMs') ?? 2_500;
+    this.circuitBreakerMs =
+      Math.max(0, this.config.get<number>('api.goplusCircuitBreakerMs') ?? 60_000);
     this.http = axios.create({ timeout: 10_000 });
     axiosRetry(this.http, { retries: 2, retryDelay: axiosRetry.exponentialDelay });
   }
@@ -128,6 +134,15 @@ export class GoPlusService {
     chainId: string,
     tokenAddress: string,
   ): Promise<NormalizedRiskData | null> {
+    const backoffRemainingMs = this.providerBackoffUntil - Date.now();
+    if (backoffRemainingMs > 0) {
+      this.logger.warn(
+        `GoPlus: circuit breaker open for ${Math.ceil(backoffRemainingMs / 1000)}s - skipping ${tokenAddress}`,
+      );
+      return null;
+    }
+
+    let providerBackoffReason: string | null = null;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       await this.throttle();
 
@@ -142,6 +157,9 @@ export class GoPlusService {
         );
 
         if (data.code !== 1 || !data.result) {
+          if (this.isProviderBackoffCode(data.code)) {
+            providerBackoffReason = `code ${data.code}`;
+          }
           this.logger.warn(
             `GoPlus: non-ok response for ${tokenAddress} - code: ${data.code}, msg: ${data.message}`,
           );
@@ -149,6 +167,7 @@ export class GoPlusService {
             await this.retryDelay(attempt);
             continue;
           }
+          this.openProviderCircuitBreaker(providerBackoffReason);
           return null;
         }
 
@@ -172,6 +191,7 @@ export class GoPlusService {
         }
         return normalized;
       } catch (err) {
+        providerBackoffReason = this.providerBackoffReasonFromError(err) ?? providerBackoffReason;
         this.logger.warn(
           `GoPlus: request failed for ${tokenAddress} - ${(err as Error).message}`,
         );
@@ -179,6 +199,7 @@ export class GoPlusService {
           await this.retryDelay(attempt);
           continue;
         }
+        this.openProviderCircuitBreaker(providerBackoffReason);
         return null;
       }
     }
@@ -259,6 +280,26 @@ export class GoPlusService {
     if (wait > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, wait));
     }
+  }
+
+  private isProviderBackoffCode(code: unknown): boolean {
+    return GOPLUS_BACKOFF_CODES.has(String(code));
+  }
+
+  private providerBackoffReasonFromError(err: unknown): string | null {
+    const status = (err as { response?: { status?: number } }).response?.status;
+    if (status === 429 || (status != null && status >= 500)) {
+      return `http ${status}`;
+    }
+    return null;
+  }
+
+  private openProviderCircuitBreaker(reason: string | null): void {
+    if (!reason || this.circuitBreakerMs <= 0) return;
+    this.providerBackoffUntil = Date.now() + this.circuitBreakerMs;
+    this.logger.warn(
+      `GoPlus: opening circuit breaker for ${Math.ceil(this.circuitBreakerMs / 1000)}s after ${reason}`,
+    );
   }
 
   private normalize(r: GoPlusTokenResult, tokenAddress: string): NormalizedRiskData {
