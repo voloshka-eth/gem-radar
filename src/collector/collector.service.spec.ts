@@ -109,6 +109,7 @@ describe('CollectorService', () => {
   };
 
   const prismaMock = {
+    $transaction: jest.fn(),
     token: {
       upsert: jest.fn().mockResolvedValue(mockToken),
       findMany: jest.fn().mockResolvedValue([]),
@@ -140,6 +141,12 @@ describe('CollectorService', () => {
   };
   const moralisMock = {
     getTrendingTokenAddresses: jest.fn().mockResolvedValue([]),
+    getLastFetchSummary: jest.fn().mockReturnValue({
+      enabled: false,
+      requestedChains: 0,
+      returned: 0,
+      errors: 0,
+    }),
   };
   const birdeyeMock = {
     getVolumeTokenAddresses: jest.fn().mockResolvedValue([]),
@@ -189,6 +196,7 @@ describe('CollectorService', () => {
     // Reset all mocks between tests
     jest.clearAllMocks();
     prismaMock.token.upsert.mockResolvedValue(mockToken);
+    prismaMock.$transaction.mockImplementation(async (fn: any) => fn(prismaMock));
     prismaMock.token.findMany.mockResolvedValue([]);
     prismaMock.deployer.findUnique.mockResolvedValue(null);
     prismaMock.pool.upsert.mockResolvedValue(mockPool);
@@ -209,6 +217,12 @@ describe('CollectorService', () => {
     dsMock.getLatestAdAddresses.mockResolvedValue([]);
     dsMock.getPairsForTokens.mockResolvedValue([]);
     moralisMock.getTrendingTokenAddresses.mockResolvedValue([]);
+    moralisMock.getLastFetchSummary.mockReturnValue({
+      enabled: false,
+      requestedChains: 0,
+      returned: 0,
+      errors: 0,
+    });
     birdeyeMock.getVolumeTokenAddresses.mockResolvedValue([]);
     riskMock.checkToken.mockResolvedValue(SAFE_RISK);
     tokenAgeMock.getTokenAgeDays.mockResolvedValue(2);
@@ -350,6 +364,38 @@ describe('CollectorService', () => {
     const lines = fs.readFileSync(csvPath, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(2); // header + 1 rejection row
     expect(lines[1]).toContain('liquidity_too_low');
+  });
+
+  it('pool_too_old still writes a trajectory snapshot', async () => {
+    const oldPool = buildResult({
+      poolCreatedAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+    });
+    gtMock.getNewPools.mockResolvedValue([oldPool]);
+
+    await service.runCollectionCycle();
+
+    const trajectoryPath = path.join(tempDir, 'raw', 'trajectory_snapshots.csv');
+    expect(fs.existsSync(trajectoryPath)).toBe(true);
+    const row = fs.readFileSync(trajectoryPath, 'utf8').trim().split('\n')[1];
+    expect(row).toContain('pool_too_old');
+    expect(row).toContain('false');
+
+    expect(prismaMock.pool.upsert).not.toHaveBeenCalled();
+    expect(paperMock.recordEntry).not.toHaveBeenCalled();
+  });
+
+  it('seen-across-cycles tokens keep updating trajectory without reprocessing entry', async () => {
+    const candidate = buildResult();
+    gtMock.getNewPools.mockResolvedValue([candidate]);
+
+    await service.runCollectionCycle();
+    await service.runCollectionCycle();
+
+    const trajectoryPath = path.join(tempDir, 'raw', 'trajectory_snapshots.csv');
+    const rows = fs.readFileSync(trajectoryPath, 'utf8').trim().split('\n').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toContain('seen_across_cycles');
+    expect(prismaMock.pool.upsert).toHaveBeenCalledTimes(1);
   });
 
   it('rejected token row contains full candidate metrics', async () => {

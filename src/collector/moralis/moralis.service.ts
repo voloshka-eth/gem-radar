@@ -7,8 +7,21 @@ import { SupportedChain, TokenProbe } from '../collector.types';
 interface MoralisTrendingToken {
   chainId?: string;
   chain_id?: string;
+  chain?: string;
   tokenAddress?: string;
   token_address?: string;
+  address?: string;
+}
+
+type MoralisTrendingResponse =
+  | MoralisTrendingToken[]
+  | { result?: MoralisTrendingToken[]; data?: MoralisTrendingToken[]; tokens?: MoralisTrendingToken[] };
+
+export interface MoralisFetchSummary {
+  enabled: boolean;
+  requestedChains: number;
+  returned: number;
+  errors: number;
 }
 
 const MORALIS_CHAIN: Record<SupportedChain, string> = {
@@ -32,6 +45,12 @@ export class MoralisService {
   private readonly http: AxiosInstance;
   private readonly apiKey?: string;
   private readonly limit: number;
+  private lastSummary: MoralisFetchSummary = {
+    enabled: false,
+    requestedChains: 0,
+    returned: 0,
+    errors: 0,
+  };
 
   constructor(private readonly config: ConfigService) {
     this.apiKey = this.config.get<string>('api.moralisApiKey') || undefined;
@@ -55,25 +74,43 @@ export class MoralisService {
   }
 
   async getTrendingTokenAddresses(chains: SupportedChain[]): Promise<TokenProbe[]> {
+    this.lastSummary = {
+      enabled: Boolean(this.apiKey),
+      requestedChains: this.apiKey ? chains.length : 0,
+      returned: 0,
+      errors: 0,
+    };
     if (!this.apiKey) return [];
 
     const out: TokenProbe[] = [];
     for (const chain of chains) {
       try {
-        const res = await this.http.get<MoralisTrendingToken[]>('/tokens/trending', {
+        const res = await this.http.get<MoralisTrendingResponse>('/tokens/trending', {
           params: { chain: MORALIS_CHAIN[chain], limit: this.limit },
         });
-        for (const item of res.data ?? []) {
-          const tokenAddress = (item.tokenAddress ?? item.token_address)?.toLowerCase();
-          const rawChain = item.chainId ?? item.chain_id;
+        for (const item of this.unwrapTrendingResponse(res.data)) {
+          const tokenAddress = (item.tokenAddress ?? item.token_address ?? item.address)?.toLowerCase();
+          const rawChain = item.chainId ?? item.chain_id ?? item.chain;
           const resolvedChain = rawChain ? this.resolveChain(rawChain) : chain;
           if (tokenAddress && resolvedChain === chain) out.push({ chain, tokenAddress });
         }
       } catch (err) {
+        this.lastSummary.errors++;
         this.logger.warn(`Moralis trending fetch failed for ${chain}: ${(err as Error).message}`);
       }
     }
+    this.lastSummary.returned = out.length;
     return out;
+  }
+
+  getLastFetchSummary(): MoralisFetchSummary {
+    return { ...this.lastSummary };
+  }
+
+  private unwrapTrendingResponse(data: MoralisTrendingResponse | undefined): MoralisTrendingToken[] {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    return data.result ?? data.data ?? data.tokens ?? [];
   }
 
   private resolveChain(value: string | undefined): SupportedChain | null {

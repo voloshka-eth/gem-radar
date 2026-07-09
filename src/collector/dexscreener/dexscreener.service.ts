@@ -7,6 +7,7 @@ import {
   DsTokenBoostsResponse,
   DsTokenAdsResponse,
   DsTokenResponse,
+  DsTokensV1Response,
   DsPair,
   DS_CHAIN_MAP,
 } from './dexscreener.types';
@@ -141,26 +142,26 @@ export class DexScreenerService {
   }
 
   // Enrich a list of token addresses with pair data from DexScreener.
-  // Groups into batches of BATCH_SIZE to stay under rate limits.
+  // Groups into chain-specific batches of BATCH_SIZE to stay under rate limits.
   async getPairsForTokens(
     addressList: Array<{ chain: SupportedChain; tokenAddress: string }>,
   ): Promise<CollectorResult[]> {
     const results: CollectorResult[] = [];
 
-    // Chunk into batches
-    for (let i = 0; i < addressList.length; i += BATCH_SIZE) {
-      if (i > 0) await this.delay(INTER_REQUEST_DELAY_MS);
+    const byChain = new Map<SupportedChain, string[]>();
+    for (const { chain, tokenAddress } of addressList) {
+      if (!byChain.has(chain)) byChain.set(chain, []);
+      byChain.get(chain)!.push(tokenAddress);
+    }
 
-      const batch = addressList.slice(i, i + BATCH_SIZE);
-      // DS allows comma-separated addresses in a single call only when on the same chain.
-      // Group by chain first.
-      const byChain = new Map<SupportedChain, string[]>();
-      for (const { chain, tokenAddress } of batch) {
-        if (!byChain.has(chain)) byChain.set(chain, []);
-        byChain.get(chain)!.push(tokenAddress);
-      }
+    let requestCount = 0;
+    for (const [chain, addresses] of byChain) {
+      const uniqueAddresses = [...new Set(addresses.map((a) => a.toLowerCase()))];
+      for (let i = 0; i < uniqueAddresses.length; i += BATCH_SIZE) {
+        if (requestCount > 0) await this.delay(INTER_REQUEST_DELAY_MS);
+        requestCount++;
 
-      for (const [chain, addrs] of byChain) {
+        const addrs = uniqueAddresses.slice(i, i + BATCH_SIZE);
         const batchResults = await this.fetchPairsForChainBatch(chain, addrs);
         results.push(...batchResults);
       }
@@ -178,10 +179,11 @@ export class DexScreenerService {
   ): Promise<CollectorResult[]> {
     const joined = tokenAddresses.join(',');
     try {
-      const res = await this.http.get<DsTokenResponse>(
-        `/latest/dex/tokens/${joined}`,
+      const dsChain = this.toDexScreenerChainId(chain);
+      const res = await this.http.get<DsTokensV1Response | DsTokenResponse>(
+        `/tokens/v1/${dsChain}/${joined}`,
       );
-      const pairs = res.data?.pairs ?? [];
+      const pairs = Array.isArray(res.data) ? res.data : (res.data?.pairs ?? []);
       const results: CollectorResult[] = [];
 
       for (const pair of pairs) {
@@ -204,6 +206,11 @@ export class DexScreenerService {
       );
       return [];
     }
+  }
+
+  private toDexScreenerChainId(chain: SupportedChain): string {
+    const match = Object.entries(DS_CHAIN_MAP).find(([, mapped]) => mapped === chain);
+    return match?.[0] ?? chain;
   }
 
   private isSupportedChainProfile(

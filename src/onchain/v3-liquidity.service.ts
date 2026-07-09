@@ -4,6 +4,7 @@ import type { PublicClient } from 'viem';
 import type { SupportedChain, CandidatePool } from '../collector/collector.types';
 import { VIEM_CLIENTS, QUOTE_ASSET_DECIMALS, QUOTER_V2_CONFIG_KEY } from './onchain.constants';
 import { PriceService } from './price.service';
+import { bigintRatioToNumber, decimalToRawAmount, rawToDecimalNumber } from './bigint-math';
 
 const TOKEN_ADDR_ABI = [
   { name: 'token0', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
@@ -69,6 +70,7 @@ const QUOTER_V2_ABI = [{
 const PROBE_SIZES_USD = [50, 100, 500, 1000] as const;
 const MAX_SLIPPAGE_FOR_DEPTH = 0.10;
 const TWO_POW_96 = 2n ** 96n;
+const TWO_POW_192 = TWO_POW_96 * TWO_POW_96;
 
 export interface V3LiquidityResult {
   onchainTvlUsd: number;
@@ -151,7 +153,7 @@ export class V3LiquidityService {
         functionName: 'balanceOf',
         args: [poolAddr],
       }) as bigint;
-      const quoteBalHuman = Number(quoteBal) / 10 ** quoteDec;
+      const quoteBalHuman = rawToDecimalNumber(quoteBal, quoteDec);
       onchainTvlUsd = quoteBalHuman * quotePriceUsd * 2;
     } catch (err) {
       this.logger.warn(
@@ -161,8 +163,7 @@ export class V3LiquidityService {
 
     // Spot price from sqrtPriceX96:
     // sqrtPrice = sqrtPriceX96 / 2^96, price = sqrtPrice^2 = token1Raw per token0Raw
-    const sqrtRatio   = Number(sqrtPriceX96) / Number(TWO_POW_96);
-    const priceRaw    = sqrtRatio * sqrtRatio; // token1 per token0 in raw units
+    const priceRaw    = bigintRatioToNumber(sqrtPriceX96 * sqrtPriceX96, TWO_POW_192); // token1 per token0 in raw units
 
     const gemIsToken0 = onchainToken0.toLowerCase() !== pool.quoteAssetAddress.toLowerCase();
 
@@ -243,9 +244,10 @@ export class V3LiquidityService {
     if (!isFinite(spotPriceUsd) || spotPriceUsd <= 0) return null;
     try {
       // Sell sizeUsd worth of quote (e.g. USDC or WETH) to buy gem.
-      const amountInFloat = (sizeUsd / quotePriceUsd) * (10 ** quoteDec);
-      if (!isFinite(amountInFloat) || amountInFloat < 1) return null;
-      const amountInRaw = BigInt(Math.round(amountInFloat));
+      const amountInHuman = sizeUsd / quotePriceUsd;
+      if (!isFinite(amountInHuman) || amountInHuman <= 0) return null;
+      const amountInRaw = decimalToRawAmount(amountInHuman, quoteDec);
+      if (amountInRaw < 1n) return null;
 
       const result = await client.readContract({
         address: quoterAddr as `0x${string}`,
@@ -262,7 +264,7 @@ export class V3LiquidityService {
 
       // Convert received gem tokens to USD at spot price, compare to what we spent.
       const actualGemRaw = result[0];
-      const actualOutUsd = (Number(actualGemRaw) / 10 ** gemDec) * spotPriceUsd;
+      const actualOutUsd = rawToDecimalNumber(actualGemRaw, gemDec) * spotPriceUsd;
       return 1 - actualOutUsd / sizeUsd;
     } catch (err) {
       this.logger.debug(

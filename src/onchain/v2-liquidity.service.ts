@@ -3,6 +3,7 @@ import type { PublicClient } from 'viem';
 import type { SupportedChain, CandidatePool } from '../collector/collector.types';
 import { VIEM_CLIENTS, QUOTE_ASSET_DECIMALS } from './onchain.constants';
 import { PriceService } from './price.service';
+import { decimalToRawAmount, rawToDecimalNumber } from './bigint-math';
 
 // token0() / token1() — both V2 and V3 share this interface
 const TOKEN_ADDR_ABI = [
@@ -114,8 +115,8 @@ export class V2LiquidityService {
       throw new Error(msg);
     }
 
-    const quoteReserveHuman = Number(quoteReserveRaw) / 10 ** quoteDec;
-    const gemReserveHuman   = Number(gemReserveRaw)   / 10 ** gemDec;
+    const quoteReserveHuman = rawToDecimalNumber(quoteReserveRaw, quoteDec);
+    const gemReserveHuman   = rawToDecimalNumber(gemReserveRaw, gemDec);
 
     const onchainTvlUsd = quoteReserveHuman * quotePriceUsd * 2;
     const spotPriceUsd  = (quoteReserveHuman / gemReserveHuman) * quotePriceUsd;
@@ -132,14 +133,13 @@ export class V2LiquidityService {
     //             where amountInWithFee = amountIn * (10000 - feeBps) / 10000
     const slippages = PROBE_SIZES_USD.map((sizeUsd) => {
       const amountInHuman  = sizeUsd / spotPriceUsd;          // gem tokens
-      const amountInRaw    = amountInHuman * 10 ** gemDec;    // raw units
+      const amountInRaw    = decimalToRawAmount(amountInHuman, gemDec);
 
-      const feeFactor      = (10000 - feeBps) / 10000;
-      const amountInWithFee = amountInRaw * feeFactor;
+      const amountInWithFee = (amountInRaw * BigInt(10000 - feeBps)) / 10000n;
 
-      const actualOutRaw   = (amountInWithFee * Number(quoteReserveRaw)) /
-                              (Number(gemReserveRaw) + amountInWithFee);
-      const actualOutUsd   = (actualOutRaw / 10 ** quoteDec) * quotePriceUsd;
+      const actualOutRaw   = (amountInWithFee * quoteReserveRaw) /
+                              (gemReserveRaw + amountInWithFee);
+      const actualOutUsd   = rawToDecimalNumber(actualOutRaw, quoteDec) * quotePriceUsd;
       const expectedOutUsd = amountInHuman * spotPriceUsd;
 
       return 1 - actualOutUsd / expectedOutUsd;

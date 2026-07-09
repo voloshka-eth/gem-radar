@@ -34,6 +34,26 @@ describe('MoralisService', () => {
     expect(mockGet).toHaveBeenCalledWith('/tokens/trending', {
       params: { chain: 'eth', limit: 10 },
     });
+    expect(service.getLastFetchSummary()).toEqual({
+      enabled: true,
+      requestedChains: 1,
+      returned: 1,
+      errors: 0,
+    });
+  });
+
+  it('accepts wrapped trending response shapes', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: {
+        result: [
+          { chain: 'base', address: '0xBBB0000000000000000000000000000000000002' },
+        ],
+      },
+    });
+
+    await expect(service.getTrendingTokenAddresses(['base'])).resolves.toEqual([
+      { chain: 'base', tokenAddress: '0xbbb0000000000000000000000000000000000002' },
+    ]);
   });
 
   it('is disabled when no API key is configured', async () => {
@@ -45,5 +65,11 @@ describe('MoralisService', () => {
 
     await expect(service.getTrendingTokenAddresses(['ethereum'])).resolves.toEqual([]);
     expect(mockGet).not.toHaveBeenCalled();
+    expect(service.getLastFetchSummary()).toEqual({
+      enabled: false,
+      requestedChains: 0,
+      returned: 0,
+      errors: 0,
+    });
   });
 });

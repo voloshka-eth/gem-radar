@@ -14,6 +14,7 @@ import {
   ContractRiskRow, CONTRACT_RISK_HEADERS,
   ContractRejectedTokenRow, CONTRACT_REJECTED_TOKEN_HEADERS,
   QuarantineTokenRow, QUARANTINE_TOKEN_HEADERS,
+  TrajectorySnapshotRow, TRAJECTORY_SNAPSHOT_HEADERS,
   ResearchCandidateRow, RESEARCH_CANDIDATE_HEADERS, RESEARCH_CANDIDATE_CAVEAT,
   SpeculativeCandidateRow, SPECULATIVE_CANDIDATE_HEADERS, SPECULATIVE_CANDIDATE_CAVEAT,
   PoolSnapshotRow, POOL_SNAPSHOT_HEADERS,
@@ -45,6 +46,10 @@ export class FileLoggerService implements OnModuleInit {
 
   logRejectedToken(row: RejectedTokenRow): void {
     this.writeCsvRow('decisions/rejected_tokens.csv', REJECTED_TOKEN_HEADERS, row);
+  }
+
+  logTrajectorySnapshot(row: TrajectorySnapshotRow): void {
+    this.writeCsvRow('raw/trajectory_snapshots.csv', TRAJECTORY_SNAPSHOT_HEADERS, row);
   }
 
   logScoringHistory(row: ScoringHistoryRow): void {

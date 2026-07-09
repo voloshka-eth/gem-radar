@@ -10,7 +10,7 @@ import { DexScreenerService } from './dexscreener/dexscreener.service';
 import { CollectorResult, SupportedChain, TokenProbe } from './collector.types';
 import { MoralisService } from './moralis/moralis.service';
 import { BirdeyeService } from './birdeye/birdeye.service';
-import { applyStage0Gate, filterDuplicates, Stage0Config } from './stage0-gate';
+import { applyStage0Gate, filterDuplicates, Stage0Config, Stage0Result } from './stage0-gate';
 import { RiskEngineService } from '../risk-engine/risk-engine.service';
 import { ContractRiskResult, NormalizedRiskData } from '../risk-engine/risk-engine.types';
 import { TokenAgeService } from '../onchain/token-age.service';
@@ -189,10 +189,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
       for (const candidate of candidates) {
         const tokenKey = `${candidate.pool.chain}:${candidate.token.tokenAddress}`;
-        if (this.seenAcrossCycles.has(tokenKey)) { skipped++; continue; }
+        const gate = applyStage0Gate(candidate, this.stage0Config);
+        if (this.seenAcrossCycles.has(tokenKey)) {
+          skipped++;
+          this.logTrajectorySnapshot(candidate, runId, gate, 'seen_across_cycles');
+          continue;
+        }
+        this.logTrajectorySnapshot(candidate, runId, gate, 'candidate');
 
         total++;
-        const gate = applyStage0Gate(candidate, this.stage0Config);
         if (!gate.pass) {
           rejected++;
           this.logRejection(candidate, 'stage0', gate.reason!, runId);
@@ -217,6 +222,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     const dsCommunityAddresses = await this.dexScreener.getLatestCommunityTakeoverAddresses(this.enabledChains);
     const dsAdAddresses = await this.dexScreener.getLatestAdAddresses(this.enabledChains);
     const moralisTrendingAddresses = await this.moralis.getTrendingTokenAddresses(this.enabledChains);
+    const moralisSummary = this.moralis.getLastFetchSummary();
     const birdeyeVolumeAddresses = await this.birdeye.getVolumeTokenAddresses(this.enabledChains);
     const dsAddresses = this.dedupeTokenProbes([
       ...dsProfileAddresses,
@@ -241,6 +247,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       community_takeover_addresses: dsCommunityAddresses.length,
       ad_addresses: dsAdAddresses.length,
       moralis_trending_addresses: moralisTrendingAddresses.length,
+      moralis_status: moralisSummary,
       birdeye_volume_addresses: birdeyeVolumeAddresses.length,
       manual_addresses: this.manualProbeTokens.length,
       token_addresses: dsAddresses.length,
@@ -255,6 +262,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       community_takeover_addresses: dsCommunityAddresses.length,
       ad_addresses: dsAdAddresses.length,
       moralis_trending_addresses: moralisTrendingAddresses.length,
+      moralis_status: moralisSummary,
       birdeye_volume_addresses: birdeyeVolumeAddresses.length,
       manual_addresses: this.manualProbeTokens.length,
       token_addresses_count: dsAddresses.length,
@@ -265,10 +273,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     for (const candidate of dsFiltered) {
       const tokenKey = `${candidate.pool.chain}:${candidate.token.tokenAddress}`;
-      if (this.seenAcrossCycles.has(tokenKey)) { skipped++; continue; }
+      const gate = applyStage0Gate(candidate, this.stage0Config);
+      if (this.seenAcrossCycles.has(tokenKey)) {
+        skipped++;
+        this.logTrajectorySnapshot(candidate, runId, gate, 'seen_across_cycles');
+        continue;
+      }
+      this.logTrajectorySnapshot(candidate, runId, gate, 'candidate');
 
       total++;
-      const gate = applyStage0Gate(candidate, this.stage0Config);
       if (!gate.pass) {
         rejected++;
         this.logRejection(candidate, 'stage0', gate.reason!, runId);
@@ -663,13 +676,14 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     try {
       // Check pool existence BEFORE upsert — upsert result alone cannot distinguish create vs update.
-      const existingPool = await this.prisma.pool.findUnique({
+      const persisted = await this.prisma.$transaction(async (tx) => {
+      const existingPool = await tx.pool.findUnique({
         where: { chain_poolAddress: { chain: pool.chain, poolAddress: pool.poolAddress } },
         select: { id: true },
       });
       const isNewDiscovery = !existingPool;
 
-      const dbToken = await this.prisma.token.upsert({
+      const dbToken = await tx.token.upsert({
         where: { chain_tokenAddress: { chain: token.chain, tokenAddress: token.tokenAddress } },
         create: {
           chain: token.chain,
@@ -689,7 +703,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         },
       });
 
-      const dbPool = await this.prisma.pool.upsert({
+      const dbPool = await tx.pool.upsert({
         where: { chain_poolAddress: { chain: pool.chain, poolAddress: pool.poolAddress } },
         create: {
           chain: pool.chain,
@@ -705,7 +719,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         update: {},
       });
 
-      await this.prisma.poolSnapshot.create({
+      await tx.poolSnapshot.create({
         data: {
           chain: pool.chain,
           poolId: dbPool.id,
@@ -735,10 +749,38 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       });
 
       if (riskResult && !riskResult.cacheHit) {
-        await this.storeRiskCheck(runId, pool.chain, token.tokenAddress, dbToken.id, now, riskResult);
+        const r = riskResult;
+        await tx.contractRiskCheck.create({
+          data: {
+            runId,
+            chain: pool.chain,
+            tokenAddress: token.tokenAddress,
+            tokenId: dbToken.id,
+            ts: now,
+            goplusQueried: r.goplusQueried,
+            honeypotQueried: r.honeypotQueried,
+            verified: r.merged.verified ?? null,
+            honeypot: r.merged.honeypot ?? null,
+            buyTax: r.merged.buyTax ?? null,
+            sellTax: r.merged.sellTax ?? null,
+            canMint: r.merged.mintRisk ?? null,
+            canBlacklist: r.merged.blacklistRisk ?? null,
+            canPause: r.merged.pauseRisk ?? null,
+            isProxy: r.merged.proxyRisk ?? null,
+            ownerRenounced: r.merged.ownerRenounced ?? null,
+            lpLockedOrBurned: r.merged.lpLockedOrBurned ?? null,
+            decision: r.decision,
+            rejectReasons: r.rejectReasons.length > 0 ? (r.rejectReasons as Prisma.InputJsonValue) : Prisma.JsonNull,
+            hardReject: r.decision === 'CONTRACT_REJECT',
+            rejectReason: r.rejectReasons[0] ?? null,
+          },
+        });
       }
 
-      return { id: dbToken.id, poolId: dbPool.id, isNewDiscovery };
+      return { dbToken, dbPool, isNewDiscovery };
+      });
+
+      return { id: persisted.dbToken.id, poolId: persisted.dbPool.id, isNewDiscovery: persisted.isNewDiscovery };
     } catch (err) {
       this.logger.error(
         `Persist failed for ${token.chain}:${token.tokenAddress} — ${(err as Error).message}`,
@@ -896,6 +938,50 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       buys_1h: pool.buys1h?.toString() ?? '',
       sells_1h: pool.sells1h?.toString() ?? '',
       source: pool.source,
+    });
+  }
+
+  private logTrajectorySnapshot(
+    candidate: CollectorResult,
+    runId: string,
+    gate: Stage0Result,
+    processingStatus: 'candidate' | 'seen_across_cycles',
+  ): void {
+    const { token, pool } = candidate;
+    const now = new Date();
+    const poolAgeMinutes =
+      pool.poolCreatedAt !== undefined
+        ? Math.round((now.getTime() - pool.poolCreatedAt.getTime()) / 60_000)
+        : undefined;
+
+    this.fileLogger.logTrajectorySnapshot({
+      ts: now.toISOString(),
+      run_id: runId,
+      schema_version: CSV_SCHEMA_VERSION,
+      chain: pool.chain,
+      token_address: token.tokenAddress,
+      token_symbol: token.symbol ?? '',
+      token_name: token.name ?? '',
+      pool_address: pool.poolAddress,
+      dex: pool.dex,
+      quote_asset: pool.quoteAsset ?? '',
+      price_usd: pool.priceUsd?.toString() ?? '',
+      liquidity_usd: pool.liquidityUsd?.toString() ?? '',
+      fdv_usd: pool.fdvUsd?.toString() ?? '',
+      vol_5m: pool.vol5m?.toString() ?? '',
+      vol_1h: pool.vol1h?.toString() ?? '',
+      vol_6h: pool.vol6h?.toString() ?? '',
+      vol_24h: pool.vol24h?.toString() ?? '',
+      buys_1h: pool.buys1h?.toString() ?? '',
+      sells_1h: pool.sells1h?.toString() ?? '',
+      tx_count_1h: pool.txCount1h?.toString() ?? '',
+      pool_created_at: pool.poolCreatedAt?.toISOString() ?? '',
+      pool_age_minutes: poolAgeMinutes?.toString() ?? '',
+      source: pool.source,
+      stage0_pass: String(gate.pass),
+      stage0_reason: gate.reason ?? '',
+      stage0_lane: gate.lane ?? '',
+      processing_status: processingStatus,
     });
   }
 

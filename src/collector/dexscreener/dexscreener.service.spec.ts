@@ -86,6 +86,14 @@ describe('DexScreenerService — normalisePair (fixture-based)', () => {
     expect(pair!.pool.poolCreatedAt!.getTime()).toBe(1718618400000);
   });
 
+  it('uses the chain-scoped token batch endpoint', async () => {
+    mockGet.mockResolvedValueOnce({ data: dsFixture });
+
+    await service.getPairsForTokens([{ chain: 'ethereum', tokenAddress: GEMX_ADDR }]);
+
+    expect(mockGet).toHaveBeenCalledWith(`/tokens/v1/ethereum/${GEMX_ADDR}`);
+  });
+
   it('rejects pairs where neither side is a known quote asset', async () => {
     const noQuoteFixture = {
       schemaVersion: '1.0.0',

@@ -2,7 +2,7 @@
 // Adding a field: extend the interface, add an entry to the headers array,
 // bump CSV_SCHEMA_VERSION.  Never reorder existing columns — append only.
 
-export const CSV_SCHEMA_VERSION = '1.5.0'; // deployer score + shadow horizon CSV exports
+export const CSV_SCHEMA_VERSION = '1.6.0'; // trajectory snapshots + Moralis/V3 precision fixes
 
 export interface CsvHeader {
   id: string;   // matches the key in the row object
@@ -124,6 +124,68 @@ export const REJECTED_TOKEN_HEADERS: CsvHeader[] = [
   { id: 'source', title: 'source' },
   { id: 'liquidity_trust_level', title: 'liquidity_trust_level' },
   { id: 'onchain_verified', title: 'onchain_verified' },
+];
+
+// Pre-entry observation feed. Written before risk/paper entry gates, including
+// pool_too_old and cross-cycle seen tokens. This is never a buy signal.
+export interface TrajectorySnapshotRow {
+  ts: string;
+  run_id: string;
+  schema_version: string;
+  chain: string;
+  token_address: string;
+  token_symbol: string;
+  token_name: string;
+  pool_address: string;
+  dex: string;
+  quote_asset: string;
+  price_usd: string;
+  liquidity_usd: string;
+  fdv_usd: string;
+  vol_5m: string;
+  vol_1h: string;
+  vol_6h: string;
+  vol_24h: string;
+  buys_1h: string;
+  sells_1h: string;
+  tx_count_1h: string;
+  pool_created_at: string;
+  pool_age_minutes: string;
+  source: string;
+  stage0_pass: string;
+  stage0_reason: string;
+  stage0_lane: string;
+  processing_status: string;
+}
+
+export const TRAJECTORY_SNAPSHOT_HEADERS: CsvHeader[] = [
+  { id: 'ts', title: 'ts' },
+  { id: 'run_id', title: 'run_id' },
+  { id: 'schema_version', title: 'schema_version' },
+  { id: 'chain', title: 'chain' },
+  { id: 'token_address', title: 'token_address' },
+  { id: 'token_symbol', title: 'token_symbol' },
+  { id: 'token_name', title: 'token_name' },
+  { id: 'pool_address', title: 'pool_address' },
+  { id: 'dex', title: 'dex' },
+  { id: 'quote_asset', title: 'quote_asset' },
+  { id: 'price_usd', title: 'price_usd' },
+  { id: 'liquidity_usd', title: 'liquidity_usd' },
+  { id: 'fdv_usd', title: 'fdv_usd' },
+  { id: 'vol_5m', title: 'vol_5m' },
+  { id: 'vol_1h', title: 'vol_1h' },
+  { id: 'vol_6h', title: 'vol_6h' },
+  { id: 'vol_24h', title: 'vol_24h' },
+  { id: 'buys_1h', title: 'buys_1h' },
+  { id: 'sells_1h', title: 'sells_1h' },
+  { id: 'tx_count_1h', title: 'tx_count_1h' },
+  { id: 'pool_created_at', title: 'pool_created_at' },
+  { id: 'pool_age_minutes', title: 'pool_age_minutes' },
+  { id: 'source', title: 'source' },
+  { id: 'stage0_pass', title: 'stage0_pass' },
+  { id: 'stage0_reason', title: 'stage0_reason' },
+  { id: 'stage0_lane', title: 'stage0_lane' },
+  { id: 'processing_status', title: 'processing_status' },
 ];
 
 // ─── decisions/scoring_history.csv ────────────────────────────────────────────

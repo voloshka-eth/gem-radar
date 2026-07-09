@@ -38,7 +38,7 @@ export interface DsTokenAd {
 
 export type DsTokenAdsResponse = DsTokenAd[];
 
-// Pair data returned by /latest/dex/tokens/{address}
+// Pair data returned by DexScreener token/pair endpoints.
 export interface DsPairTransaction {
   buys: number;
   sells: number;
@@ -78,6 +78,8 @@ export interface DsTokenResponse {
   schemaVersion: string;
   pairs: DsPair[] | null;
 }
+
+export type DsTokensV1Response = DsPair[];
 
 // Map DexScreener chainId strings to our SupportedChain type
 export const DS_CHAIN_MAP: Record<string, string> = {

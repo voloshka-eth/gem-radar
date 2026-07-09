@@ -114,7 +114,7 @@ export class LiquidityVerificationService {
     // A verified=true row MUST be physically plausible. If the read fails any of
     // the rules below it is treated as a broken read → implausible_read,
     // liquidityVerified=false. An honest false beats a fabricated true.
-    const physFail = this.assessPhysicality(onchainTvlUsd, reportedUsd, [
+    const physFail = this.assessPhysicality(model, onchainTvlUsd, reportedUsd, [
       { size: 50,   slip: r.slip50 },
       { size: 100,  slip: r.slip100 },
       { size: 500,  slip: r.slip500 },
@@ -160,17 +160,18 @@ export class LiquidityVerificationService {
    * Returns a human-readable failure reason, or null if the read is sane.
    *
    * A row is implausible (→ verified=false) if ANY of:
-   *   1. onchain_tvl < 1% of reported   while reported > $1000
-   *   2. onchain_tvl < $1               while reported > $1000
+   *   1. V2 only: onchain_tvl < 1% of reported   while reported > $1000
+   *   2. V2 only: onchain_tvl < $1               while reported > $1000
    *   3. slippage on ANY probe          > 50%
    *   4. slippage is non-monotonic across probe sizes (must be non-decreasing)
    *   5. the smallest probe never executed (slip null) — no executable evidence
    *
-   * Note: for honeypot-style pools the BUY-side slippage can look small (the pool
-   * will happily sell you worthless tokens), so rules 1–2 (TVL-based) are the
-   * primary defence; rules 3–4 catch broken/garbage quote reads.
+   * Note: for V2, TVL-based rules are the primary defence against fake liquidity.
+   * For V3, local quote-token balance is not total concentrated liquidity, so
+   * Quoter/slippage rules carry the physicality check.
    */
   private assessPhysicality(
+    model: 'V2' | 'V3',
     onchainTvlUsd: number,
     reportedUsd: number | undefined,
     slips: ReadonlyArray<{ size: number; slip: number | null }>,
@@ -178,11 +179,11 @@ export class LiquidityVerificationService {
     const reported = reportedUsd ?? null;
 
     // Rule 1 — onchain absurdly small vs a meaningful reported figure.
-    if (reported != null && reported > 1000 && onchainTvlUsd < reported * 0.01) {
+    if (model === 'V2' && reported != null && reported > 1000 && onchainTvlUsd < reported * 0.01) {
       return `onchain_tvl $${onchainTvlUsd.toFixed(4)} is <1% of reported $${reported.toFixed(0)}`;
     }
     // Rule 2 — onchain below $1 while reported claims real money.
-    if (reported != null && reported > 1000 && onchainTvlUsd < 1) {
+    if (model === 'V2' && reported != null && reported > 1000 && onchainTvlUsd < 1) {
       return `onchain_tvl $${onchainTvlUsd.toFixed(4)} < $1 while reported $${reported.toFixed(0)}`;
     }
     // Rule 3 — any probe shows >50% slippage → no real depth.
