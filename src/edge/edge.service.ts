@@ -26,7 +26,11 @@ export class EdgeService {
       select: { realizedMultiple: true, entryFeatures: true },
     });
 
-    const positions: ClosedPosition[] = closed.map((c) => {
+    const primaryClosed = closed.filter((c) => {
+      const f = (c.entryFeatures ?? {}) as { riskCohort?: string };
+      return f.riskCohort !== 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER';
+    });
+    const positions: ClosedPosition[] = primaryClosed.map((c) => {
       const f = (c.entryFeatures ?? {}) as { finalScore?: number; band?: string; fdvUsd?: number | null };
       return {
         realizedMultiple: c.realizedMultiple != null ? Number(c.realizedMultiple) : 0,
@@ -38,7 +42,9 @@ export class EdgeService {
 
     const result = computeEdge(positions, params);
     const dateLabel = new Date().toISOString().slice(0, 10);
-    const report = renderEdgeReport(result, params, dateLabel);
+    const experimentalCount = closed.length - primaryClosed.length;
+    const report = renderEdgeReport(result, params, dateLabel) +
+      `\n\nEXPERIMENTAL COHORT EXCLUDED FROM PRIMARY EDGE: ${experimentalCount} Robinhood position(s) without a supported risk provider.`;
     this.fileLogger.writeReport(`edge_${dateLabel}.txt`, report);
     this.logger.log(`Edge report written → reports/edge_${dateLabel}.txt  (verdict: ${result.verdict})`);
     return report;

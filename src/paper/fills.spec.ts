@@ -67,21 +67,26 @@ describe('modelExit — pessimistic SELL, never mid-price', () => {
 });
 
 describe('rungsTriggered — ladder fires once per rung, in order', () => {
-  it('at 3x only the 2x rung triggers', () => {
+  it('at 3x only the 2x stake-recovery rung triggers', () => {
     const t = rungsTriggered(3, [], DEFAULT_LADDER);
     expect(t.map((r) => r.multiple)).toEqual([2]);
   });
-  it('after 2x executed, 6x triggers the 5x rung', () => {
-    const t = rungsTriggered(6, [2], DEFAULT_LADDER);
-    expect(t.map((r) => r.multiple)).toEqual([5]);
+  it('after 2x executed, 11x triggers the 10x rung', () => {
+    const t = rungsTriggered(11, [2], DEFAULT_LADDER);
+    expect(t.map((r) => r.multiple)).toEqual([10]);
   });
-  it('a jump straight to 12x triggers all unexecuted rungs', () => {
-    const t = rungsTriggered(12, [], DEFAULT_LADDER);
-    expect(t.map((r) => r.multiple)).toEqual([2, 5, 10]);
+  it('a jump straight to 1000x triggers all unexecuted rungs', () => {
+    const t = rungsTriggered(1000, [], DEFAULT_LADDER);
+    expect(t.map((r) => r.multiple)).toEqual([2, 10, 1000]);
   });
-  it('moonbag: ladder fractions sum to 0.90, leaving 0.10 held', () => {
+  it('sells 80% at 2x, 15% at 10x, and retains 5% for 1000x', () => {
     const sold = DEFAULT_LADDER.reduce((a, r) => a + r.sellFraction, 0);
-    expect(sold).toBeCloseTo(0.90, 5);
+    expect(DEFAULT_LADDER).toEqual([
+      { multiple: 2, sellFraction: 0.80 },
+      { multiple: 10, sellFraction: 0.15 },
+      { multiple: 1000, sellFraction: 0.05 },
+    ]);
+    expect(sold).toBeCloseTo(1, 5);
   });
 });
 

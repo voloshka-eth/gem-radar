@@ -6,6 +6,7 @@ export type RiskDataStatus =
   | 'GOPLUS_PARSE_FAILED'
   | 'GOPLUS_UNAVAILABLE'
   | 'HONEYPOT_ONLY_PARTIAL'
+  | 'NO_RISK_PROVIDER_SUPPORT'
   | 'ALL_PROVIDERS_UNAVAILABLE';
 
 /** Normalized risk fields from any provider. undefined = no data for that field. */

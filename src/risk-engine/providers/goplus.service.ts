@@ -12,7 +12,7 @@ import {
 import { NormalizedRiskData } from '../risk-engine.types';
 import { SupportedChain } from '../../collector/collector.types';
 
-const CHAIN_ID_MAP: Record<SupportedChain, string> = {
+const CHAIN_ID_MAP: Partial<Record<SupportedChain, string>> = {
   ethereum: '1',
   base: '8453',
 };
@@ -107,6 +107,10 @@ export class GoPlusService {
       Math.max(0, this.config.get<number>('api.goplusCircuitBreakerMs') ?? 60_000);
     this.http = axios.create({ timeout: 10_000 });
     axiosRetry(this.http, { retries: 2, retryDelay: axiosRetry.exponentialDelay });
+  }
+
+  supportsChain(chain: SupportedChain): boolean {
+    return Boolean(CHAIN_ID_MAP[chain]);
   }
 
   /**

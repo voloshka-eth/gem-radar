@@ -71,6 +71,9 @@ describe('PaperService', () => {
   const fileLoggerMock = {
     logPaperEntry: jest.fn(),
   };
+  const gemScreenMock = {
+    screenPosition: jest.fn(),
+  };
 
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-07-09T12:00:00.000Z'));
@@ -78,6 +81,7 @@ describe('PaperService', () => {
     prismaMock.paperPosition.findFirst.mockResolvedValue(null);
     prismaMock.paperPosition.create.mockResolvedValue({ id: 'paper-position-id' });
     prismaMock.paperEvent.create.mockResolvedValue({});
+    gemScreenMock.screenPosition.mockResolvedValue({ passed: false, reason: 'lp_not_locked:none' });
   });
 
   afterEach(() => {
@@ -86,7 +90,7 @@ describe('PaperService', () => {
 
   it('defaults candidate entries to immediate paper fills when no detection delay is configured', async () => {
     const config = { get: jest.fn(() => undefined) } as unknown as ConfigService;
-    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any);
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any);
 
     await service.recordEntry(buildCandidate());
 
@@ -95,5 +99,24 @@ describe('PaperService', () => {
     expect(data.openedAt.toISOString()).toBe('2026-07-09T12:00:00.000Z');
     expect(data.openedAt.getTime()).toBe(data.firstSeenAt.getTime());
     expect(fileLoggerMock.logPaperEntry.mock.calls[0][0].detection_delay_sec).toBe('0');
+    expect(data.entryFeatures).toMatchObject({ riskCohort: 'CONTRACT_SAFE' });
+    expect(gemScreenMock.screenPosition).toHaveBeenCalledWith(expect.objectContaining({
+      chain: 'ethereum',
+      tokenAddress: '0xtoken',
+      entryFdvUsd: 100_000,
+      entryPriceUsd: expect.any(Number),
+    }));
   });
+
+  it('keeps the paper entry when the optional gem screen fails', async () => {
+    const config = { get: jest.fn(() => undefined) } as unknown as ConfigService;
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any);
+    gemScreenMock.screenPosition.mockRejectedValueOnce(new Error('temporary RPC failure'));
+
+    await expect(service.recordEntry(buildCandidate())).resolves.toBeUndefined();
+
+    expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(1);
+    expect(fileLoggerMock.logPaperEntry).toHaveBeenCalledTimes(1);
+  });
+
 });

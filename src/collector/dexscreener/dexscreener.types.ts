@@ -85,4 +85,5 @@ export type DsTokensV1Response = DsPair[];
 export const DS_CHAIN_MAP: Record<string, string> = {
   ethereum: 'ethereum',
   base: 'base',
+  robinhood: 'robinhood',
 };

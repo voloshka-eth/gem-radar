@@ -13,10 +13,17 @@
  */
 import 'reflect-metadata';
 import * as dotenv from 'dotenv';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, defineChain, http } from 'viem';
 import { mainnet, base } from 'viem/chains';
 
 dotenv.config();
+
+const robinhood = defineChain({
+  id: 4663,
+  name: 'Robinhood Chain',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc.mainnet.chain.robinhood.com'] } },
+});
 
 // ─── Args / defaults ──────────────────────────────────────────────────────────
 
@@ -24,12 +31,12 @@ const DEFAULT_CHAIN   = 'ethereum' as const;
 const DEFAULT_ADDRESS = '0xaca92e438df0b2401ff60da7e4337b687a2435da'; // mUSD — deployed 2020
 
 const [, , chainArg, addrArg] = process.argv;
-const chain        = ((chainArg as string | undefined) ?? DEFAULT_CHAIN) as 'ethereum' | 'base';
+const chain        = ((chainArg as string | undefined) ?? DEFAULT_CHAIN) as 'ethereum' | 'base' | 'robinhood';
 const tokenAddress = (addrArg ?? DEFAULT_ADDRESS).toLowerCase() as `0x${string}`;
 const TOKEN_MAX_AGE_DAYS = parseInt(process.env.TOKEN_MAX_AGE_DAYS ?? '7', 10);
 
-if (chain !== 'ethereum' && chain !== 'base') {
-  console.error(`Unknown chain "${chain}". Use "ethereum" or "base".`);
+if (chain !== 'ethereum' && chain !== 'base' && chain !== 'robinhood') {
+  console.error(`Unknown chain "${chain}". Use "ethereum", "base", or "robinhood".`);
   process.exit(1);
 }
 
@@ -37,10 +44,12 @@ if (chain !== 'ethereum' && chain !== 'base') {
 
 const ethRpc  = process.env.ETHEREUM_RPC_URL ?? 'https://ethereum.publicnode.com';
 const baseRpc = process.env.BASE_RPC_URL     ?? 'https://base.publicnode.com';
-const rpcUrl  = chain === 'ethereum' ? ethRpc : baseRpc;
+const robinhoodRpc = process.env.ROBINHOOD_RPC_URL ?? 'https://rpc.mainnet.chain.robinhood.com';
+const rpcUrl  = chain === 'ethereum' ? ethRpc : chain === 'base' ? baseRpc : robinhoodRpc;
+const viemChain = chain === 'ethereum' ? mainnet : chain === 'base' ? base : robinhood;
 
 const client = createPublicClient({
-  chain: chain === 'ethereum' ? mainnet : base,
+  chain: viemChain,
   transport: http(rpcUrl),
 });
 

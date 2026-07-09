@@ -1,4 +1,10 @@
-export type SupportedChain = 'ethereum' | 'base';
+export type SupportedChain = 'ethereum' | 'base' | 'robinhood';
+
+export const SUPPORTED_CHAINS: readonly SupportedChain[] = [
+  'ethereum',
+  'base',
+  'robinhood',
+] as const;
 
 // Addresses of accepted quote assets per chain (lowercase)
 export const QUOTE_ASSET_MAP: Record<SupportedChain, Record<string, string>> = {
@@ -13,6 +19,10 @@ export const QUOTE_ASSET_MAP: Record<SupportedChain, Record<string, string>> = {
     '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': 'USDC',
     '0x50c5725949a6f0c72e6c4a641f24049a917db0cb': 'DAI',
     '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca': 'USDbC',
+  },
+  robinhood: {
+    '0x0bd7d308f8e1639fab988df18a8011f41eacad73': 'WETH',
+    '0x5fc5360d0400ad4f2af552add042d716f1d168': 'USDG',
   },
 };
 

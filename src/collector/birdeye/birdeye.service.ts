@@ -4,7 +4,7 @@ import axios, { AxiosInstance } from 'axios';
 import axiosRetry from 'axios-retry';
 import { SupportedChain, TokenProbe } from '../collector.types';
 
-const BIRDEYE_CHAIN: Record<SupportedChain, string> = {
+const BIRDEYE_CHAIN: Partial<Record<SupportedChain, string>> = {
   ethereum: 'ethereum',
   base: 'base',
 };
@@ -42,9 +42,11 @@ export class BirdeyeService {
 
     const out: TokenProbe[] = [];
     for (const chain of chains) {
+      const providerChain = BIRDEYE_CHAIN[chain];
+      if (!providerChain) continue;
       try {
         const res = await this.http.get<unknown>('/defi/tokenlist', {
-          headers: { 'x-chain': BIRDEYE_CHAIN[chain] },
+          headers: { 'x-chain': providerChain },
           params: {
             sort_by: 'v24hUSD',
             sort_type: 'desc',

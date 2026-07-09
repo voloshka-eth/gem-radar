@@ -16,6 +16,7 @@ import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
 import { ContractRiskResult } from '../risk-engine/risk-engine.types';
 import { TokenAgeService } from '../onchain/token-age.service';
 import { LiquidityVerificationService } from '../onchain/liquidity-verification.service';
+import { RobinhoodExperimentalSafetyService } from '../onchain/robinhood-experimental-safety.service';
 import { ScoringService } from '../scoring/scoring.service';
 import { PaperService } from '../paper/paper.service';
 import { DeployerReputationService } from '../deployer/deployer-reputation.service';
@@ -189,6 +190,15 @@ describe('CollectorService', () => {
     summarize: jest.fn().mockResolvedValue(null),
     isRepeatRugger: jest.fn().mockReturnValue(false),
   };
+  const robinhoodExperimentalSafetyMock = {
+    inspect: jest.fn().mockResolvedValue({
+      passed: true,
+      reasons: [],
+      ownerAddress: null,
+      proxyDetected: false,
+      dangerousSelectors: [],
+    }),
+  };
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gem-radar-collector-test-'));
@@ -208,6 +218,13 @@ describe('CollectorService', () => {
     deployerReputationMock.findBlocklistHit.mockResolvedValue(null);
     deployerReputationMock.summarize.mockResolvedValue(null);
     deployerReputationMock.isRepeatRugger.mockReturnValue(false);
+    robinhoodExperimentalSafetyMock.inspect.mockResolvedValue({
+      passed: true,
+      reasons: [],
+      ownerAddress: null,
+      proxyDetected: false,
+      dangerousSelectors: [],
+    });
     gtMock.getNewPools.mockResolvedValue([]);
     gtMock.getTrendingPools.mockResolvedValue([]);
     dsMock.getLatestProfileAddresses.mockResolvedValue([]);
@@ -248,6 +265,7 @@ describe('CollectorService', () => {
         { provide: RiskEngineService, useValue: riskMock },
         { provide: TokenAgeService, useValue: tokenAgeMock },
         { provide: LiquidityVerificationService, useValue: liquidityMock },
+        { provide: RobinhoodExperimentalSafetyService, useValue: robinhoodExperimentalSafetyMock },
         { provide: ScoringService, useValue: scoringMock },
         { provide: PaperService, useValue: paperMock },
         { provide: DeployerReputationService, useValue: deployerReputationMock },
@@ -264,6 +282,9 @@ describe('CollectorService', () => {
                 'scoring.minLiquidityUsd': 5_000,
                 'scoring.minFdvUsd': 10_000,
                 'scoring.maxFdvUsd': 50_000_000,
+                'collector.robinhoodExperimentalPaperEnabled': false,
+                'collector.robinhoodExperimentalMinDepthUsd': 100,
+                'collector.robinhoodExperimentalMinScore': 50,
               };
               return cfg[key];
             }),
@@ -832,6 +853,54 @@ describe('CollectorService', () => {
     expect(prismaMock.pool.upsert).not.toHaveBeenCalled();
     expect(paperMock.recordEntry).not.toHaveBeenCalled();
     expect(paperMock.recordResearchEntry).toHaveBeenCalled();
+  });
+
+  it('admits a Robinhood no-provider token only into the isolated experimental paper cohort', async () => {
+    (service as any).robinhoodExperimentalPaperEnabled = true;
+    const robinhoodUnknown: ContractRiskResult = {
+      decision: 'CONTRACT_UNKNOWN',
+      rejectReasons: [],
+      goplusQueried: false,
+      honeypotQueried: false,
+      merged: { providerStatus: 'NO_RISK_PROVIDER_SUPPORT' },
+      providerStatus: 'NO_RISK_PROVIDER_SUPPORT',
+      cacheHit: false,
+    };
+    riskMock.checkToken.mockResolvedValue(robinhoodUnknown);
+    liquidityMock.verify.mockResolvedValueOnce({
+      liquidityModel: 'V4',
+      liquidityVerified: true,
+      onchainTvlUsd: 12_345,
+      reportedVsOnchainPct: 0.01,
+      executableDepthUsd: 500,
+      slip50: 0.01,
+      slip100: 0.02,
+      slip500: 0.08,
+      slip1000: 0.15,
+      spotPriceUsd: 0.001,
+      error: null,
+    });
+    scoringMock.score.mockReturnValueOnce({
+      finalScore: 71,
+      liquidityScore: 70, depthScore: 65, ageScore: 80, tractionScore: 75,
+      divergenceScore: 60, deployerReputationScore: null,
+      componentsPresent: ['liquidity', 'depth', 'age', 'traction', 'divergence'],
+      componentsMissing: [], scoreConfidence: 0.5, band: 'candidate',
+    });
+    gtMock.getNewPools.mockResolvedValue([buildResult({
+      chain: 'robinhood',
+      quoteAssetAddress: '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
+    })]);
+
+    await service.runCollectionCycle();
+
+    expect(robinhoodExperimentalSafetyMock.inspect).toHaveBeenCalledWith('0xdeadbeef');
+    expect(paperMock.recordEntry).toHaveBeenCalledWith(expect.objectContaining({
+      riskCohort: 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER',
+      buyTax: null,
+    }));
+    expect(paperMock.recordResearchEntry).toHaveBeenCalled();
+    expect(fs.existsSync(path.join(tempDir, 'decisions', 'candidates.csv'))).toBe(false);
   });
 
   it('CONTRACT_UNKNOWN without any clean trade signal is quarantined but not research-listed', async () => {

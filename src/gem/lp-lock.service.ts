@@ -13,7 +13,7 @@ const ERC20_ABI = [
 export interface LpLockResult {
   lockedOrBurned: boolean;
   fraction: number | null;   // (burned + locked) / totalSupply
-  source: string;            // burn | locker:<name> | burn+locker:<name> | none | undetermined_v3 | read_failed
+  source: string;            // burn | locker:<name> | burn+locker:<name> | none | undetermined_v3/v4 | read_failed
 }
 
 /**
@@ -23,7 +23,7 @@ export interface LpLockResult {
  * held by burn sinks (reliable) and by known lockers (best-effort registry). Locked-or-burned
  * fraction ≥ config threshold ⇒ true.
  *
- * V3: liquidity is held as NFT positions, not a fungible LP token, so this method cannot
+ * V3/V4: liquidity is held as NFT positions, not a fungible LP token, so this method cannot
  * determine lock/burn here. Per the mandate, UNDETERMINED ⇒ treated as NOT locked ⇒ reject.
  */
 @Injectable()
@@ -37,7 +37,8 @@ export class LpLockService {
 
   async detect(chain: SupportedChain, poolAddress: string, liquidityModel: string): Promise<LpLockResult> {
     if (liquidityModel !== 'V2') {
-      return { lockedOrBurned: false, fraction: null, source: 'undetermined_v3' };
+      const model = liquidityModel === 'V4' ? 'v4' : 'v3';
+      return { lockedOrBurned: false, fraction: null, source: `undetermined_${model}` };
     }
     const client = this.clients.get(chain);
     if (!client) return { lockedOrBurned: false, fraction: null, source: 'no_client' };

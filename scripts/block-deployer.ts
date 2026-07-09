@@ -11,7 +11,7 @@ import { AppModule } from '../src/app.module';
 import { SupportedChain } from '../src/collector/collector.types';
 import { DeployerReputationService } from '../src/deployer/deployer-reputation.service';
 
-const SUPPORTED = new Set(['ethereum', 'base']);
+const SUPPORTED = new Set(['ethereum', 'base', 'robinhood']);
 
 async function main(): Promise<void> {
   const [chainArg, addressArg, ...reasonParts] = process.argv.slice(2);
@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   const reason = reasonParts.join(' ').trim() || 'manual_block';
 
   if (!SUPPORTED.has(chain)) {
-    throw new Error('Usage: npm run deployers:block -- <ethereum|base> <0xaddress> [reason]');
+    throw new Error('Usage: npm run deployers:block -- <ethereum|base|robinhood> <0xaddress> [reason]');
   }
   if (!address || !/^0x[a-f0-9]{40}$/.test(address)) {
     throw new Error(`Invalid deployer address: ${addressArg ?? '<missing>'}`);

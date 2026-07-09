@@ -49,8 +49,8 @@ describe('RiskEngineService — CSV file creation', () => {
   let module: TestingModule;
   let tempDir: string;
 
-  const goplusMock = { checkToken: jest.fn() };
-  const honeypotMock = { checkToken: jest.fn() };
+  const goplusMock = { checkToken: jest.fn(), supportsChain: jest.fn() };
+  const honeypotMock = { checkToken: jest.fn(), supportsChain: jest.fn() };
   const redisMock = { get: jest.fn(), setex: jest.fn() };
 
   beforeEach(async () => {
@@ -60,6 +60,8 @@ describe('RiskEngineService — CSV file creation', () => {
     // Both return null by default — the parallel-fail → UNKNOWN path
     goplusMock.checkToken.mockResolvedValue(null);
     honeypotMock.checkToken.mockResolvedValue(null);
+    goplusMock.supportsChain.mockReturnValue(true);
+    honeypotMock.supportsChain.mockReturnValue(true);
     // Redis returns cache-miss by default
     redisMock.get.mockResolvedValue(null);
     redisMock.setex.mockResolvedValue('OK');

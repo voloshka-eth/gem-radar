@@ -6,7 +6,7 @@ import { HoneypotApiResponse } from './honeypot.types';
 import { NormalizedRiskData } from '../risk-engine.types';
 import { SupportedChain } from '../../collector/collector.types';
 
-const CHAIN_ID_MAP: Record<SupportedChain, number> = {
+const CHAIN_ID_MAP: Partial<Record<SupportedChain, number>> = {
   ethereum: 1,
   base: 8453,
 };
@@ -23,6 +23,10 @@ export class HoneypotService {
     this.http = axios.create({ timeout: 8_000 });
     // Only 1 retry — honeypot.is is supplementary; don't block the cycle on retries.
     axiosRetry(this.http, { retries: 1, retryDelay: axiosRetry.exponentialDelay });
+  }
+
+  supportsChain(chain: SupportedChain): boolean {
+    return Boolean(CHAIN_ID_MAP[chain]);
   }
 
   /**

@@ -91,6 +91,13 @@ function healthyLiquidity(): LiquidityCheckResult {
   };
 }
 
+function healthyLiquidityAtPrice(spotPriceUsd: number): LiquidityCheckResult {
+  return {
+    ...healthyLiquidity(),
+    spotPriceUsd,
+  };
+}
+
 function harness(
   position: ReturnType<typeof openPosition>,
   liq: LiquidityCheckResult,
@@ -245,6 +252,55 @@ describe('EvalService price-read failures', () => {
     expect(prisma.paperPosition.update.mock.calls[0][0].data.entryFeatures.lastPriceReadError).toBeUndefined();
     expect(fileLogger.logPositionTick.mock.calls[0][0].status).toBe('alive');
     expect(result.rows[0].status).toBe('alive');
+  });
+
+  it('sells 80% at 2x and keeps the gem tail open', async () => {
+    const { service, prisma, fileLogger } = harness(
+      openPosition(),
+      healthyLiquidityAtPrice(2),
+      {
+        'paper.ladder': [
+          { multiple: 2, sellFraction: 0.8 },
+          { multiple: 10, sellFraction: 0.15 },
+          { multiple: 1000, sellFraction: 0.05 },
+        ],
+      },
+    );
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(0);
+    expect(fileLogger.logPaperExit).toHaveBeenCalledTimes(1);
+    const update = prisma.paperPosition.update.mock.calls[0][0].data;
+    expect(update.remainingFraction).toBeCloseTo(0.2, 10);
+    expect(update.executedRungs).toBe('2');
+    expect(result.rows[0].status).toBe('alive');
+  });
+
+  it('closes only when the final 1000x ladder rung is sold', async () => {
+    const { service, prisma, fileLogger } = harness(
+      openPosition(),
+      healthyLiquidityAtPrice(1000),
+      {
+        'paper.ladder': [
+          { multiple: 2, sellFraction: 0.8 },
+          { multiple: 10, sellFraction: 0.15 },
+          { multiple: 1000, sellFraction: 0.05 },
+        ],
+      },
+    );
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(1);
+    expect(fileLogger.logPaperExit).toHaveBeenCalledTimes(3);
+    expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
+      status: 'CLOSED',
+      remainingFraction: 0,
+      outcomeClass: 'WIN',
+      executedRungs: '2,10,1000',
+    });
+    expect(result.rows[0].status).toBe('closed:WIN');
   });
 });
 

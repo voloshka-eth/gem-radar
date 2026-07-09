@@ -15,11 +15,18 @@
  */
 import 'reflect-metadata';
 import * as dotenv from 'dotenv';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, defineChain, http } from 'viem';
 import { mainnet, base } from 'viem/chains';
 import axios from 'axios';
 
 dotenv.config();
+
+const robinhood = defineChain({
+  id: 4663,
+  name: 'Robinhood Chain',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc.mainnet.chain.robinhood.com'] } },
+});
 
 // ─── Args / defaults ─────────────────────────────────────────────────────────
 
@@ -29,12 +36,12 @@ const DEFAULT_POOL       = '0xd0b53d9277642d899df5c87a3966a349a798f224';
 const DEFAULT_QUOTE_ADDR = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'; // USDC on Base
 
 const [, , chainArg, poolArg, quoteArg] = process.argv;
-const chain       = ((chainArg ?? DEFAULT_CHAIN) as 'ethereum' | 'base');
+const chain       = ((chainArg ?? DEFAULT_CHAIN) as 'ethereum' | 'base' | 'robinhood');
 const poolAddress = (poolArg  ?? DEFAULT_POOL).toLowerCase()       as `0x${string}`;
 const quoteAddr   = (quoteArg ?? DEFAULT_QUOTE_ADDR).toLowerCase() as `0x${string}`;
 
-if (chain !== 'ethereum' && chain !== 'base') {
-  console.error(`Unknown chain "${chain}". Use "ethereum" or "base".`);
+if (chain !== 'ethereum' && chain !== 'base' && chain !== 'robinhood') {
+  console.error(`Unknown chain "${chain}". Use "ethereum", "base", or "robinhood".`);
   process.exit(1);
 }
 
@@ -42,10 +49,13 @@ if (chain !== 'ethereum' && chain !== 'base') {
 
 const rpcUrl = chain === 'ethereum'
   ? (process.env.ETHEREUM_RPC_URL ?? 'https://eth.drpc.org')
-  : (process.env.BASE_RPC_URL     ?? 'https://base.drpc.org');
+  : chain === 'base'
+    ? (process.env.BASE_RPC_URL ?? 'https://base.drpc.org')
+    : (process.env.ROBINHOOD_RPC_URL ?? 'https://rpc.mainnet.chain.robinhood.com');
+const viemChain = chain === 'ethereum' ? mainnet : chain === 'base' ? base : robinhood;
 
 const client = createPublicClient({
-  chain: chain === 'ethereum' ? mainnet : base,
+  chain: viemChain,
   transport: http(rpcUrl, { retryCount: 3, retryDelay: 200 }),
 });
 
@@ -53,6 +63,7 @@ const client = createPublicClient({
 const QUOTER_V2_ADDR: Record<string, string> = {
   ethereum: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
   base:     '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
+  robinhood: '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7',
 };
 const TWO_POW_96 = 2n ** 96n;
 const PROBE_SIZES_USD = [50, 100, 500, 1000] as const;
@@ -192,7 +203,7 @@ async function main(): Promise<void> {
 
   let spotPriceUsd: number;
   // Fetch quote price from DefiLlama
-  const llamaChain = chain === 'ethereum' ? 'ethereum' : 'base';
+  const llamaChain = chain;
   let quotePriceUsd = 0;
   try {
     const coinId = `${llamaChain}:${quoteAddr}`;

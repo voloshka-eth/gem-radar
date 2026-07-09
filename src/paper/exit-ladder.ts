@@ -2,7 +2,8 @@
  * M5 — PURE exit-ladder + status detection.  No I/O, deterministic.
  *
  * The ladder sells fractions of the ORIGINAL position as the (gross, mark-to-market)
- * multiple crosses thresholds; the remainder is a moonbag held until invalidation.
+ * multiple crosses thresholds; the remainder stays open until a later rung or a
+ * risk invalidation.
  * Status detection classifies a position from re-read on-chain facts.
  */
 
@@ -12,10 +13,9 @@ export interface LadderRung {
 }
 
 export const DEFAULT_LADDER: LadderRung[] = [
-  { multiple: 2,  sellFraction: 0.50 },
-  { multiple: 5,  sellFraction: 0.25 },
-  { multiple: 10, sellFraction: 0.15 },
-  // remainder (0.10) = moonbag, held until invalidation
+  { multiple: 2,    sellFraction: 0.80 },
+  { multiple: 10,   sellFraction: 0.15 },
+  { multiple: 1000, sellFraction: 0.05 },
 ];
 
 /**

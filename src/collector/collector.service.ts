@@ -7,7 +7,7 @@ import { FileLoggerService } from '../file-logger/file-logger.service';
 import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
 import { GeckoTerminalService } from './geckoterminal/geckoterminal.service';
 import { DexScreenerService } from './dexscreener/dexscreener.service';
-import { CollectorResult, SupportedChain, TokenProbe } from './collector.types';
+import { CollectorResult, SUPPORTED_CHAINS, SupportedChain, TokenProbe } from './collector.types';
 import { MoralisService } from './moralis/moralis.service';
 import { BirdeyeService } from './birdeye/birdeye.service';
 import { applyStage0Gate, filterDuplicates, Stage0Config, Stage0Result } from './stage0-gate';
@@ -15,6 +15,7 @@ import { RiskEngineService } from '../risk-engine/risk-engine.service';
 import { ContractRiskResult, NormalizedRiskData } from '../risk-engine/risk-engine.types';
 import { TokenAgeService } from '../onchain/token-age.service';
 import { LiquidityVerificationService } from '../onchain/liquidity-verification.service';
+import { RobinhoodExperimentalSafetyService } from '../onchain/robinhood-experimental-safety.service';
 import type { LiquidityCheckResult } from '../onchain/onchain.types';
 import { PoolLiquiditySnapshotRow } from '../file-logger/csv-schemas';
 import { ScoringService } from '../scoring/scoring.service';
@@ -55,6 +56,9 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly tokenMaxAgeDays: number;
   private readonly tokenAgeHardGateEnabled: boolean;
   private readonly promoteCleanUnknownEnabled: boolean;
+  private readonly robinhoodExperimentalPaperEnabled: boolean;
+  private readonly robinhoodExperimentalMinDepthUsd: number;
+  private readonly robinhoodExperimentalMinScore: number;
   private readonly deployerGateEnabled: boolean;
   private readonly manualProbeTokens: TokenProbe[];
 
@@ -69,13 +73,19 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     private readonly riskEngine: RiskEngineService,
     private readonly tokenAge: TokenAgeService,
     private readonly liquidityVerifier: LiquidityVerificationService,
+    private readonly robinhoodExperimentalSafety: RobinhoodExperimentalSafetyService,
     private readonly scoring: ScoringService,
     private readonly paper: PaperService,
     private readonly deployerReputation: DeployerReputationService,
   ) {
-    this.enabledChains = (
-      this.config.get<string[]>('chain.enabledChains') ?? ['ethereum', 'base']
-    ) as SupportedChain[];
+    const configuredChains = this.config.get<string[]>('chain.enabledChains') ?? [...SUPPORTED_CHAINS];
+    const supported = new Set<string>(SUPPORTED_CHAINS);
+    this.enabledChains = configuredChains.filter(
+      (chain): chain is SupportedChain => supported.has(chain),
+    );
+    for (const chain of configuredChains.filter((value) => !supported.has(value))) {
+      this.logger.warn(`Ignoring unsupported collector chain: ${chain}`);
+    }
     this.autoStart =
       this.config.get<boolean>('collector.autoStart') ?? true;
 
@@ -101,6 +111,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       this.config.get<boolean>('collector.tokenAgeHardGateEnabled') ?? false;
     this.promoteCleanUnknownEnabled =
       this.config.get<boolean>('collector.promoteCleanUnknownEnabled') ?? false;
+    this.robinhoodExperimentalPaperEnabled =
+      this.config.get<boolean>('collector.robinhoodExperimentalPaperEnabled') ?? false;
+    this.robinhoodExperimentalMinDepthUsd =
+      this.config.get<number>('collector.robinhoodExperimentalMinDepthUsd') ?? 100;
+    this.robinhoodExperimentalMinScore =
+      this.config.get<number>('collector.robinhoodExperimentalMinScore') ?? 50;
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
     this.manualProbeTokens =
@@ -359,6 +375,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         if (promoted) {
           return { outcome: 'SAFE', riskResult };
         }
+        const experimentalPromoted = await this.tryPromoteRobinhoodExperimentalCandidate(
+          candidate,
+          riskResult,
+          runId,
+          researchEvaluation,
+        );
+        if (experimentalPromoted) {
+          return { outcome: 'SAFE', riskResult };
+        }
       }
       this.logQuarantine(candidate, runId);
       await this.persistQuarantine(candidate, runId);
@@ -411,7 +436,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         runId,
         buyTax: riskResult.merged.buyTax,
         riskStatus: riskResult.providerStatus ?? riskResult.merged.providerStatus ?? '',
-        researchReason: 'contract_unknown_clean_trade_signals',
+        researchReason: this.researchReason(riskResult),
       });
 
       if (liq.liquidityVerified === true && score.band !== 'reject_band') {
@@ -494,6 +519,67 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     if (m.sellTax !== undefined && m.sellTax > 0) return false;
     if (m.buyTax !== undefined && m.buyTax > 0) return false;
 
+    return true;
+  }
+
+  /**
+   * Temporary paper-only admission path while Robinhood has no GoPlus/Honeypot
+   * coverage. Deliberately omits normal candidate and score logs so this cohort
+   * cannot make the primary strategy look better than it is.
+   */
+  private async tryPromoteRobinhoodExperimentalCandidate(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+    runId: string,
+    evaluation: ResearchEvaluation | null,
+  ): Promise<boolean> {
+    if (!this.robinhoodExperimentalPaperEnabled || !evaluation) return false;
+    if (candidate.pool.chain !== 'robinhood') return false;
+    if (riskResult.decision !== 'CONTRACT_UNKNOWN' || riskResult.rejectReasons.length > 0) return false;
+
+    const providerStatus = riskResult.providerStatus ?? riskResult.merged.providerStatus;
+    if (providerStatus !== 'NO_RISK_PROVIDER_SUPPORT') return false;
+    if (evaluation.liq.liquidityVerified !== true) return false;
+    if ((evaluation.liq.executableDepthUsd ?? 0) < this.robinhoodExperimentalMinDepthUsd) return false;
+    if (evaluation.score.finalScore < this.robinhoodExperimentalMinScore) return false;
+    if (evaluation.score.band === 'reject_band') return false;
+
+    const staticSafety = await this.robinhoodExperimentalSafety.inspect(candidate.token.tokenAddress);
+    if (!staticSafety.passed) {
+      this.logger.warn(
+        `Robinhood experimental paper gate rejected ${candidate.token.tokenAddress}: ` +
+        staticSafety.reasons.join(', '),
+      );
+      return false;
+    }
+
+    const persisted = await this.persistCandidate(candidate, runId, riskResult, evaluation.liq);
+    if (!persisted) return false;
+
+    if (persisted.isNewDiscovery) {
+      this.logNewPool(candidate, runId, 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER');
+    }
+    this.logPoolSnapshot(candidate, runId);
+    this.logLiquiditySnapshot(candidate, runId, evaluation.liq);
+    await this.paper.recordEntry({
+      pool: candidate.pool,
+      token: candidate.token,
+      liq: evaluation.liq,
+      score: evaluation.score,
+      ageDays: evaluation.ageDays,
+      tokenId: persisted.id,
+      poolId: persisted.poolId,
+      runId,
+      buyTax: null,
+      riskCohort: 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER',
+      experimentalSafety: staticSafety,
+    });
+
+    this.logger.warn(
+      `Robinhood experimental paper entry: ${candidate.token.tokenAddress} (${candidate.token.symbol ?? '?'}) ` +
+      `depth=$${evaluation.liq.executableDepthUsd?.toFixed(0) ?? '0'} ` +
+      `score=${evaluation.score.finalScore.toFixed(2)}; no supported tax/sell simulation provider`,
+    );
     return true;
   }
 
@@ -597,6 +683,13 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     if (riskResult.decision !== 'CONTRACT_UNKNOWN') return false;
     if (riskResult.rejectReasons.length > 0) return false;
 
+    if (
+      candidate.pool.chain === 'robinhood' &&
+      riskResult.providerStatus === 'NO_RISK_PROVIDER_SUPPORT'
+    ) {
+      return (candidate.pool.liquidityUsd ?? 0) > 0 && (candidate.pool.fdvUsd ?? 0) > 0;
+    }
+
     const m = riskResult.merged;
     if (m.honeypot === true || m.canSell === false) return false;
     if (
@@ -618,6 +711,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     if (!hasCleanTradeSignal) return false;
 
     return (candidate.pool.liquidityUsd ?? 0) > 0 && (candidate.pool.fdvUsd ?? 0) > 0;
+  }
+
+  private researchReason(riskResult: ContractRiskResult): string {
+    return riskResult.providerStatus === 'NO_RISK_PROVIDER_SUPPORT'
+      ? 'risk_provider_unsupported_observation_only'
+      : 'contract_unknown_clean_trade_signals';
   }
 
   private emitContractGateSanityAlert(runId: string, results: ContractRiskResult[]): void {
@@ -1096,7 +1195,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       dex: pool.dex,
       source: pool.source,
       status: 'WATCH_ONLY',
-      reason: 'contract_unknown_clean_trade_signals',
+      reason: this.researchReason(riskResult),
       risk_status: riskResult.providerStatus ?? m.providerStatus ?? '',
       honeypot: m.honeypot?.toString() ?? '',
       buy_tax: m.buyTax?.toFixed(2) ?? '',
@@ -1134,7 +1233,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       source: pool.source,
       risk_decision: riskResult.decision,
       risk_status: riskResult.providerStatus ?? m.providerStatus ?? '',
-      research_reason: 'contract_unknown_clean_trade_signals',
+      research_reason: this.researchReason(riskResult),
       liquidity_model: liq.liquidityModel,
       liquidity_verified: String(liq.liquidityVerified),
       onchain_tvl_usd: liq.onchainTvlUsd?.toFixed(2) ?? '',

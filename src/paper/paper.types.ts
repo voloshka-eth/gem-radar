@@ -13,6 +13,16 @@ export interface CandidateResult {
   poolId: string;
   runId: string;
   buyTax: number | null | undefined; // from the entry-time risk check (fraction or percent)
+  // Default is the normal CONTRACT_SAFE cohort. The Robinhood value is temporary,
+  // paper-only, and must never be mixed into the primary edge calculation.
+  riskCohort?: 'CONTRACT_SAFE' | 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER';
+  experimentalSafety?: {
+    passed: boolean;
+    reasons: string[];
+    ownerAddress: string | null;
+    proxyDetected: boolean;
+    dangerousSelectors: string[];
+  };
 }
 
 /** One row for the intuitive eval view (facts only — never a recommendation). */

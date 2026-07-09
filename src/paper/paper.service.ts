@@ -6,6 +6,7 @@ import { FileLoggerService } from '../file-logger/file-logger.service';
 import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
 import type { CandidateResult, ResearchCandidatePaperResult } from './paper.types';
 import { modelEntry, slipForSize, EntryParams } from './fills';
+import { GemScreenService } from '../gem/gem-screen.service';
 
 /** A tax value may arrive as a fraction (0.05) or a percent (5). Normalize to a fraction. */
 export function taxFraction(t: number | null | undefined): number {
@@ -31,10 +32,12 @@ export class PaperService {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly fileLogger: FileLoggerService,
+    private readonly gemScreen: GemScreenService,
   ) {}
 
   async recordEntry(c: CandidateResult): Promise<void> {
     const { pool, token, liq, score, ageDays, tokenId, poolId, runId, buyTax } = c;
+    const riskCohort = c.riskCohort ?? 'CONTRACT_SAFE';
 
     // One paper position per token: re-discovery of the same token must not create a
     // duplicate (it would skew the aggregate edge/post-mortem stats).
@@ -84,6 +87,8 @@ export class PaperService {
       deployerRugLikeCount: token.deployerRugLikeCount ?? null,
       deployerRiskScore: token.deployerRiskScore ?? null,
       deployerBlocklisted: token.deployerBlocklisted ?? null,
+      riskCohort,
+      experimentalSafety: c.experimentalSafety ?? null,
     };
 
     const status = fill.entered ? 'OPEN' : 'NOT_ENTERED';
@@ -136,6 +141,24 @@ export class PaperService {
             note: 'paper entry (pessimistic fill)',
           },
         });
+        if (this.config.get<boolean>('gem.autoScreenEnabled') ?? true) {
+          await this.gemScreen.screenPosition({
+            chain: pool.chain,
+            tokenAddress: token.tokenAddress,
+            poolAddress: pool.poolAddress,
+            symbol: token.symbol ?? null,
+            liquidityModel: liq.liquidityModel,
+            deployerAddress: token.deployerAddress ?? null,
+            firstSeenAt,
+            entryFdvUsd: pool.fdvUsd ?? null,
+            entryPriceUsd: fill.effectivePriceUsd ?? null,
+            entryLiquidityUsd: liq.onchainTvlUsd ?? null,
+          }).catch((err) => {
+            this.logger.warn(
+              `Gem screen failed for ${pool.chain}:${token.tokenAddress}: ${(err as Error).message}`,
+            );
+          });
+        }
       } else {
         await this.prisma.paperEvent.create({
           data: {
@@ -187,7 +210,7 @@ export class PaperService {
     });
 
     this.logger.log(
-      `Paper entry: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
+      `Paper entry [${riskCohort}]: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
       `${fill.entered ? `OPEN size=$${sizeUsd} effPx=${fill.effectivePriceUsd?.toExponential(4)} slip=${((fill.slipPct ?? 0) * 100).toFixed(2)}%` : `NOT_ENTERED (${fill.reason})`}`,
     );
   }

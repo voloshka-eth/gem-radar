@@ -59,7 +59,8 @@ describe('HoneypotService', () => {
   });
 
   it('unsupported chain → returns null without HTTP call', async () => {
-    const result = await service.checkToken('solana' as any, TOKEN_ADDR);
+    expect(service.supportsChain('robinhood')).toBe(false);
+    const result = await service.checkToken('robinhood', TOKEN_ADDR);
     expect(result).toBeNull();
     expect(mockGet).not.toHaveBeenCalled();
   });

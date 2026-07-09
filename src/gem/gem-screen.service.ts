@@ -4,6 +4,23 @@ import { PrismaService } from '../database/prisma.service';
 import { LpLockService } from './lp-lock.service';
 import type { SupportedChain } from '../collector/collector.types';
 
+export interface ScreenablePaperPosition {
+  chain: SupportedChain;
+  tokenAddress: string;
+  poolAddress: string;
+  symbol: string | null;
+  liquidityModel: string;
+  deployerAddress: string | null;
+  firstSeenAt: Date;
+  entryFdvUsd: number | null;
+  entryPriceUsd: number | null;
+  entryLiquidityUsd: number | null;
+}
+
+export type ScreenPositionResult =
+  | { passed: true; candidate: { symbol: string; chain: string; tokenAddress: string; entryFdvUsd: number | null; lpSource: string } }
+  | { passed: false; reason: string };
+
 export interface ScreenResult {
   screened: number;
   passed: number;
@@ -79,5 +96,62 @@ export class GemScreenService {
     }
 
     return { screened: survivors.length, passed, rejections, passedCandidates };
+  }
+
+  /** Screen a newly opened paper position immediately so T+15m is observable. */
+  async screenPosition(position: ScreenablePaperPosition): Promise<ScreenPositionResult> {
+    const minFdv = this.config.get<number>('gem.minEntryFdvUsd') ?? 1000;
+    const maxFdv = this.config.get<number>('gem.maxEntryFdvUsd') ?? 50000;
+    const entryFdv = position.entryFdvUsd;
+
+    if (entryFdv == null) return { passed: false, reason: 'fdv_unknown' };
+    if (entryFdv < minFdv) return { passed: false, reason: 'fdv_too_low_dust' };
+    if (entryFdv > maxFdv) return { passed: false, reason: 'fdv_too_high_no_headroom' };
+
+    const lp = await this.lpLock.detect(position.chain, position.poolAddress, position.liquidityModel);
+    if (!lp.lockedOrBurned) return { passed: false, reason: `lp_not_locked:${lp.source}` };
+
+    await this.prisma.gemCandidate.upsert({
+      where: {
+        chain_tokenAddress_poolAddress: {
+          chain: position.chain,
+          tokenAddress: position.tokenAddress,
+          poolAddress: position.poolAddress,
+        },
+      },
+      update: {
+        lpLockedOrBurned: lp.lockedOrBurned,
+        lpLockedFraction: lp.fraction,
+        lpLockSource: lp.source,
+      },
+      create: {
+        chain: position.chain,
+        tokenAddress: position.tokenAddress,
+        poolAddress: position.poolAddress,
+        symbol: position.symbol,
+        liquidityModel: position.liquidityModel,
+        deployerAddress: position.deployerAddress,
+        t0Ts: position.firstSeenAt,
+        entryFdvUsd: entryFdv,
+        entryPriceUsd: position.entryPriceUsd,
+        entryLiquidityUsd: position.entryLiquidityUsd,
+        lpLockedOrBurned: lp.lockedOrBurned,
+        lpLockedFraction: lp.fraction,
+        lpLockSource: lp.source,
+      },
+    });
+
+    const candidate = {
+      symbol: position.symbol ?? '?',
+      chain: position.chain,
+      tokenAddress: position.tokenAddress,
+      entryFdvUsd: entryFdv,
+      lpSource: lp.source,
+    };
+    this.logger.log(
+      `gem_candidate: ${position.chain}:${position.tokenAddress} (${candidate.symbol}) ` +
+      `FDV=$${entryFdv.toFixed(0)} lp=${lp.source} frac=${lp.fraction?.toFixed(3) ?? '?'}`,
+    );
+    return { passed: true, candidate };
   }
 }

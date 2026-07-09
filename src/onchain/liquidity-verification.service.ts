@@ -4,6 +4,7 @@ import type { LiquidityCheckResult } from './onchain.types';
 import { DexResolverService } from './dex-resolver.service';
 import { V2LiquidityService } from './v2-liquidity.service';
 import { V3LiquidityService } from './v3-liquidity.service';
+import { V4LiquidityService } from './v4-liquidity.service';
 
 const UNSUPPORTED_RESULT = (model: string, error: string): LiquidityCheckResult => ({
   liquidityModel:       model as LiquidityCheckResult['liquidityModel'],
@@ -49,6 +50,7 @@ export class LiquidityVerificationService {
     private readonly resolver: DexResolverService,
     private readonly v2:       V2LiquidityService,
     private readonly v3:       V3LiquidityService,
+    private readonly v4:       V4LiquidityService,
   ) {}
 
   async verify(pool: CandidatePool, gemDecimalsHint?: number): Promise<LiquidityCheckResult> {
@@ -56,7 +58,7 @@ export class LiquidityVerificationService {
       pool.chain, pool.poolAddress, pool.dex,
     );
 
-    if (model !== 'V2' && model !== 'V3') {
+    if (model !== 'V2' && model !== 'V3' && model !== 'V4') {
       this.logger.debug(`${pool.chain}:${pool.poolAddress} → ${model}`);
       return UNSUPPORTED_RESULT(model, probeError ?? `DEX model not supported in M3A: ${model}`);
     }
@@ -69,7 +71,9 @@ export class LiquidityVerificationService {
         : pool.token0Address;
       gemDecimals = model === 'V2'
         ? await this.v2.readDecimals(pool.chain, gemAddr)
-        : await this.v3.readDecimals(pool.chain, gemAddr);
+        : model === 'V3'
+          ? await this.v3.readDecimals(pool.chain, gemAddr)
+          : await this.v4.readDecimals(pool.chain, gemAddr);
     }
 
     // V2/V3 services throw with descriptive messages on any failure.
@@ -78,9 +82,12 @@ export class LiquidityVerificationService {
       if (model === 'V2') {
         const r = await this.v2.readLiquidity(pool, gemDecimals, feeBps ?? 30);
         return this.buildResult('V2', r.onchainTvlUsd, pool.liquidityUsd, r);
-      } else {
+      } else if (model === 'V3') {
         const r = await this.v3.readLiquidity(pool, gemDecimals, feeBps ?? 3000);
         return this.buildResult('V3', r.onchainTvlUsd, pool.liquidityUsd, r);
+      } else {
+        const r = await this.v4.readLiquidity(pool, gemDecimals);
+        return this.buildV4Result(r);
       }
     } catch (err) {
       const errMsg = (err as Error).message;
@@ -155,6 +162,38 @@ export class LiquidityVerificationService {
     };
   }
 
+  private buildV4Result(r: {
+    spotPriceUsd: number;
+    slip50: number | null; slip100: number | null;
+    slip500: number | null; slip1000: number | null;
+    executableDepthUsd: number;
+  }): LiquidityCheckResult {
+    const physFail = this.assessPhysicality('V4', null, undefined, [
+      { size: 50, slip: r.slip50 },
+      { size: 100, slip: r.slip100 },
+      { size: 500, slip: r.slip500 },
+      { size: 1000, slip: r.slip1000 },
+    ]);
+    if (physFail !== null) {
+      return {
+        liquidityModel: 'V4', liquidityVerified: false,
+        onchainTvlUsd: null, reportedVsOnchainPct: null,
+        executableDepthUsd: r.executableDepthUsd,
+        slip50: r.slip50, slip100: r.slip100, slip500: r.slip500, slip1000: r.slip1000,
+        spotPriceUsd: null,
+        error: `implausible_read: ${physFail}`,
+      };
+    }
+    return {
+      liquidityModel: 'V4', liquidityVerified: true,
+      // PoolManager is a singleton; there is no per-pool token balance to price as TVL.
+      onchainTvlUsd: null, reportedVsOnchainPct: null,
+      executableDepthUsd: r.executableDepthUsd,
+      slip50: r.slip50, slip100: r.slip100, slip500: r.slip500, slip1000: r.slip1000,
+      spotPriceUsd: r.spotPriceUsd,
+    };
+  }
+
   /**
    * Physicality assessment — shared by V2 and V3.
    * Returns a human-readable failure reason, or null if the read is sane.
@@ -171,19 +210,19 @@ export class LiquidityVerificationService {
    * Quoter/slippage rules carry the physicality check.
    */
   private assessPhysicality(
-    model: 'V2' | 'V3',
-    onchainTvlUsd: number,
+    model: 'V2' | 'V3' | 'V4',
+    onchainTvlUsd: number | null,
     reportedUsd: number | undefined,
     slips: ReadonlyArray<{ size: number; slip: number | null }>,
   ): string | null {
     const reported = reportedUsd ?? null;
 
     // Rule 1 — onchain absurdly small vs a meaningful reported figure.
-    if (model === 'V2' && reported != null && reported > 1000 && onchainTvlUsd < reported * 0.01) {
+    if (model === 'V2' && onchainTvlUsd != null && reported != null && reported > 1000 && onchainTvlUsd < reported * 0.01) {
       return `onchain_tvl $${onchainTvlUsd.toFixed(4)} is <1% of reported $${reported.toFixed(0)}`;
     }
     // Rule 2 — onchain below $1 while reported claims real money.
-    if (model === 'V2' && reported != null && reported > 1000 && onchainTvlUsd < 1) {
+    if (model === 'V2' && onchainTvlUsd != null && reported != null && reported > 1000 && onchainTvlUsd < 1) {
       return `onchain_tvl $${onchainTvlUsd.toFixed(4)} < $1 while reported $${reported.toFixed(0)}`;
     }
     // Rule 3 — any probe shows >50% slippage → no real depth.

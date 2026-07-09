@@ -71,7 +71,7 @@ const REFERENCE: Target[] = [
   { chain: 'base',     address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', label: 'USDC (Base)' },
 ];
 
-const GOPLUS_CHAIN_ID: Record<SupportedChain, string> = { ethereum: '1', base: '8453' };
+const GOPLUS_CHAIN_ID: Partial<Record<SupportedChain, string>> = { ethereum: '1', base: '8453' };
 
 // ─── CLI args parsing (pairs: chain address chain address …) ─────────────────
 
@@ -165,6 +165,7 @@ function printResult(t: Target, r: ContractRiskResult): void {
 
 async function tryDumpLpHolders(t: Target): Promise<boolean> {
   const chainId = GOPLUS_CHAIN_ID[t.chain];
+  if (!chainId) return false;
   try {
     const { data } = await axios.get(
       `https://api.gopluslabs.io/api/v1/token_security/${chainId}`,

@@ -644,10 +644,11 @@ export const QUARANTINE_TOKEN_HEADERS: CsvHeader[] = [
 ];
 
 // ─── decisions/research_candidates.csv ───────────────────────────────────────
-// CONTRACT_UNKNOWN tokens with clean trade-side signals. Observation only:
+// CONTRACT_UNKNOWN tokens with clean trade-side signals or an explicitly unsupported
+// risk-provider chain. Observation only:
 // these are not SAFE, not scored, not paper-traded, and not buy signals.
 export const RESEARCH_CANDIDATE_CAVEAT =
-  '# Research candidates = CONTRACT_UNKNOWN with no observed hard risk. ' +
+  '# Research candidates = CONTRACT_UNKNOWN with no observed hard risk or no provider support. ' +
   'NOT CONTRACT_SAFE, NOT scored, NOT paper-traded, NOT a buy signal.';
 
 export interface ResearchCandidateRow {

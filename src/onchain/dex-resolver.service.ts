@@ -91,8 +91,8 @@ export class DexResolverService {
     // V4 pool IDs are 32-byte hashes (66 chars with 0x prefix) — not EVM addresses.
     // Skip all probes immediately: viem would throw "Address invalid" on every call.
     if (poolAddress.length > 42) {
-      this.logger.debug(`${chain}:${poolAddress.slice(0, 14)}… → UNSUPPORTED_V4 (32-byte pool ID)`);
-      return { model: 'UNSUPPORTED_V4', probeError: 'V4 pool ID (32-byte hash, not an EVM address)' };
+      this.logger.debug(`${chain}:${poolAddress.slice(0, 14)}… → V4 (32-byte pool ID)`);
+      return { model: 'V4' };
     }
 
     const addr = poolAddress as `0x${string}`;

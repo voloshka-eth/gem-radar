@@ -53,6 +53,16 @@ export class TokenAgeService {
     chain: SupportedChain,
     tokenAddress: string,
   ): Promise<number | null> {
+    if (
+      chain === 'robinhood' &&
+      !(this.config.get<boolean>('chain.robinhoodHistoricalCodeEnabled') ?? false)
+    ) {
+      this.logger.debug(
+        `TokenAgeService: historical eth_getCode disabled for Robinhood; age unknown for ${tokenAddress}`,
+      );
+      return null;
+    }
+
     const client = this.viemClients.get(chain);
     if (!client) {
       this.logger.warn(

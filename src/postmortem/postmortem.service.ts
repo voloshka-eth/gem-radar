@@ -28,7 +28,11 @@ export class PostmortemService {
       },
     });
 
-    const rows: ClosedFeatureRow[] = closed.map((c) => {
+    const primaryClosed = closed.filter((c) => {
+      const f = (c.entryFeatures ?? {}) as { riskCohort?: string };
+      return f.riskCohort !== 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER';
+    });
+    const rows: ClosedFeatureRow[] = primaryClosed.map((c) => {
       const f = (c.entryFeatures ?? {}) as Record<string, number | null>;
       const features: Record<string, number | null> = {};
       for (const key of POSTMORTEM_T0_FEATURES) features[key] = f[key] ?? null;
@@ -41,7 +45,9 @@ export class PostmortemService {
 
     const result = computePostmortem(rows, minPerGroup);
     const dateLabel = new Date().toISOString().slice(0, 10);
-    const report = renderPostmortem(result, dateLabel);
+    const experimentalCount = closed.length - primaryClosed.length;
+    const report = renderPostmortem(result, dateLabel) +
+      `\n\nEXPERIMENTAL COHORT EXCLUDED FROM PRIMARY POST-MORTEM: ${experimentalCount} Robinhood position(s) without a supported risk provider.`;
     this.fileLogger.writeReport(`postmortem_${dateLabel}.txt`, report);
     this.logger.log(
       `Post-mortem written → reports/postmortem_${dateLabel}.txt  ` +

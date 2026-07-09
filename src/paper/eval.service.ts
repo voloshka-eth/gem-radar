@@ -236,6 +236,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
             tokensToSell, fill.netUsd, exitSlip, realizedValueUsd / sizeUsd, `ladder ${rung.multiple}x`);
         }
       }
+      const ladderComplete = remainingFraction <= 1e-6;
 
       // Last-tick rug signals — persisted on the position (COLLECTION ONLY; the LAST
       // value before close feeds the post-mortem). NOT used in any exit decision.
@@ -246,9 +247,27 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       };
 
       // ── Invalidation exit ─────────────────────────────────────────────────────
-      const invalidate = isInvalidating(status) || drawdown > maxDrawdownInvalidate;
+      const invalidate = !ladderComplete && (isInvalidating(status) || drawdown > maxDrawdownInvalidate);
       let finalStatus: string = tickStatus;
-      if (invalidate) {
+      if (ladderComplete) {
+        const realizedMultiple = realizedValueUsd / sizeUsd;
+        const closeOutcomeClass = outcomeClass('ladder_complete', realizedMultiple);
+        await this.prisma.paperPosition.update({
+          where: { id: pos.id },
+          data: {
+            status: 'CLOSED', closedAt: new Date(),
+            realizedMultiple, realizedValueUsd, remainingFraction: 0,
+            outcomeClass: closeOutcomeClass,
+            executedRungs: executed.join(','), lastEvalAt: new Date(),
+            priceNowUsd: priceNow, onchainLiqNowUsd: liqNow, currentMultiple,
+            maxMultipleObserved: maxMult, maxDrawdownObserved: drawdown,
+            entryFeatures: nextEntryFeatures,
+            ...lastTickData,
+          },
+        });
+        finalStatus = `closed:${closeOutcomeClass}`;
+        closed++;
+      } else if (invalidate) {
         const tokensToSell = tokensBought * remainingFraction;
         // On a rug, priceNow≈0 and depth is gone → modeled proceeds ≈ 0 (pessimistic).
         const usdValue = tokensToSell * (priceNow ?? 0);

@@ -12,6 +12,7 @@ describe('MoralisService', () => {
           'api.moralisBaseUrl': 'https://deep-index.moralis.io/api/v2.2',
           'api.moralisApiKey': 'test-key',
           'api.moralisTrendingLimit': 10,
+          'api.moralisAuthBackoffMs': 60_000,
         };
         return cfg[k];
       },
@@ -54,6 +55,69 @@ describe('MoralisService', () => {
     await expect(service.getTrendingTokenAddresses(['base'])).resolves.toEqual([
       { chain: 'base', tokenAddress: '0xbbb0000000000000000000000000000000000002' },
     ]);
+  });
+
+  it('accepts nested token response shapes and dedupes addresses', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: {
+        data: {
+          tokens: [
+            {
+              token: {
+                chain_id: '0x2105',
+                token_address: '0xBBB0000000000000000000000000000000000002',
+              },
+            },
+            {
+              token: {
+                chain_id: 'base',
+                address: '0xbbb0000000000000000000000000000000000002',
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    await expect(service.getTrendingTokenAddresses(['base'])).resolves.toEqual([
+      { chain: 'base', tokenAddress: '0xbbb0000000000000000000000000000000000002' },
+    ]);
+  });
+
+  it('stores HTTP status and message when Moralis fails', async () => {
+    mockGet.mockRejectedValueOnce({
+      isAxiosError: true,
+      message: 'Request failed with status code 401',
+      response: { status: 401 },
+    });
+
+    await expect(service.getTrendingTokenAddresses(['ethereum'])).resolves.toEqual([]);
+    expect(service.getLastFetchSummary()).toMatchObject({
+      enabled: true,
+      requestedChains: 1,
+      returned: 0,
+      errors: 1,
+      lastStatus: '401',
+      lastError: 'Request failed with status code 401',
+    });
+  });
+
+  it('opens an auth backoff after 401 and skips later HTTP requests', async () => {
+    mockGet.mockRejectedValueOnce({
+      isAxiosError: true,
+      message: 'Request failed with status code 401',
+      response: { status: 401 },
+    });
+
+    await expect(service.getTrendingTokenAddresses(['ethereum', 'base'])).resolves.toEqual([]);
+    await expect(service.getTrendingTokenAddresses(['ethereum', 'base'])).resolves.toEqual([]);
+
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(service.getLastFetchSummary()).toMatchObject({
+      lastStatus: 'AUTH_BACKOFF',
+      requestedChains: 0,
+      authBackoffRemainingMs: expect.any(Number),
+    });
   });
 
   it('is disabled when no API key is configured', async () => {

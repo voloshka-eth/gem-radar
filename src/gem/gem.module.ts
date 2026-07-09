@@ -6,13 +6,14 @@ import { LpLockService } from './lp-lock.service';
 import { GemScreenService } from './gem-screen.service';
 import { ShadowTrackerService } from './shadow-tracker.service';
 import { GemReportService } from './gem-report.service';
+import { GemAutomationService } from './gem-automation.service';
 
 // Shadow gem-tracker (OBSERVATION ONLY). OnchainModule provides LiquidityVerificationService
 // + VIEM_CLIENTS (for LP-lock reads); RiskEngineModule provides the sell-sim re-check.
 // GeckoTerminalService is stateless (ConfigService only) → provided directly.
 @Module({
   imports: [OnchainModule, RiskEngineModule],
-  providers: [LpLockService, GemScreenService, ShadowTrackerService, GemReportService, GeckoTerminalService],
+  providers: [LpLockService, GemScreenService, ShadowTrackerService, GemReportService, GemAutomationService, GeckoTerminalService],
   exports: [GemScreenService, ShadowTrackerService, GemReportService],
 })
 export class GemModule {}

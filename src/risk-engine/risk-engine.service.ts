@@ -55,9 +55,11 @@ export class RiskEngineService {
     }
 
     // ── Parallel provider calls ───────────────────────────────────────────────
+    const goplusSupported = this.goplus.supportsChain(chain);
+    const honeypotSupported = this.honeypot.supportsChain(chain);
     const [goplusSettled, honeypotSettled] = await Promise.allSettled([
-      this.goplus.checkToken(chain, tokenAddress),
-      this.honeypot.checkToken(chain, tokenAddress),
+      goplusSupported ? this.goplus.checkToken(chain, tokenAddress) : Promise.resolve(null),
+      honeypotSupported ? this.honeypot.checkToken(chain, tokenAddress) : Promise.resolve(null),
     ]);
 
     const goplusData: NormalizedRiskData | null =
@@ -71,8 +73,11 @@ export class RiskEngineService {
     // ── UNKNOWN: both providers unavailable ───────────────────────────────────
     // Do NOT cache — a transient 5-second outage must not block re-checking for 45 min.
     if (!goplusQueried && !honeypotQueried) {
+      const providerStatus: RiskDataStatus = !goplusSupported && !honeypotSupported
+        ? 'NO_RISK_PROVIDER_SUPPORT'
+        : 'ALL_PROVIDERS_UNAVAILABLE';
       this.logger.warn(
-        `Risk engine: both providers unavailable for ${chain}:${tokenAddress} — CONTRACT_UNKNOWN`,
+        `Risk engine: ${providerStatus} for ${chain}:${tokenAddress} - CONTRACT_UNKNOWN`,
       );
       const result: ContractRiskResult = {
         decision: 'CONTRACT_UNKNOWN',
@@ -80,7 +85,7 @@ export class RiskEngineService {
         goplusQueried: false,
         honeypotQueried: false,
         merged: {},
-        providerStatus: 'ALL_PROVIDERS_UNAVAILABLE',
+        providerStatus,
         cacheHit: false,
       };
       this.logRiskCheck(chain, tokenAddress, tokenSymbol, tokenName, runId, result);

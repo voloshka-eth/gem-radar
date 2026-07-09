@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
-import { createPublicClient, fallback, http, type PublicClient } from 'viem';
+import { createPublicClient, defineChain, fallback, http, type PublicClient } from 'viem';
 import { mainnet, base } from 'viem/chains';
 import type { SupportedChain } from '../collector/collector.types';
 import { ONCHAIN_REDIS_CLIENT, VIEM_CLIENTS } from './onchain.constants';
@@ -10,7 +10,21 @@ import { PriceService } from './price.service';
 import { DexResolverService } from './dex-resolver.service';
 import { V2LiquidityService } from './v2-liquidity.service';
 import { V3LiquidityService } from './v3-liquidity.service';
+import { V4LiquidityService } from './v4-liquidity.service';
 import { LiquidityVerificationService } from './liquidity-verification.service';
+import { RobinhoodExperimentalSafetyService } from './robinhood-experimental-safety.service';
+
+const robinhood = defineChain({
+  id: 4663,
+  name: 'Robinhood Chain',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://rpc.mainnet.chain.robinhood.com'] },
+  },
+  blockExplorers: {
+    default: { name: 'Robinhood Chain Explorer', url: 'https://robinhoodchain.blockscout.com' },
+  },
+});
 
 @Module({
   providers: [
@@ -39,6 +53,8 @@ import { LiquidityVerificationService } from './liquidity-verification.service';
         const ethFallback  = config.get<string>('chain.ethereumRpcUrlFallback');
         const basePrimary  = config.get<string>('chain.baseRpcUrl')!;
         const baseFallback = config.get<string>('chain.baseRpcUrlFallback');
+        const robinhoodPrimary = config.get<string>('chain.robinhoodRpcUrl')!;
+        const robinhoodFallback = config.get<string>('chain.robinhoodRpcUrlFallback');
 
         const makeTransport = (primary: string, fb?: string) =>
           fb
@@ -51,6 +67,7 @@ import { LiquidityVerificationService } from './liquidity-verification.service';
         const clients = new Map<SupportedChain, PublicClient>();
         clients.set('ethereum', createPublicClient({ chain: mainnet, transport: makeTransport(ethPrimary, ethFallback) }) as unknown as PublicClient);
         clients.set('base',     createPublicClient({ chain: base,    transport: makeTransport(basePrimary, baseFallback) }) as unknown as PublicClient);
+        clients.set('robinhood', createPublicClient({ chain: robinhood, transport: makeTransport(robinhoodPrimary, robinhoodFallback) }) as unknown as PublicClient);
         return clients;
       },
       inject: [ConfigService],
@@ -61,11 +78,14 @@ import { LiquidityVerificationService } from './liquidity-verification.service';
     DexResolverService,
     V2LiquidityService,
     V3LiquidityService,
+    V4LiquidityService,
+    RobinhoodExperimentalSafetyService,
     LiquidityVerificationService,
   ],
   exports: [
     TokenAgeService,
     LiquidityVerificationService,
+    RobinhoodExperimentalSafetyService,
     VIEM_CLIENTS,
   ],
 })

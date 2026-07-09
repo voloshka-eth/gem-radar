@@ -4,7 +4,7 @@ describe('LiquidityVerificationService physicality guard', () => {
   let service: LiquidityVerificationService;
 
   beforeEach(() => {
-    service = new LiquidityVerificationService({} as any, {} as any, {} as any);
+    service = new LiquidityVerificationService({} as any, {} as any, {} as any, {} as any);
   });
 
   const quoterBackedRead = {
@@ -42,5 +42,17 @@ describe('LiquidityVerificationService physicality guard', () => {
     expect(result.executableDepthUsd).toBe(1000);
     expect(result.spotPriceUsd).toBe(quoterBackedRead.spotPriceUsd);
     expect(result.error).toBeUndefined();
+  });
+
+  it('accepts V4 only when its Quoter proves executable depth', () => {
+    const result = (service as any).buildV4Result(quoterBackedRead);
+
+    expect(result).toMatchObject({
+      liquidityModel: 'V4',
+      liquidityVerified: true,
+      onchainTvlUsd: null,
+      spotPriceUsd: quoterBackedRead.spotPriceUsd,
+      executableDepthUsd: 1000,
+    });
   });
 });

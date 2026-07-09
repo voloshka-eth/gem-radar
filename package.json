@@ -1,7 +1,7 @@
 {
   "name": "gem-radar",
   "version": "0.1.0",
-  "description": "Ethereum/Base Gem Radar — Research & Paper Trading System",
+  "description": "Ethereum/Base/Robinhood Gem Radar - Research & Paper Trading System",
   "private": true,
   "scripts": {
     "build": "nest build",
@@ -32,6 +32,7 @@
     "gem:report": "ts-node scripts/gem-report.ts",
     "probe:onchain": "ts-node scripts/probe-onchain.ts",
     "probe:v3": "ts-node scripts/probe-v3.ts",
+    "probe:v4": "ts-node scripts/probe-v4.ts",
     "verify:pools": "ts-node scripts/verify-pools.ts",
     "probe:age": "ts-node scripts/probe-age.ts",
     "reset": "ts-node scripts/reset.ts",

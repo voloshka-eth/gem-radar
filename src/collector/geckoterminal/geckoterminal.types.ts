@@ -74,4 +74,5 @@ export interface GtNewPoolsResponse {
 export const GT_NETWORK: Record<string, string> = {
   ethereum: 'eth',
   base: 'base',
+  robinhood: 'robinhood',
 };

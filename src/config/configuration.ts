@@ -24,7 +24,15 @@ export const chainConfig = registerAs('chain', () => ({
   ethereumRpcUrlFallback: process.env.ETHEREUM_RPC_URL_FALLBACK ?? 'https://ethereum.publicnode.com',
   baseRpcUrl:             process.env.BASE_RPC_URL              ?? 'https://base.drpc.org',
   baseRpcUrlFallback:     process.env.BASE_RPC_URL_FALLBACK     ?? 'https://base.publicnode.com',
-  enabledChains: (process.env.COLLECTOR_CHAINS ?? 'ethereum,base').split(','),
+  robinhoodRpcUrl:        process.env.ROBINHOOD_RPC_URL         ?? 'https://rpc.mainnet.chain.robinhood.com',
+  robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK || undefined,
+  // Robinhood's public RPC currently rejects historical eth_getCode. Keep token
+  // age unknown rather than issuing one failing archive call per fresh token.
+  robinhoodHistoricalCodeEnabled: process.env.ROBINHOOD_HISTORICAL_CODE_ENABLED === 'true',
+  enabledChains: (process.env.COLLECTOR_CHAINS ?? 'ethereum,base,robinhood')
+    .split(',')
+    .map((chain) => chain.trim())
+    .filter(Boolean),
 }));
 
 export const apiConfig = registerAs('api', () => ({
@@ -35,6 +43,7 @@ export const apiConfig = registerAs('api', () => ({
   moralisBaseUrl: process.env.MORALIS_BASE_URL ?? 'https://deep-index.moralis.io/api/v2.2',
   moralisApiKey: process.env.MORALIS_API_KEY,
   moralisTrendingLimit: parseInt(process.env.MORALIS_TRENDING_LIMIT ?? '50', 10),
+  moralisAuthBackoffMs: parseInt(process.env.MORALIS_AUTH_BACKOFF_MS ?? '3600000', 10),
   birdeyeBaseUrl: process.env.BIRDEYE_BASE_URL ?? 'https://public-api.birdeye.so',
   birdeyeApiKey: process.env.BIRDEYE_API_KEY,
   birdeyeTokenListLimit: parseInt(process.env.BIRDEYE_TOKENLIST_LIMIT ?? '50', 10),
@@ -54,7 +63,7 @@ export const collectorConfig = registerAs('collector', () => ({
   pollIntervalMs: parseInt(process.env.COLLECTOR_POLL_INTERVAL_MS ?? '120000', 10),
   newPoolMaxAgeHours: parseInt(process.env.NEW_POOL_MAX_AGE_HOURS ?? '24', 10),
   geckoTerminalPages: parseInt(process.env.GECKOTERMINAL_PAGES ?? '1', 10),
-  geckoTerminalRequestDelayMs: parseInt(process.env.GECKOTERMINAL_REQUEST_DELAY_MS ?? '5000', 10),
+  geckoTerminalRequestDelayMs: parseInt(process.env.GECKOTERMINAL_REQUEST_DELAY_MS ?? '7000', 10),
   geckoTerminalRateLimitBackoffMs: parseInt(process.env.GECKOTERMINAL_RATE_LIMIT_BACKOFF_MS ?? '300000', 10),
   geckoTerminalStatsCacheTtlMs: parseInt(process.env.GECKOTERMINAL_STATS_CACHE_TTL_MS ?? '600000', 10),
   tokenMaxAgeDays: parseFloat(process.env.TOKEN_MAX_AGE_DAYS ?? '7'),
@@ -66,6 +75,11 @@ export const collectorConfig = registerAs('collector', () => ({
   moonshotMinTx1h: parseInt(process.env.MOONSHOT_MIN_TX_1H ?? '30', 10),
   moonshotMinBuys1h: parseInt(process.env.MOONSHOT_MIN_BUYS_1H ?? '15', 10),
   promoteCleanUnknownEnabled: process.env.PROMOTE_CLEAN_UNKNOWN_ENABLED === 'true',
+  // Temporary paper-only lane for Robinhood until a supported contract-risk provider exists.
+  // It is intentionally separate from normal candidates and primary edge statistics.
+  robinhoodExperimentalPaperEnabled: process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
+  robinhoodExperimentalMinDepthUsd: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
+  robinhoodExperimentalMinScore: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),
   deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
   deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
   deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '1', 10),
@@ -110,6 +124,16 @@ export const onchainConfig = registerAs('onchain', () => ({
   // Uniswap V3 QuoterV2 — verified 2025-06 against official Uniswap deployment docs
   quoterV2Ethereum: process.env.QUOTER_V2_ETHEREUM ?? '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
   quoterV2Base:     process.env.QUOTER_V2_BASE     ?? '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
+  quoterV2Robinhood: process.env.QUOTER_V2_ROBINHOOD ?? '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7',
+  v4PoolManagerEthereum: process.env.V4_POOL_MANAGER_ETHEREUM ?? '0x000000000004444c5dc75cB358380D2e3dE08A90',
+  v4PoolManagerBase:     process.env.V4_POOL_MANAGER_BASE     ?? '0x498581ff718922c3f8e6a244956af099b2652b2b',
+  v4PoolManagerRobinhood: process.env.V4_POOL_MANAGER_ROBINHOOD ?? '0x8366a39cc670b4001a1121b8f6a443a643e40951',
+  v4QuoterEthereum:      process.env.V4_QUOTER_ETHEREUM      ?? '0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203',
+  v4QuoterBase:          process.env.V4_QUOTER_BASE          ?? '0x0d5e0f971ed27fbff6c2837bf31316121532048d',
+  v4QuoterRobinhood:     process.env.V4_QUOTER_ROBINHOOD     ?? '0x8dc178efb8111bb0973dd9d722ebeff267c98f94',
+  v4StateViewEthereum:   process.env.V4_STATE_VIEW_ETHEREUM  ?? '0x7ffe42c4a5deea5b0fec41c94c136cf115597227',
+  v4StateViewBase:       process.env.V4_STATE_VIEW_BASE      ?? '0xa3c0c9b65bad0b08107aa264b0f3db444b867a71',
+  v4StateViewRobinhood:  process.env.V4_STATE_VIEW_ROBINHOOD  ?? '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b',
   // Aerodrome PoolFactory (Base only) — verified 2025-06 against official Aerodrome deployment
   aerodromeFactoryBase: process.env.AERODROME_FACTORY_BASE ?? '0x420DD381b31aEf6683db6B902084cB0FFECe40Da',
 }));
@@ -155,11 +179,12 @@ export const paperConfig = registerAs('paper', () => ({
   gasUsd:             parseFloat(process.env.PAPER_GAS_USD             ?? '1.5'),   // modeled gas per tx (each way)
   maxEntrySlipPct:    parseFloat(process.env.PAPER_MAX_ENTRY_SLIP_PCT  ?? '0.50'),  // > this at entry → not_entered
   // Exit ladder: sell fractions of the ORIGINAL position when the multiple is crossed.
-  // Remainder after the rungs (here 10%) is the moonbag, held until invalidation.
+  // Recover the stake at 2x, realize a further slice at 10x, and retain a small
+  // asymmetric tail for the rare true outlier.
   ladder: [
-    { multiple: 2,  sellFraction: 0.50 },
-    { multiple: 5,  sellFraction: 0.25 },
-    { multiple: 10, sellFraction: 0.15 },
+    { multiple: 2,    sellFraction: 0.80 },
+    { multiple: 10,   sellFraction: 0.15 },
+    { multiple: 1000, sellFraction: 0.05 },
   ],
   // Status thresholds (on-demand eval).
   liqPullDropPct:        parseFloat(process.env.PAPER_LIQ_PULL_DROP_PCT   ?? '0.60'), // liq down > 60% → liquidity_pulled
@@ -178,6 +203,12 @@ export const paperConfig = registerAs('paper', () => ({
 // Measures the forward-return distribution of the survivor cohort to learn whether
 // the funnel has an x10–x1000 tail. All thresholds are config, not hard-wired.
 export const gemConfig = registerAs('gem', () => ({
+  autoScreenEnabled: process.env.GEM_AUTOSCREEN_ENABLED !== 'false',
+  shadowAutostart: process.env.GEM_SHADOW_AUTOSTART != null
+    ? process.env.GEM_SHADOW_AUTOSTART !== 'false'
+    : process.env.COLLECTOR_AUTOSTART !== 'false',
+  shadowIntervalMs: parseInt(process.env.GEM_SHADOW_INTERVAL_MS ?? '300000', 10),
+  shadowInitialDelayMs: parseInt(process.env.GEM_SHADOW_INITIAL_DELAY_MS ?? '180000', 10),
   // FDV-headroom gate: cut dust below the floor; cap entry FDV so x1000 stays geometrically possible.
   minEntryFdvUsd: parseFloat(process.env.GEM_MIN_ENTRY_FDV_USD ?? '1000'),
   maxEntryFdvUsd: parseFloat(process.env.GEM_MAX_ENTRY_FDV_USD ?? '50000'),
@@ -210,6 +241,7 @@ export const gemConfig = registerAs('gem', () => ({
     base: {
       '0xc4e637d37113192f4f1f060daebd7758de7f4131': 'Unicrypt(UNCX) Base (UNVERIFIED)',
     } as Record<string, string>,
+    robinhood: {} as Record<string, string>,
   } as Record<string, Record<string, string>>,
 }));
 

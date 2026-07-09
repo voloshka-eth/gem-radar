@@ -1,6 +1,7 @@
 export type LiquidityModel =
   | 'V2'
   | 'V3'
+  | 'V4'
   | 'UNSUPPORTED_V4'
   | 'UNSUPPORTED_AERODROME_STABLE'
   | 'UNSUPPORTED_UNKNOWN';

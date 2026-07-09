@@ -82,6 +82,11 @@ export interface V3LiquidityResult {
   executableDepthUsd: number;
 }
 
+type QuoteProbe = {
+  slippage: number | null;
+  failure: string | null;
+};
+
 @Injectable()
 export class V3LiquidityService {
   private readonly logger = new Logger(V3LiquidityService.name);
@@ -202,11 +207,21 @@ export class V3LiquidityService {
       ),
     );
 
-    const [slip50, slip100, slip500, slip1000] = slippages;
+    const [slip50, slip100, slip500, slip1000] = slippages.map((probe) => probe.slippage);
+
+    const failedProbes = slippages.filter((probe) => probe.failure != null);
+    if (failedProbes.length > 0) {
+      const failedSizes = failedProbes.map((probe) => `$${probe.sizeUsd}`).join(', ');
+      const reasons = [...new Set(failedProbes.map((probe) => probe.failure))].join(', ');
+      this.logger.debug(
+        `QuoterV2 partial for ${pool.chain}:${pool.poolAddress}: ` +
+        `unexecutable probes ${failedSizes} (${reasons})`,
+      );
+    }
 
     let executableDepthUsd = 0;
     for (let i = PROBE_SIZES_USD.length - 1; i >= 0; i--) {
-      if ((slippages[i] ?? 1) < MAX_SLIPPAGE_FOR_DEPTH) {
+      if ((slippages[i]?.slippage ?? 1) < MAX_SLIPPAGE_FOR_DEPTH) {
         executableDepthUsd = PROBE_SIZES_USD[i];
         break;
       }
@@ -240,14 +255,14 @@ export class V3LiquidityService {
     gemDec: number,
     quoteDec: number,
     quotePriceUsd: number,
-  ): Promise<number | null> {
-    if (!isFinite(spotPriceUsd) || spotPriceUsd <= 0) return null;
+  ): Promise<QuoteProbe & { sizeUsd: number }> {
+    if (!isFinite(spotPriceUsd) || spotPriceUsd <= 0) return { sizeUsd, slippage: null, failure: 'invalid_spot_price' };
     try {
       // Sell sizeUsd worth of quote (e.g. USDC or WETH) to buy gem.
       const amountInHuman = sizeUsd / quotePriceUsd;
-      if (!isFinite(amountInHuman) || amountInHuman <= 0) return null;
+      if (!isFinite(amountInHuman) || amountInHuman <= 0) return { sizeUsd, slippage: null, failure: 'invalid_quote_amount' };
       const amountInRaw = decimalToRawAmount(amountInHuman, quoteDec);
-      if (amountInRaw < 1n) return null;
+      if (amountInRaw < 1n) return { sizeUsd, slippage: null, failure: 'quote_amount_too_small' };
 
       const result = await client.readContract({
         address: quoterAddr as `0x${string}`,
@@ -265,13 +280,18 @@ export class V3LiquidityService {
       // Convert received gem tokens to USD at spot price, compare to what we spent.
       const actualGemRaw = result[0];
       const actualOutUsd = rawToDecimalNumber(actualGemRaw, gemDec) * spotPriceUsd;
-      return 1 - actualOutUsd / sizeUsd;
+      return { sizeUsd, slippage: 1 - actualOutUsd / sizeUsd, failure: null };
     } catch (err) {
-      this.logger.debug(
-        `QuoterV2 quoteExactInputSingle failed ($${sizeUsd} probe): ${(err as Error).message}`,
-      );
-      return null;
+      return { sizeUsd, slippage: null, failure: this.quoteFailureReason(err) };
     }
+  }
+
+  private quoteFailureReason(err: unknown): string {
+    const message = (err as Error).message ?? '';
+    const revert =
+      message.match(/reverted with the following reason:\s*([^\r\n]+)/i)?.[1]?.trim() ??
+      message.match(/execution reverted:\s*([^\r\n]+)/i)?.[1]?.trim();
+    return revert ? `reverted:${revert}` : 'quote_reverted';
   }
 
   /** Read gem decimals on-chain as fallback. */
