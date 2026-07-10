@@ -58,6 +58,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly promoteCleanUnknownEnabled: boolean;
   private readonly robinhoodExperimentalPaperEnabled: boolean;
   private readonly robinhoodExperimentalMinDepthUsd: number;
+  private readonly robinhoodExperimentalMinOnchainTvlUsd: number;
   private readonly robinhoodExperimentalMinScore: number;
   private readonly deployerGateEnabled: boolean;
   private readonly manualProbeTokens: TokenProbe[];
@@ -115,6 +116,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       this.config.get<boolean>('collector.robinhoodExperimentalPaperEnabled') ?? false;
     this.robinhoodExperimentalMinDepthUsd =
       this.config.get<number>('collector.robinhoodExperimentalMinDepthUsd') ?? 100;
+    this.robinhoodExperimentalMinOnchainTvlUsd =
+      this.config.get<number>('collector.robinhoodExperimentalMinOnchainTvlUsd') ?? 200;
     this.robinhoodExperimentalMinScore =
       this.config.get<number>('collector.robinhoodExperimentalMinScore') ?? 50;
     this.deployerGateEnabled =
@@ -541,6 +544,14 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     if (providerStatus !== 'NO_RISK_PROVIDER_SUPPORT') return false;
     if (evaluation.liq.liquidityVerified !== true) return false;
     if ((evaluation.liq.executableDepthUsd ?? 0) < this.robinhoodExperimentalMinDepthUsd) return false;
+    if ((evaluation.liq.onchainTvlUsd ?? 0) < this.robinhoodExperimentalMinOnchainTvlUsd) {
+      this.logger.debug(
+        `Robinhood experimental paper gate rejected ${candidate.token.tokenAddress}: ` +
+        `onchain TVL $${(evaluation.liq.onchainTvlUsd ?? 0).toFixed(2)} < ` +
+        `$${this.robinhoodExperimentalMinOnchainTvlUsd.toFixed(2)}`,
+      );
+      return false;
+    }
     if (evaluation.score.finalScore < this.robinhoodExperimentalMinScore) return false;
     if (evaluation.score.band === 'reject_band') return false;
 

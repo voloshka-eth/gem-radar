@@ -284,6 +284,7 @@ describe('CollectorService', () => {
                 'scoring.maxFdvUsd': 50_000_000,
                 'collector.robinhoodExperimentalPaperEnabled': false,
                 'collector.robinhoodExperimentalMinDepthUsd': 100,
+                'collector.robinhoodExperimentalMinOnchainTvlUsd': 200,
                 'collector.robinhoodExperimentalMinScore': 50,
               };
               return cfg[key];
@@ -901,6 +902,40 @@ describe('CollectorService', () => {
     }));
     expect(paperMock.recordResearchEntry).toHaveBeenCalled();
     expect(fs.existsSync(path.join(tempDir, 'decisions', 'candidates.csv'))).toBe(false);
+  });
+
+  it('keeps a Robinhood experimental token with dust on-chain TVL out of paper entries', async () => {
+    (service as any).robinhoodExperimentalPaperEnabled = true;
+    const risk: ContractRiskResult = {
+      decision: 'CONTRACT_UNKNOWN',
+      rejectReasons: [],
+      goplusQueried: false,
+      honeypotQueried: false,
+      merged: { providerStatus: 'NO_RISK_PROVIDER_SUPPORT' },
+      providerStatus: 'NO_RISK_PROVIDER_SUPPORT',
+      cacheHit: false,
+    };
+    const evaluation = {
+      liq: {
+        liquidityModel: 'V3', liquidityVerified: true, onchainTvlUsd: 199.99,
+        reportedVsOnchainPct: 0, executableDepthUsd: 1_000,
+        slip50: 0.01, slip100: 0.02, slip500: 0.08, slip1000: 0.1,
+        spotPriceUsd: 0.001, error: null,
+      },
+      ageDays: null,
+      score: {
+        finalScore: 70, liquidityScore: 70, depthScore: 70, ageScore: null,
+        tractionScore: 70, divergenceScore: null, deployerReputationScore: null,
+        componentsPresent: [], componentsMissing: [], scoreConfidence: 0.3, band: 'candidate',
+      },
+    };
+
+    await expect((service as any).tryPromoteRobinhoodExperimentalCandidate(
+      buildResult({ chain: 'robinhood' }), risk, 'run-id', evaluation,
+    )).resolves.toBe(false);
+
+    expect(robinhoodExperimentalSafetyMock.inspect).not.toHaveBeenCalled();
+    expect(paperMock.recordEntry).not.toHaveBeenCalled();
   });
 
   it('CONTRACT_UNKNOWN without any clean trade signal is quarantined but not research-listed', async () => {

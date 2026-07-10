@@ -79,6 +79,7 @@ export const collectorConfig = registerAs('collector', () => ({
   // It is intentionally separate from normal candidates and primary edge statistics.
   robinhoodExperimentalPaperEnabled: process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
   robinhoodExperimentalMinDepthUsd: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
+  robinhoodExperimentalMinOnchainTvlUsd: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_ONCHAIN_TVL_USD ?? '200'),
   robinhoodExperimentalMinScore: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),
   deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
   deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
