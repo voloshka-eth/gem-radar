@@ -150,7 +150,7 @@ export class V3LiquidityService {
     const gemDec   = gemDecimals;
 
     // Approximate TVL: quote-token balance held by pool × price × 2
-    let onchainTvlUsd = 0;
+    let onchainTvlUsd: number | null = null;
     try {
       const quoteBal = await client.readContract({
         address: pool.quoteAssetAddress as `0x${string}`,
@@ -162,8 +162,12 @@ export class V3LiquidityService {
       onchainTvlUsd = quoteBalHuman * quotePriceUsd * 2;
     } catch (err) {
       this.logger.warn(
-        `balanceOf failed for ${pool.chain}:${pool.quoteAssetAddress} — TVL will be 0. ${(err as Error).message}`,
+        `balanceOf failed for ${pool.chain}:${pool.quoteAssetAddress}; liquidity will be treated as unknown. ${(err as Error).message}`,
       );
+    }
+
+    if (onchainTvlUsd == null) {
+      throw new Error(`V3 quote-balance read failed for ${pool.chain}:${pool.poolAddress}; liquidity is unknown`);
     }
 
     // Spot price from sqrtPriceX96:

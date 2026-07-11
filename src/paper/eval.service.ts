@@ -20,6 +20,8 @@ import { DeployerReputationService } from '../deployer/deployer-reputation.servi
 
 const num = (d: unknown): number | null => (d == null ? null : Number(d));
 const DEFAULT_PRICE_READ_FAILURE_RUG_THRESHOLD = 3;
+const DEFAULT_RUG_LIQUIDITY_CONFIRMATION_COUNT = 1;
+const DEFAULT_ROBINHOOD_RUG_LIQUIDITY_CONFIRMATION_COUNT = 2;
 
 type OnchainReadResult = {
   liq: LiquidityCheckResult | null;
@@ -146,12 +148,25 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       this.config.get<number>('paper.priceReadFailureRugThreshold') ??
         DEFAULT_PRICE_READ_FAILURE_RUG_THRESHOLD,
     );
+    const defaultRugLiquidityConfirmationCount = Math.max(
+      1,
+      this.config.get<number>('paper.rugLiquidityConfirmationCount') ??
+        DEFAULT_RUG_LIQUIDITY_CONFIRMATION_COUNT,
+    );
+    const robinhoodRugLiquidityConfirmationCount = Math.max(
+      1,
+      this.config.get<number>('paper.robinhoodRugLiquidityConfirmationCount') ??
+        DEFAULT_ROBINHOOD_RUG_LIQUIDITY_CONFIRMATION_COUNT,
+    );
 
     const rows: EvalViewRow[] = [];
     let closed = 0;
 
     for (const pos of open) {
       const chain = pos.chain as SupportedChain;
+      const rugLiquidityConfirmationCount = chain === 'robinhood'
+        ? robinhoodRugLiquidityConfirmationCount
+        : defaultRugLiquidityConfirmationCount;
       const entryEff = num(pos.entryPriceEffectiveUsd);
       const tokensBought = num(pos.tokensBought) ?? 0;
       const sizeUsd = num(pos.sizeUsd) ?? 0;
@@ -170,10 +185,21 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         : 0;
       const priceFailureReached =
         priceUnreadable && priceReadFailureCount >= priceReadFailureRugThreshold;
-      const nextEntryFeatures = this.withPriceReadFailure(
+      const lowLiquidityRead = liqNow != null && liqNow <= statusParams.rugLiqUsd;
+      const liquidityGoneReadCount = lowLiquidityRead
+        ? this.readCounter(entryFeatures.liquidityGoneReadCount) + 1
+        : 0;
+      const liquidityGoneConfirmed =
+        lowLiquidityRead && liquidityGoneReadCount >= rugLiquidityConfirmationCount;
+      let nextEntryFeatures = this.withPriceReadFailure(
         pos.entryFeatures,
         priceReadFailureCount,
         priceUnreadable ? (onchainRead.error ?? 'no_price') : null,
+      );
+      nextEntryFeatures = this.withLiquidityGoneRead(
+        nextEntryFeatures,
+        liquidityGoneReadCount,
+        lowLiquidityRead ? liqNow : null,
       );
 
       // RE-RUN sell simulation against current state (existing exit behavior unchanged).
@@ -189,25 +215,31 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       const sellSideInvalid =
         sellSimOk === false ||
         (sellTaxNow != null && sellTaxNow >= statusParams.sellTaxSpikePct);
-      const liquidityGone = liqNow != null && liqNow <= statusParams.rugLiqUsd;
       const liquidityPulled =
         liqNow != null && liqEntry > 0 && liqNow < liqEntry * (1 - statusParams.liqPullDropPct);
-      const status = priceUnreadable
-        ? liquidityGone
+      const status: PositionStatus = priceUnreadable
+        ? liquidityGoneConfirmed
           ? 'rug'
-          : liquidityPulled
+          : liquidityPulled && (!lowLiquidityRead || liquidityGoneConfirmed)
             ? 'liquidity_pulled'
             : sellSideInvalid
               ? 'unsellable'
               : priceFailureReached
                 ? 'rug'
                 : 'alive'
-        : detectStatus(
-          { liqEntryUsd: liqEntry, liqNowUsd: liqNow, priceNowUsd: priceNow, sellable, sellTaxNowPct: sellTaxNow },
-          statusParams,
-        );
+        : liqNow == null
+          ? sellSideInvalid ? 'unsellable' : 'alive'
+          : (() => {
+              const detected = detectStatus(
+                { liqEntryUsd: liqEntry, liqNowUsd: liqNow, priceNowUsd: priceNow, sellable, sellTaxNowPct: sellTaxNow },
+                statusParams,
+              );
+              return detected === 'rug' && !liquidityGoneConfirmed ? 'alive' : detected;
+            })();
       const tickStatus = priceUnreadable && status === 'alive'
         ? `price_unreadable_${priceReadFailureCount}/${priceReadFailureRugThreshold}`
+        : !priceUnreadable && liqNow == null && status === 'alive'
+          ? 'liquidity_unreadable'
         : status;
 
       // ── Multiple / drawdown ───────────────────────────────────────────────────
@@ -279,6 +311,8 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         const closeOutcomeClass = outcomeClass(reason as PositionStatus | 'drawdown', realizedMultiple);
         const invalidationReason = priceFailureReached && status === 'rug'
           ? `price_unreadable_${priceReadFailureCount}x${onchainRead.error ? `: ${onchainRead.error}` : ''}`
+          : liquidityGoneConfirmed && status === 'rug'
+            ? `liquidity_gone_${liquidityGoneReadCount}x`
           : reason;
         await this.writeExit(runId, pos, 'INVALIDATE_SELL', status, priceNow, currentMultiple, remainingFraction,
           tokensToSell, fill.netUsd, exitSlip, realizedMultiple, `invalidation: ${invalidationReason}`, closeOutcomeClass);
@@ -424,6 +458,10 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
   }
 
   private readPriceFailureCount(value: unknown): number {
+    return this.readCounter(value);
+  }
+
+  private readCounter(value: unknown): number {
     const n = Number(value);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   }
@@ -439,6 +477,21 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       next.lastPriceReadError = error.slice(0, 180);
     } else {
       delete next.lastPriceReadError;
+    }
+    return next as Prisma.InputJsonValue;
+  }
+
+  private withLiquidityGoneRead(
+    rawFeatures: unknown,
+    count: number,
+    liquidityUsd: number | null,
+  ): Prisma.InputJsonValue {
+    const next = this.entryFeaturesRecord(rawFeatures);
+    next.liquidityGoneReadCount = count;
+    if (count > 0 && liquidityUsd != null) {
+      next.lastLowLiquidityUsd = liquidityUsd;
+    } else {
+      delete next.lastLowLiquidityUsd;
     }
     return next as Prisma.InputJsonValue;
   }

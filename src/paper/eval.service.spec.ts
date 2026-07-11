@@ -16,6 +16,8 @@ function config(overrides: Record<string, unknown> = {}) {
     'paper.sellTaxSpikePct': 0.5,
     'paper.maxDrawdownInvalidate': 0.7,
     'paper.priceReadFailureRugThreshold': 3,
+    'paper.rugLiquidityConfirmationCount': 1,
+    'paper.robinhoodRugLiquidityConfirmationCount': 2,
     ...overrides,
   };
   return { get: (key: string) => values[key] } as unknown as ConfigService;
@@ -216,9 +218,30 @@ describe('EvalService price-read failures', () => {
     expect(result.rows[0].status).toBe('closed:RUG');
   });
 
-  it('closes immediately when liquidity is already gone even if price is unreadable', async () => {
+  it('keeps a position open after one low-liquidity read even if price is unreadable', async () => {
+    const position = openPosition({ priceReadFailureCount: 0 });
+    position.chain = 'robinhood';
+    position.pool.token1 = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
     const { service, prisma, fileLogger } = harness(
-      openPosition({ priceReadFailureCount: 0 }),
+      position,
+      unreadableLiquidityWithTvl(2),
+    );
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(0);
+    expect(prisma.paperPosition.update.mock.calls[0][0].data.entryFeatures).toMatchObject({
+      liquidityGoneReadCount: 1,
+    });
+    expect(fileLogger.logPaperExit).not.toHaveBeenCalled();
+  });
+
+  it('closes as RUG after the configured consecutive low-liquidity reads', async () => {
+    const position = openPosition({ priceReadFailureCount: 0, liquidityGoneReadCount: 1 });
+    position.chain = 'robinhood';
+    position.pool.token1 = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+    const { service, prisma, fileLogger } = harness(
+      position,
       unreadableLiquidityWithTvl(2),
     );
 
@@ -226,14 +249,18 @@ describe('EvalService price-read failures', () => {
 
     expect(result.closed).toBe(1);
     expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
-      status: 'CLOSED',
-      outcomeClass: 'RUG',
-      remainingFraction: 0,
+      status: 'CLOSED', outcomeClass: 'RUG', remainingFraction: 0,
     });
-    expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
-      status: 'rug',
-      outcome_class: 'RUG',
+    expect(prisma.paperPosition.update.mock.calls[0][0].data.entryFeatures).toMatchObject({
+      liquidityGoneReadCount: 2,
     });
+    expect(fileLogger.logPaperExit.mock.calls[0][0].note).toContain('liquidity_gone_2x');
+  });
+
+  it('keeps immediate low-liquidity closes on Ethereum and Base', async () => {
+    const { service } = harness(openPosition(), unreadableLiquidityWithTvl(2));
+
+    await expect(service.evaluateOpenPositions()).resolves.toMatchObject({ closed: 1 });
   });
 
   it('resets the no-price counter when price data recovers', async () => {
