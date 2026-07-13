@@ -16,6 +16,8 @@ import { ContractRiskResult, NormalizedRiskData } from '../risk-engine/risk-engi
 import { TokenAgeService } from '../onchain/token-age.service';
 import { LiquidityVerificationService } from '../onchain/liquidity-verification.service';
 import { RobinhoodExperimentalSafetyService } from '../onchain/robinhood-experimental-safety.service';
+import { FactoryPoolDiscoveryService } from '../onchain/factory-pool-discovery.service';
+import { TokenMetadataService } from '../onchain/token-metadata.service';
 import type { LiquidityCheckResult } from '../onchain/onchain.types';
 import { PoolLiquiditySnapshotRow } from '../file-logger/csv-schemas';
 import { ScoringService } from '../scoring/scoring.service';
@@ -61,6 +63,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly robinhoodExperimentalMinOnchainTvlUsd: number;
   private readonly robinhoodExperimentalMinScore: number;
   private readonly deployerGateEnabled: boolean;
+  private readonly factoryDiscoveryMinExecutableDepthUsd: number;
   private readonly manualProbeTokens: TokenProbe[];
 
   constructor(
@@ -78,6 +81,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     private readonly scoring: ScoringService,
     private readonly paper: PaperService,
     private readonly deployerReputation: DeployerReputationService,
+    private readonly factoryPoolDiscovery: FactoryPoolDiscoveryService,
+    private readonly tokenMetadata: TokenMetadataService,
   ) {
     const configuredChains = this.config.get<string[]>('chain.enabledChains') ?? [...SUPPORTED_CHAINS];
     const supported = new Set<string>(SUPPORTED_CHAINS);
@@ -96,6 +101,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     const maxAgeHours = this.config.get<number>('collector.newPoolMaxAgeHours') ?? 24;
     this.stage0Config = {
       maxPoolAgeMs: maxAgeHours * 60 * 60 * 1000,
+      matureMomentumMinVol1hUsd: this.config.get<number>('collector.matureMomentumMinVol1hUsd') ?? 1_000,
+      matureMomentumMinTx1h: this.config.get<number>('collector.matureMomentumMinTx1h') ?? 20,
+      matureMomentumMinBuys1h: this.config.get<number>('collector.matureMomentumMinBuys1h') ?? 10,
+      matureMomentumMinLiquidityUsd: this.config.get<number>('collector.matureMomentumMinLiquidityUsd') ?? 1_000,
       minLiquidityUsd: this.config.get<number>('scoring.minLiquidityUsd') ?? 5_000,
       minFdvUsd: this.config.get<number>('scoring.minFdvUsd') ?? 10_000,
       maxFdvUsd: this.config.get<number>('scoring.maxFdvUsd') ?? 50_000_000,
@@ -122,6 +131,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       this.config.get<number>('collector.robinhoodExperimentalMinScore') ?? 50;
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
+    this.factoryDiscoveryMinExecutableDepthUsd =
+      this.config.get<number>('collector.factoryDiscoveryMinExecutableDepthUsd') ?? 100;
     this.manualProbeTokens =
       (this.config.get<TokenProbe[]>('collector.manualProbeTokens') ?? [])
         .filter((probe): probe is TokenProbe =>
@@ -180,6 +191,74 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     const seenThisCycle = new Set<string>();
     const cycleRiskResults: ContractRiskResult[] = [];
+
+    // RPC factory logs arrive before third-party listings. Keep a creation event
+    // pending until on-chain liquidity is executable, then spend risk-provider quota.
+    for (const chain of this.enabledChains) {
+      const factoryCandidates = await this.factoryPoolDiscovery.getPendingPools(chain);
+      const candidates = filterDuplicates(factoryCandidates, seenThisCycle);
+      this.fileLogger.logRawPayload({
+        run_id: runId,
+        ts: new Date().toISOString(),
+        chain,
+        source: 'onchain_factory',
+        pending_pool_count: factoryCandidates.length,
+        deduped_count: candidates.length,
+      });
+
+      for (const candidate of candidates) {
+        const tokenKey = `${candidate.pool.chain}:${candidate.token.tokenAddress}`;
+        const gate = applyStage0Gate(candidate, this.stage0Config);
+        if (this.seenAcrossCycles.has(tokenKey)) {
+          skipped++;
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.logTrajectorySnapshot(candidate, runId, gate, 'seen_across_cycles');
+          continue;
+        }
+        this.logTrajectorySnapshot(candidate, runId, gate, 'candidate');
+        total++;
+        if (!gate.pass) {
+          rejected++;
+          this.logRejection(candidate, 'stage0', gate.reason!, runId);
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.seenAcrossCycles.add(tokenKey);
+          continue;
+        }
+
+        const liq = await this.liquidityVerifier.verify(candidate.pool, candidate.token.decimals);
+        const preflightReason = this.factoryPreflightReason(liq);
+        if (preflightReason) {
+          rejected++;
+          this.logRejection(candidate, 'factory_preflight', preflightReason, runId);
+          continue;
+        }
+        const metadata = await this.tokenMetadata.read(candidate.pool.chain, candidate.token.tokenAddress);
+        candidate.token.symbol = metadata.symbol || candidate.token.symbol;
+        candidate.token.name = metadata.name || candidate.token.name;
+        const enrichedGate = applyStage0Gate(candidate, this.stage0Config);
+        if (!enrichedGate.pass) {
+          rejected++;
+          this.logRejection(candidate, 'stage0_after_metadata', enrichedGate.reason!, runId);
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.seenAcrossCycles.add(tokenKey);
+          continue;
+        }
+        if (await this.shouldRejectForTokenAge(candidate, runId)) {
+          rejected++;
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.seenAcrossCycles.add(tokenKey);
+          continue;
+        }
+
+        const processed = await this.processCandidate(candidate, runId, liq);
+        cycleRiskResults.push(processed.riskResult);
+        if (processed.outcome === 'SAFE') passed++;
+        else if (processed.outcome === 'QUARANTINE') quarantined++;
+        else rejected++;
+        this.factoryPoolDiscovery.markHandled(candidate);
+        this.seenAcrossCycles.add(tokenKey);
+      }
+    }
 
     // ── GeckoTerminal pass (per chain) ──
     for (const chain of this.enabledChains) {
@@ -335,6 +414,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private async processCandidate(
     candidate: CollectorResult,
     runId: string,
+    preverifiedLiquidity?: LiquidityCheckResult,
   ): Promise<CandidateProcessingResult> {
     const { pool, token } = candidate;
     let riskResult = await this.riskEngine.checkToken(
@@ -358,6 +438,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     if (riskResult.decision === 'CONTRACT_REJECT') {
       this.logContractRejected(candidate, riskResult, runId);
+      await this.tryRecordMintableRiskShadow(candidate, riskResult, runId);
       if (!riskResult.cacheHit) {
         await this.storeRiskCheck(runId, pool.chain, token.tokenAddress, null, now, riskResult);
       }
@@ -397,7 +478,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     // CONTRACT_SAFE — run on-chain liquidity verification before persisting
-    const liqResult = await this.liquidityVerifier.verify(candidate.pool, candidate.token.decimals);
+    const liqResult = preverifiedLiquidity ?? await this.liquidityVerifier.verify(candidate.pool, candidate.token.decimals);
     const result = await this.persistCandidate(candidate, runId, riskResult, liqResult);
     if (result?.isNewDiscovery) this.logNewPool(candidate, runId, riskResult.decision);
     if (result) {
@@ -487,6 +568,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       poolId: persisted.poolId,
       runId,
       buyTax: riskResult.merged.buyTax,
+      riskCohort: 'CONTRACT_UNKNOWN_RESEARCH',
     });
 
     this.logger.log(
@@ -523,6 +605,67 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     if (m.buyTax !== undefined && m.buyTax > 0) return false;
 
     return true;
+  }
+
+  /**
+   * A mintable token is structurally risky, but mintability alone is not proof
+   * of a honeypot or an inevitable rug. Track the narrow clean subset as paper
+   * research so this gate can be measured instead of treated as dogma.
+   */
+  private async tryRecordMintableRiskShadow(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+    runId: string,
+  ): Promise<void> {
+    if (!(this.config.get<boolean>('collector.contractRiskShadowEnabled') ?? false)) return;
+    if (candidate.pool.chain !== 'base' && candidate.pool.chain !== 'ethereum') return;
+    if (riskResult.rejectReasons.length !== 1 || riskResult.rejectReasons[0] !== 'owner_can_mint') return;
+
+    const m = riskResult.merged;
+    if (m.honeypot !== false || m.canSell === false || m.blacklistRisk === true ||
+      m.pauseRisk === true || m.proxyRisk === true || m.sellTax !== undefined && m.sellTax > 0 ||
+      m.buyTax !== undefined && m.buyTax > 0) return;
+
+    try {
+      const liq = await this.liquidityVerifier.verify(candidate.pool, candidate.token.decimals);
+      const minDepth = this.config.get<number>('collector.contractRiskShadowMinDepthUsd') ?? 100;
+      if (!liq.liquidityVerified || (liq.executableDepthUsd ?? 0) < minDepth) return;
+
+      const ageDays = await this.tokenAge.getTokenAgeDays(candidate.pool.chain, candidate.token.tokenAddress);
+      const score = this.scoreCandidate(candidate, liq, ageDays, 'Mintable research shadow');
+      const persisted = await this.persistCandidate(candidate, runId, riskResult, liq);
+      if (!persisted) return;
+      await this.storeScore(runId, candidate, persisted.id, liq.liquidityModel, score);
+      await this.paper.recordEntry({
+        pool: candidate.pool,
+        token: candidate.token,
+        liq,
+        score,
+        ageDays,
+        tokenId: persisted.id,
+        poolId: persisted.poolId,
+        runId,
+        buyTax: m.buyTax,
+        riskCohort: 'CONTRACT_MINTABLE_RESEARCH',
+      });
+      this.logger.warn(
+        `Mintable research shadow: ${candidate.pool.chain}:${candidate.token.tokenAddress} ` +
+        `depth=$${(liq.executableDepthUsd ?? 0).toFixed(0)} score=${score.finalScore.toFixed(1)}`,
+      );
+    } catch (err) {
+      this.logger.debug(`Mintable shadow skipped ${candidate.pool.chain}:${candidate.token.tokenAddress}: ${(err as Error).message}`);
+    }
+  }
+
+  private factoryPreflightReason(liq: LiquidityCheckResult): string | null {
+    if (!liq.liquidityVerified) return 'factory_liquidity_unverified';
+    if (liq.liquidityModel === 'V2' && (liq.onchainTvlUsd ?? 0) < this.stage0Config.minLiquidityUsd) {
+      return 'factory_v2_onchain_liquidity_too_low';
+    }
+    if ((liq.executableDepthUsd ?? 0) < this.factoryDiscoveryMinExecutableDepthUsd) {
+      return 'factory_executable_depth_too_low';
+    }
+    return null;
   }
 
   /**
@@ -776,6 +919,14 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private v4MetadataForStorage(metadata: CollectorResult['pool']['v4Metadata']): Prisma.InputJsonValue | undefined {
+    if (!metadata) return undefined;
+    return {
+      ...metadata,
+      sqrtPriceX96: metadata.sqrtPriceX96.toString(),
+    } as Prisma.InputJsonValue;
+  }
+
   private async persistCandidate(
     candidate: CollectorResult,
     runId: string,
@@ -825,9 +976,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
           token1: pool.token1Address,
           quoteAsset: pool.quoteAsset,
           feeTier: pool.feeTier,
+          v4Metadata: this.v4MetadataForStorage(pool.v4Metadata),
           firstSeenAt: pool.poolCreatedAt ?? now,
         },
-        update: {},
+        update: pool.v4Metadata
+          ? { v4Metadata: this.v4MetadataForStorage(pool.v4Metadata) }
+          : {},
       });
 
       await tx.poolSnapshot.create({

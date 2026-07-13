@@ -65,10 +65,8 @@ export class LiquidityVerificationService {
 
     // Resolve gem decimals: use the hint if available, else read on-chain
     let gemDecimals = gemDecimalsHint ?? 18;
-    if (!gemDecimalsHint) {
-      const gemAddr = pool.quoteAssetAddress === pool.token0Address
-        ? pool.token1Address
-        : pool.token0Address;
+    if (gemDecimalsHint == null) {
+      const gemAddr = this.resolveGemAddress(pool, model);
       gemDecimals = model === 'V2'
         ? await this.v2.readDecimals(pool.chain, gemAddr)
         : model === 'V3'
@@ -96,6 +94,34 @@ export class LiquidityVerificationService {
       );
       return UNSUPPORTED_RESULT(model, errMsg);
     }
+  }
+
+  private resolveGemAddress(pool: CandidatePool, model: 'V2' | 'V3' | 'V4'): string {
+    const nativeCurrency = '0x0000000000000000000000000000000000000000';
+    const token0Address = model === 'V4' && pool.v4Metadata
+      ? pool.v4Metadata.currency0
+      : pool.token0Address;
+    const token1Address = model === 'V4' && pool.v4Metadata
+      ? pool.v4Metadata.currency1
+      : pool.token1Address;
+    const token0 = token0Address.toLowerCase();
+    const token1 = token1Address.toLowerCase();
+    const quote = pool.quoteAssetAddress.toLowerCase();
+
+    // Uniswap V4 represents native ETH as address(0), while discovery exposes
+    // WETH as the USD-priced quote asset. Read decimals from the other currency.
+    if (model === 'V4' && pool.quoteAsset === 'WETH') {
+      if (token0 === nativeCurrency) return token1Address;
+      if (token1 === nativeCurrency) return token0Address;
+    }
+    if (quote === token0) return token1Address;
+    if (quote === token1) return token0Address;
+
+    this.logger.warn(
+      `Quote asset ${pool.quoteAssetAddress} is absent from ${model} pool currencies ` +
+      `${token0Address}/${token1Address}; using token0 as gem fallback`,
+    );
+    return token0Address;
   }
 
   private buildResult(

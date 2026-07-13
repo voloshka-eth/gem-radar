@@ -74,6 +74,27 @@ describe('applyStage0Gate', () => {
     expect(result).toEqual({ pass: false, reason: 'pool_too_old' });
   });
 
+  it('keeps an older pool with fresh momentum for downstream on-chain checks', () => {
+    const oldDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const result = applyStage0Gate(buildCandidate({
+      poolCreatedAt: oldDate,
+      vol1h: 25_000,
+      txCount1h: 4,
+      buys1h: 2,
+    }), BASE_CONFIG);
+    expect(result).toEqual({ pass: true, lane: 'mature_momentum' });
+  });
+
+  it('keeps an active pool below the reported floor when it has enough probe liquidity', () => {
+    const result = applyStage0Gate(buildCandidate({
+      liquidityUsd: 1_200,
+      vol1h: 25_000,
+      txCount1h: 4,
+      buys1h: 2,
+    }), BASE_CONFIG);
+    expect(result).toEqual({ pass: true, lane: 'mature_momentum' });
+  });
+
   it('passes when poolCreatedAt is undefined — missing age data must not false-reject', () => {
     const result = applyStage0Gate(buildCandidate({ poolCreatedAt: undefined }), BASE_CONFIG);
     expect(result).toEqual({ pass: true });

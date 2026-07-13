@@ -23,14 +23,16 @@ export class PostmortemService {
     const closed = await this.prisma.paperPosition.findMany({
       where: { status: 'CLOSED' },
       select: {
-        outcomeClass: true, entryFeatures: true,
+        outcomeClass: true, realizedMultiple: true, entryFeatures: true,
         lastSellersToBuyersRatio: true, lastSellSimOk: true,
       },
     });
 
     const primaryClosed = closed.filter((c) => {
       const f = (c.entryFeatures ?? {}) as { riskCohort?: string };
-      return f.riskCohort !== 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER';
+      return f.riskCohort !== 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER' &&
+        f.riskCohort !== 'CONTRACT_MINTABLE_RESEARCH' &&
+        f.riskCohort !== 'CONTRACT_UNKNOWN_RESEARCH';
     });
     const rows: ClosedFeatureRow[] = primaryClosed.map((c) => {
       const f = (c.entryFeatures ?? {}) as Record<string, number | null>;
@@ -40,14 +42,20 @@ export class PostmortemService {
       features.sellersToBuyersRatioLast =
         c.lastSellersToBuyersRatio != null ? Number(c.lastSellersToBuyersRatio) : null;
       features.sellSimOkLast = c.lastSellSimOk == null ? null : c.lastSellSimOk ? 1 : 0;
-      return { outcomeClass: c.outcomeClass ?? 'UNKNOWN', features };
+      // A tail can rug after the 2x ladder already recovered the stake. The
+      // post-mortem must learn from net economics, not merely the tail's status.
+      const realizedMultiple = c.realizedMultiple != null ? Number(c.realizedMultiple) : null;
+      const economicOutcome = realizedMultiple != null && Number.isFinite(realizedMultiple) && realizedMultiple >= 1
+        ? 'WIN'
+        : c.outcomeClass ?? 'UNKNOWN';
+      return { outcomeClass: economicOutcome, features };
     });
 
     const result = computePostmortem(rows, minPerGroup);
     const dateLabel = new Date().toISOString().slice(0, 10);
     const experimentalCount = closed.length - primaryClosed.length;
     const report = renderPostmortem(result, dateLabel) +
-      `\n\nEXPERIMENTAL COHORT EXCLUDED FROM PRIMARY POST-MORTEM: ${experimentalCount} Robinhood position(s) without a supported risk provider.`;
+      `\n\nEXPERIMENTAL/RESEARCH COHORTS EXCLUDED FROM PRIMARY POST-MORTEM: ${experimentalCount} position(s).`;
     this.fileLogger.writeReport(`postmortem_${dateLabel}.txt`, report);
     this.logger.log(
       `Post-mortem written → reports/postmortem_${dateLabel}.txt  ` +

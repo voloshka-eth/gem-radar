@@ -310,6 +310,26 @@ describe('GoPlusService', () => {
     expect(result!.lpLockedOrBurned).toBe(false);
   });
 
+  it('extracts non-contract holder concentration and excludes the pair contract', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: buildGoPlusResponse({
+        is_open_source: '1', is_honeypot: '0', buy_tax: '0.00', sell_tax: '0.00',
+        can_take_back_ownership: '0', is_mintable: '0', is_blacklisted: '0',
+        transfer_pausable: '0', is_proxy: '0', owner_address: '0x0000000000000000000000000000000000000000',
+        holder_count: '123',
+        holders: [
+          { address: '0xpair', percent: '0.90', is_contract: '1' },
+          { address: '0xwhale', percent: '0.81', is_contract: '0' },
+          { address: '0xother', percent: '0.05', is_contract: 0 },
+        ],
+      }),
+    });
+    const result = await service.checkToken('ethereum', TOKEN_ADDR);
+    expect(result!.holderCount).toBe(123);
+    expect(result!.topNonContractHolderPct).toBeCloseTo(0.81, 8);
+    expect(result!.top10NonContractHolderPct).toBeCloseTo(0.86, 8);
+  });
+
   // ── Auth header ──────────────────────────────────────────────────────────────
 
   it('does not send Authorization header when app credentials are missing', async () => {

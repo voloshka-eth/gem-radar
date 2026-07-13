@@ -9,6 +9,7 @@ import {
   ScoringHistoryRow, SCORING_HISTORY_HEADERS,
   WatchlistTokenRow, WATCHLIST_TOKEN_HEADERS,
   PaperEntryRow, PAPER_ENTRY_HEADERS,
+  TakeCohortDecisionRow, TAKE_COHORT_DECISION_HEADERS,
   ResearchPaperEntryRow, RESEARCH_PAPER_ENTRY_HEADERS,
   PaperExitRow, PAPER_EXIT_HEADERS,
   ContractRiskRow, CONTRACT_RISK_HEADERS,
@@ -62,6 +63,10 @@ export class FileLoggerService implements OnModuleInit {
 
   logPaperEntry(row: PaperEntryRow): void {
     this.writeCsvRow('decisions/paper_entries.csv', PAPER_ENTRY_HEADERS, row);
+  }
+
+  logTakeCohortDecision(row: TakeCohortDecisionRow): void {
+    this.writeCsvRow('decisions/take_cohort_decisions.csv', TAKE_COHORT_DECISION_HEADERS, row);
   }
 
   logResearchPaperEntry(row: ResearchPaperEntryRow): void {

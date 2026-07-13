@@ -133,6 +133,9 @@ function harness(
   const deployerReputation = {
     refreshAll: jest.fn().mockResolvedValue({ deployersUpdated: 0, rugLikeTokens: 0 }),
   };
+  const paper = {
+    processPendingConfirmations: jest.fn().mockResolvedValue({ confirmed: 0, rejected: 0, deferred: 0 }),
+  };
 
   const service = new EvalService(
     config(configOverrides),
@@ -142,6 +145,7 @@ function harness(
     riskEngine as any,
     geckoTerminal as any,
     deployerReputation as any,
+    paper as any,
   );
 
   return { service, prisma, fileLogger };
@@ -189,6 +193,21 @@ describe('EvalService price-read failures', () => {
         take: 25,
       }),
     );
+  });
+
+  it('skips a position that is not due under the young-position cadence', async () => {
+    const position = openPosition();
+    (position as any).lastEvalAt = new Date();
+    const { service, prisma } = harness(position, healthyLiquidity(), {
+      'paper.evalYoungWindowSec': 900,
+      'paper.evalYoungIntervalMs': 60_000,
+      'paper.evalMatureIntervalMs': 300_000,
+    });
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.evaluated).toBe(0);
+    expect(prisma.paperPosition.update).not.toHaveBeenCalled();
   });
 
   it('closes as RUG once no-price repeats at the threshold', async () => {

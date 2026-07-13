@@ -62,10 +62,23 @@ export const collectorConfig = registerAs('collector', () => ({
   autoStart: process.env.COLLECTOR_AUTOSTART !== 'false',
   pollIntervalMs: parseInt(process.env.COLLECTOR_POLL_INTERVAL_MS ?? '120000', 10),
   newPoolMaxAgeHours: parseInt(process.env.NEW_POOL_MAX_AGE_HOURS ?? '24', 10),
+  matureMomentumMinVol1hUsd: parseFloat(process.env.MATURE_MOMENTUM_MIN_VOL_1H_USD ?? '1000'),
+  matureMomentumMinTx1h: parseInt(process.env.MATURE_MOMENTUM_MIN_TX_1H ?? '20', 10),
+  matureMomentumMinBuys1h: parseInt(process.env.MATURE_MOMENTUM_MIN_BUYS_1H ?? '10', 10),
+  matureMomentumMinLiquidityUsd: parseFloat(process.env.MATURE_MOMENTUM_MIN_LIQUIDITY_USD ?? '1000'),
   geckoTerminalPages: parseInt(process.env.GECKOTERMINAL_PAGES ?? '1', 10),
   geckoTerminalRequestDelayMs: parseInt(process.env.GECKOTERMINAL_REQUEST_DELAY_MS ?? '7000', 10),
   geckoTerminalRateLimitBackoffMs: parseInt(process.env.GECKOTERMINAL_RATE_LIMIT_BACKOFF_MS ?? '300000', 10),
   geckoTerminalStatsCacheTtlMs: parseInt(process.env.GECKOTERMINAL_STATS_CACHE_TTL_MS ?? '600000', 10),
+  // RPC-native factory events arrive before third-party pool listings. They are
+  // pre-filtered by an on-chain liquidity quote before any risk-provider request.
+  factoryDiscoveryEnabled: process.env.FACTORY_DISCOVERY_ENABLED !== 'false',
+  factoryDiscoveryInitialLookbackEthereum: parseInt(process.env.FACTORY_DISCOVERY_INITIAL_LOOKBACK_ETHEREUM ?? '30', 10),
+  // Keep Base's first query inside public RPC non-archive log limits. Subsequent
+  // cycles advance from the in-memory cursor, so this does not slow live discovery.
+  factoryDiscoveryInitialLookbackBase: parseInt(process.env.FACTORY_DISCOVERY_INITIAL_LOOKBACK_BASE ?? '120', 10),
+  factoryDiscoveryPendingTtlMs: parseInt(process.env.FACTORY_DISCOVERY_PENDING_TTL_MS ?? '1800000', 10),
+  factoryDiscoveryMinExecutableDepthUsd: parseFloat(process.env.FACTORY_DISCOVERY_MIN_EXECUTABLE_DEPTH_USD ?? '100'),
   tokenMaxAgeDays: parseFloat(process.env.TOKEN_MAX_AGE_DAYS ?? '7'),
   tokenAgeHardGateEnabled: process.env.TOKEN_AGE_HARD_GATE_ENABLED === 'true',
   moonshotStage0Enabled: process.env.MOONSHOT_STAGE0_ENABLED !== 'false',
@@ -74,7 +87,7 @@ export const collectorConfig = registerAs('collector', () => ({
   moonshotMinVol1hUsd: parseFloat(process.env.MOONSHOT_MIN_VOL_1H_USD ?? '1000'),
   moonshotMinTx1h: parseInt(process.env.MOONSHOT_MIN_TX_1H ?? '30', 10),
   moonshotMinBuys1h: parseInt(process.env.MOONSHOT_MIN_BUYS_1H ?? '15', 10),
-  promoteCleanUnknownEnabled: process.env.PROMOTE_CLEAN_UNKNOWN_ENABLED === 'true',
+  promoteCleanUnknownEnabled: process.env.PROMOTE_CLEAN_UNKNOWN_ENABLED !== 'false',
   // Temporary paper-only lane for Robinhood until a supported contract-risk provider exists.
   // It is intentionally separate from normal candidates and primary edge statistics.
   robinhoodExperimentalPaperEnabled: process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
@@ -84,6 +97,8 @@ export const collectorConfig = registerAs('collector', () => ({
   deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
   deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
   deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '1', 10),
+  contractRiskShadowEnabled: process.env.CONTRACT_RISK_SHADOW_ENABLED !== 'false',
+  contractRiskShadowMinDepthUsd: parseFloat(process.env.CONTRACT_RISK_SHADOW_MIN_DEPTH_USD ?? '100'),
   deployerGateMinRugRate: parseFloat(process.env.DEPLOYER_GATE_MIN_RUG_RATE ?? '0.5'),
   blockedTokenSymbols,
   blockedDeployers: (process.env.BLOCKED_DEPLOYERS ?? '')
@@ -122,6 +137,9 @@ export const explorerConfig = registerAs('explorer', () => ({
 // QuoterV2: https://developers.uniswap.org/contracts/v3/reference/deployments/
 // Aerodrome PoolFactory: https://github.com/aerodrome-finance/contracts (Base mainnet)
 export const onchainConfig = registerAs('onchain', () => ({
+  uniswapV2FactoryEthereum: process.env.UNISWAP_V2_FACTORY_ETHEREUM ?? '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f',
+  uniswapV3FactoryEthereum: process.env.UNISWAP_V3_FACTORY_ETHEREUM ?? '0x1F98431c8aD98523631AE4a59f267346ea31F984',
+  uniswapV3FactoryBase: process.env.UNISWAP_V3_FACTORY_BASE ?? '0x33128a8fC17869897dcE68Ed026d694621f6FDfD',
   // Uniswap V3 QuoterV2 — verified 2025-06 against official Uniswap deployment docs
   quoterV2Ethereum: process.env.QUOTER_V2_ETHEREUM ?? '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
   quoterV2Base:     process.env.QUOTER_V2_BASE     ?? '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
@@ -169,13 +187,30 @@ export const scoringConfig = registerAs('scoring', () => ({
 // All fills are PESSIMISTIC by mandate: you always pay slippage + sandwich + gas + tax.
 // Mid-price is forbidden. These are modeling assumptions, documented as such.
 export const paperConfig = registerAs('paper', () => ({
-  positionSizeUsd:    parseFloat(process.env.PAPER_POSITION_SIZE_USD   ?? '20'),   // matches user's real sizing
+  // PAPER_TRADE_SIZE_USD is the legacy name; keep it as a fallback so the
+  // configured paper size cannot silently fall back to a different default.
+  positionSizeUsd:    parseFloat(process.env.PAPER_POSITION_SIZE_USD ?? process.env.PAPER_TRADE_SIZE_USD ?? '20'),
   detectionDelaySec:  parseInt(  process.env.PAPER_DETECTION_DELAY_SEC ?? '0', 10), // enter as soon as a candidate survives
+  // Optional survival experiment. The primary paper lane enters at discovery t0;
+  // delaying the buy changes the opportunity set and must never be the default.
+  takeCohortEnabled: process.env.PAPER_TAKE_COHORT_ENABLED === 'true',
+  takeCohortChains: (process.env.PAPER_TAKE_COHORT_CHAINS ?? 'ethereum,base')
+    .split(',').map((chain) => chain.trim()).filter(Boolean),
+  takeConfirmationDelaySec: parseInt(process.env.PAPER_TAKE_CONFIRMATION_DELAY_SEC ?? '600', 10),
+  takeMinPriceMultiple: parseFloat(process.env.PAPER_TAKE_MIN_PRICE_MULTIPLE ?? '1.00'),
+  takeMinExecutableDepthUsd: parseFloat(process.env.PAPER_TAKE_MIN_EXECUTABLE_DEPTH_USD ?? '100'),
+  takeMinLiquidityRetention: parseFloat(process.env.PAPER_TAKE_MIN_LIQUIDITY_RETENTION ?? '0.80'),
+  takeMinV2OnchainTvlUsd: parseFloat(process.env.PAPER_TAKE_MIN_V2_ONCHAIN_TVL_USD ?? '5000'),
+  survivalObservationEnabled: process.env.PAPER_SURVIVAL_OBSERVATION_ENABLED !== 'false',
+  survivalObservationDelaySec: parseInt(process.env.PAPER_SURVIVAL_OBSERVATION_DELAY_SEC ?? '600', 10),
   evalAutostart:      process.env.PAPER_EVAL_AUTOSTART != null
     ? process.env.PAPER_EVAL_AUTOSTART !== 'false'
     : process.env.COLLECTOR_AUTOSTART !== 'false',
-  evalIntervalMs:     parseInt(process.env.PAPER_EVAL_INTERVAL_MS ?? '300000', 10),
-  evalInitialDelayMs: parseInt(process.env.PAPER_EVAL_INITIAL_DELAY_MS ?? '120000', 10),
+  evalIntervalMs:     parseInt(process.env.PAPER_EVAL_INTERVAL_MS ?? '60000', 10),
+  evalYoungWindowSec: parseInt(process.env.PAPER_EVAL_YOUNG_WINDOW_SEC ?? '900', 10),
+  evalYoungIntervalMs: parseInt(process.env.PAPER_EVAL_YOUNG_INTERVAL_MS ?? '60000', 10),
+  evalMatureIntervalMs: parseInt(process.env.PAPER_EVAL_MATURE_INTERVAL_MS ?? '300000', 10),
+  evalInitialDelayMs: parseInt(process.env.PAPER_EVAL_INITIAL_DELAY_MS ?? '30000', 10),
   sandwichPct:        parseFloat(process.env.PAPER_SANDWICH_PCT        ?? '0.01'),  // 1% MEV/sandwich haircut
   gasUsd:             parseFloat(process.env.PAPER_GAS_USD             ?? '1.5'),   // modeled gas per tx (each way)
   maxEntrySlipPct:    parseFloat(process.env.PAPER_MAX_ENTRY_SLIP_PCT  ?? '0.50'),  // > this at entry → not_entered

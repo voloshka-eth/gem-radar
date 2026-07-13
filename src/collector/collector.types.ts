@@ -49,6 +49,16 @@ export interface CandidatePool {
   quoteAsset: string; // 'WETH' | 'USDC' | ...
   quoteAssetAddress: string; // always lowercase
   feeTier?: string;
+  // V4 pools are singleton state keyed by bytes32. Factory discovery captures the
+  // Initialize event's immutable PoolKey so the verifier need not scan from genesis.
+  v4Metadata?: {
+    currency0: string;
+    currency1: string;
+    fee: number;
+    tickSpacing: number;
+    hooks: string;
+    sqrtPriceX96: bigint;
+  };
   priceUsd?: number;
   liquidityUsd?: number;
   fdvUsd?: number;

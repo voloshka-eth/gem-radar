@@ -1,15 +1,15 @@
 /**
  * M5 — PURE post-mortem computation over CLOSED paper positions. No I/O.
  *
- * Question: do the t0 (entry-time) features of things that later RUGGED/LOST differ
- * from those that SURVIVED/WON? Any separation found here is a HYPOTHESIS for M3/scoring
+ * Question: do the t0 features of net-losing positions differ from positions that
+ * realized at least their stake before closing? Any separation found here is a HYPOTHESIS for M3/scoring
  * to test later — NOT a rule to hard-wire. With small samples it is almost certainly
  * overfitting, so a LOUD warning fires when either group has < minPerGroup positions.
  */
 import { distribution, Dist } from '../paper/stats';
 
 export interface ClosedFeatureRow {
-  outcomeClass: string;       // WIN | LOSS | RUG | UNSELLABLE | LIQ_PULL | ...
+  outcomeClass: string;       // WIN when realized multiple >= 1, otherwise close outcome
   features: Record<string, number | null>;
 }
 

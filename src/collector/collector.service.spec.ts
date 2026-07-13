@@ -20,6 +20,8 @@ import { RobinhoodExperimentalSafetyService } from '../onchain/robinhood-experim
 import { ScoringService } from '../scoring/scoring.service';
 import { PaperService } from '../paper/paper.service';
 import { DeployerReputationService } from '../deployer/deployer-reputation.service';
+import { FactoryPoolDiscoveryService } from '../onchain/factory-pool-discovery.service';
+import { TokenMetadataService } from '../onchain/token-metadata.service';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -132,6 +134,13 @@ describe('CollectorService', () => {
     getNewPools: jest.fn().mockResolvedValue([]),
     getTrendingPools: jest.fn().mockResolvedValue([]),
   };
+  const factoryPoolDiscoveryMock = {
+    getPendingPools: jest.fn().mockResolvedValue([]),
+    markHandled: jest.fn(),
+  };
+  const tokenMetadataMock = {
+    read: jest.fn().mockResolvedValue({ symbol: '', name: '' }),
+  };
   const dsMock = {
     getLatestProfileAddresses: jest.fn().mockResolvedValue([]),
     getLatestBoostAddresses: jest.fn().mockResolvedValue([]),
@@ -227,6 +236,8 @@ describe('CollectorService', () => {
     });
     gtMock.getNewPools.mockResolvedValue([]);
     gtMock.getTrendingPools.mockResolvedValue([]);
+    factoryPoolDiscoveryMock.getPendingPools.mockResolvedValue([]);
+    tokenMetadataMock.read.mockResolvedValue({ symbol: '', name: '' });
     dsMock.getLatestProfileAddresses.mockResolvedValue([]);
     dsMock.getLatestBoostAddresses.mockResolvedValue([]);
     dsMock.getTopBoostAddresses.mockResolvedValue([]);
@@ -269,6 +280,8 @@ describe('CollectorService', () => {
         { provide: ScoringService, useValue: scoringMock },
         { provide: PaperService, useValue: paperMock },
         { provide: DeployerReputationService, useValue: deployerReputationMock },
+        { provide: FactoryPoolDiscoveryService, useValue: factoryPoolDiscoveryMock },
+        { provide: TokenMetadataService, useValue: tokenMetadataMock },
         {
           provide: ConfigService,
           useValue: {
@@ -407,9 +420,12 @@ describe('CollectorService', () => {
     expect(lines[1]).toContain('ticker_blocklisted');
   });
 
-  it('pool_too_old still writes a trajectory snapshot', async () => {
+  it('passive old pools still write a trajectory snapshot without processing', async () => {
     const oldPool = buildResult({
       poolCreatedAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      vol1h: 0,
+      txCount1h: 0,
+      buys1h: 0,
     });
     gtMock.getNewPools.mockResolvedValue([oldPool]);
 
@@ -812,6 +828,7 @@ describe('CollectorService', () => {
         tokenId: 'tok-cuid',
         poolId: 'pool-cuid',
         buyTax: 0,
+        riskCohort: 'CONTRACT_UNKNOWN_RESEARCH',
       }),
     );
     expect(paperMock.recordResearchEntry).toHaveBeenCalled();
@@ -1103,6 +1120,80 @@ describe('CollectorService', () => {
     await service.runCollectionCycle();
 
     expect(riskMock.checkToken).not.toHaveBeenCalled();
+  });
+
+  it('keeps an empty direct factory event out of the risk-provider path', async () => {
+    const direct = buildResult({
+      source: 'onchain_factory',
+      liquidityUsd: undefined,
+      fdvUsd: undefined,
+      vol1h: undefined,
+      txCount1h: undefined,
+      buys1h: undefined,
+    }, '0xfactory000000000000000000000000000000000001');
+    factoryPoolDiscoveryMock.getPendingPools.mockImplementation(async (chain: string) =>
+      chain === 'ethereum' ? [direct] : [],
+    );
+
+    await service.runCollectionCycle();
+
+    expect(liquidityMock.verify).toHaveBeenCalledWith(direct.pool, undefined);
+    expect(riskMock.checkToken).not.toHaveBeenCalled();
+    expect(factoryPoolDiscoveryMock.markHandled).not.toHaveBeenCalled();
+  });
+
+  it('persists V4 factory metadata so later paper re-reads do not need a genesis log scan', async () => {
+    const direct = buildResult({
+      source: 'onchain_factory',
+      poolAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      dex: 'Uniswap V4',
+      liquidityUsd: undefined,
+      fdvUsd: undefined,
+      v4Metadata: {
+        currency0: '0x0000000000000000000000000000000000000000',
+        currency1: '0xfactory000000000000000000000000000000000002',
+        fee: 3000,
+        tickSpacing: 60,
+        hooks: '0x0000000000000000000000000000000000000000',
+        sqrtPriceX96: 2n ** 96n,
+      },
+    }, '0xfactory000000000000000000000000000000000002');
+    factoryPoolDiscoveryMock.getPendingPools.mockImplementation(async (chain: string) =>
+      chain === 'ethereum' ? [direct] : [],
+    );
+    liquidityMock.verify.mockResolvedValueOnce({
+      liquidityModel: 'V4', liquidityVerified: true, onchainTvlUsd: null, reportedVsOnchainPct: null,
+      executableDepthUsd: 500, slip50: 0.01, slip100: 0.02, slip500: 0.05, slip1000: 0.1, spotPriceUsd: 0.001,
+    });
+
+    await service.runCollectionCycle();
+
+    expect(prismaMock.pool.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        v4Metadata: expect.objectContaining({ sqrtPriceX96: (2n ** 96n).toString(), fee: 3000 }),
+      }),
+    }));
+    expect(factoryPoolDiscoveryMock.markHandled).toHaveBeenCalledWith(direct);
+  });
+
+  it('applies the ticker blocklist after direct-pool metadata resolves', async () => {
+    const direct = buildResult({
+      source: 'onchain_factory', liquidityUsd: undefined, fdvUsd: undefined,
+    }, '0xfactory000000000000000000000000000000000003');
+    factoryPoolDiscoveryMock.getPendingPools.mockImplementation(async (chain: string) =>
+      chain === 'ethereum' ? [direct] : [],
+    );
+    liquidityMock.verify.mockResolvedValueOnce({
+      liquidityModel: 'V3', liquidityVerified: true, onchainTvlUsd: null, reportedVsOnchainPct: null,
+      executableDepthUsd: 500, slip50: 0.01, slip100: 0.02, slip500: 0.05, slip1000: 0.1, spotPriceUsd: 0.001,
+    });
+    tokenMetadataMock.read.mockResolvedValueOnce({ symbol: 'OpenHuman', name: 'OpenHuman' });
+
+    await service.runCollectionCycle();
+
+    expect(riskMock.checkToken).not.toHaveBeenCalled();
+    expect(factoryPoolDiscoveryMock.markHandled).toHaveBeenCalledWith(direct);
+    expect(tokenMetadataMock.read).toHaveBeenCalledWith('ethereum', direct.token.tokenAddress);
   });
 
   it('old token contract with a fresh pool is allowed through by default', async () => {

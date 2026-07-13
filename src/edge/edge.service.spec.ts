@@ -24,6 +24,6 @@ describe('EdgeService', () => {
     const report = await service.run();
 
     expect(report).toContain('Closed positions:        1');
-    expect(report).toContain('EXPERIMENTAL COHORT EXCLUDED FROM PRIMARY EDGE: 1');
+    expect(report).toContain('EXPERIMENTAL/RESEARCH COHORTS EXCLUDED FROM PRIMARY EDGE: 1');
   });
 });

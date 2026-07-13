@@ -13,6 +13,8 @@ import { V3LiquidityService } from './v3-liquidity.service';
 import { V4LiquidityService } from './v4-liquidity.service';
 import { LiquidityVerificationService } from './liquidity-verification.service';
 import { RobinhoodExperimentalSafetyService } from './robinhood-experimental-safety.service';
+import { FactoryPoolDiscoveryService } from './factory-pool-discovery.service';
+import { TokenMetadataService } from './token-metadata.service';
 
 const robinhood = defineChain({
   id: 4663,
@@ -80,12 +82,16 @@ const robinhood = defineChain({
     V3LiquidityService,
     V4LiquidityService,
     RobinhoodExperimentalSafetyService,
+    FactoryPoolDiscoveryService,
+    TokenMetadataService,
     LiquidityVerificationService,
   ],
   exports: [
     TokenAgeService,
     LiquidityVerificationService,
     RobinhoodExperimentalSafetyService,
+    FactoryPoolDiscoveryService,
+    TokenMetadataService,
     VIEM_CLIENTS,
   ],
 })

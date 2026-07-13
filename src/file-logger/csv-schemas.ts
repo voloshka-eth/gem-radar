@@ -2,7 +2,7 @@
 // Adding a field: extend the interface, add an entry to the headers array,
 // bump CSV_SCHEMA_VERSION.  Never reorder existing columns — append only.
 
-export const CSV_SCHEMA_VERSION = '1.6.0'; // trajectory snapshots + Moralis/V3 precision fixes
+export const CSV_SCHEMA_VERSION = '1.7.0'; // paper cohort attribution
 
 export interface CsvHeader {
   id: string;   // matches the key in the row object
@@ -299,6 +299,8 @@ export interface PaperEntryRow {
   lp_locked: string;               // true | false | '' (undetermined)
   lp_lock_source: string;          // burn | locker:<name> | none | undetermined_v3 | ''
   lp_lock_fraction: string;        // locked/burned fraction (0–1) | ''
+  discovery_source: string;
+  risk_cohort: string;
 }
 
 export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
@@ -333,6 +335,8 @@ export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
   { id: 'lp_locked', title: 'lp_locked' },
   { id: 'lp_lock_source', title: 'lp_lock_source' },
   { id: 'lp_lock_fraction', title: 'lp_lock_fraction' },
+  { id: 'discovery_source', title: 'discovery_source' },
+  { id: 'risk_cohort', title: 'risk_cohort' },
 ];
 
 export interface ResearchPaperEntryRow {
@@ -499,6 +503,56 @@ export const GEM_SHADOW_TICK_HEADERS: CsvHeader[] = [
   { id: 'unique_sellers', title: 'unique_sellers' },
   { id: 'sell_sim_ok', title: 'sell_sim_ok' },
   { id: 'rug_flag', title: 'rug_flag' },
+];
+
+export interface TakeCohortDecisionRow {
+  ts: string;
+  run_id: string;
+  schema_version: string;
+  decision: string;
+  reason: string;
+  chain: string;
+  token_address: string;
+  symbol: string;
+  pool_address: string;
+  first_seen_at: string;
+  confirmation_due_at: string;
+  decided_at: string;
+  baseline_price_usd: string;
+  current_price_usd: string;
+  price_multiple: string;
+  baseline_onchain_tvl_usd: string;
+  current_onchain_tvl_usd: string;
+  liquidity_retention: string;
+  current_executable_depth_usd: string;
+  final_score: string;
+  band: string;
+  discovery_source: string;
+}
+
+export const TAKE_COHORT_DECISION_HEADERS: CsvHeader[] = [
+  { id: 'ts', title: 'ts' },
+  { id: 'run_id', title: 'run_id' },
+  { id: 'schema_version', title: 'schema_version' },
+  { id: 'decision', title: 'decision' },
+  { id: 'reason', title: 'reason' },
+  { id: 'chain', title: 'chain' },
+  { id: 'token_address', title: 'token_address' },
+  { id: 'symbol', title: 'symbol' },
+  { id: 'pool_address', title: 'pool_address' },
+  { id: 'first_seen_at', title: 'first_seen_at' },
+  { id: 'confirmation_due_at', title: 'confirmation_due_at' },
+  { id: 'decided_at', title: 'decided_at' },
+  { id: 'baseline_price_usd', title: 'baseline_price_usd' },
+  { id: 'current_price_usd', title: 'current_price_usd' },
+  { id: 'price_multiple', title: 'price_multiple' },
+  { id: 'baseline_onchain_tvl_usd', title: 'baseline_onchain_tvl_usd' },
+  { id: 'current_onchain_tvl_usd', title: 'current_onchain_tvl_usd' },
+  { id: 'liquidity_retention', title: 'liquidity_retention' },
+  { id: 'current_executable_depth_usd', title: 'current_executable_depth_usd' },
+  { id: 'final_score', title: 'final_score' },
+  { id: 'band', title: 'band' },
+  { id: 'discovery_source', title: 'discovery_source' },
 ];
 
 // ─── decisions/paper_exits.csv ────────────────────────────────────────────────

@@ -103,5 +103,8 @@ export function mergeRiskData(
     ownerRenounced:           safeWins(primary.ownerRenounced, supplementary.ownerRenounced),
     lpLockedOrBurned:         safeWins(primary.lpLockedOrBurned, supplementary.lpLockedOrBurned),
     deployerAddress:          primary.deployerAddress ?? supplementary.deployerAddress,
+    topNonContractHolderPct:  numMax(primary.topNonContractHolderPct, supplementary.topNonContractHolderPct),
+    top10NonContractHolderPct: numMax(primary.top10NonContractHolderPct, supplementary.top10NonContractHolderPct),
+    holderCount:              primary.holderCount ?? supplementary.holderCount,
   };
 }

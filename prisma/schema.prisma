@@ -44,6 +44,7 @@ model Pool {
   token1       String   @map("token1")
   quoteAsset   String   @map("quote_asset") // WETH | USDC | USDT | DAI
   feeTier      String?  @map("fee_tier")
+  v4Metadata   Json?    @map("v4_metadata") // immutable PoolKey captured from Initialize
   firstSeenAt  DateTime @map("first_seen_at")
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -262,7 +263,7 @@ model PaperPosition {
   onchainLiqEntryUsd Decimal?  @map("onchain_liq_entry_usd") @db.Decimal(20, 4)
   entryFeatures      Json?     @map("entry_features")  // t0 snapshot features for post-mortem
   // Lifecycle.
-  status             String    @default("OPEN") // OPEN | CLOSED | INVALIDATED | NOT_ENTERED
+  status             String    @default("OPEN") // PENDING_CONFIRMATION | OPEN | CLOSED | INVALIDATED | NOT_ENTERED
   notEnteredReason   String?   @map("not_entered_reason")
   executedRungs      String    @default("") @map("executed_rungs") // comma-joined rung multiples sold
   remainingFraction  Decimal   @default(1) @map("remaining_fraction") @db.Decimal(8, 6)

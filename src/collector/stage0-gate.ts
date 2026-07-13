@@ -5,6 +5,10 @@ import { CollectorResult, Stage0RejectReason } from './collector.types';
 
 export interface Stage0Config {
   maxPoolAgeMs: number;
+  matureMomentumMinVol1hUsd?: number;
+  matureMomentumMinTx1h?: number;
+  matureMomentumMinBuys1h?: number;
+  matureMomentumMinLiquidityUsd?: number;
   minLiquidityUsd: number;
   minFdvUsd: number;
   maxFdvUsd: number;
@@ -20,7 +24,7 @@ export interface Stage0Config {
 export interface Stage0Result {
   pass: boolean;
   reason?: Stage0RejectReason;
-  lane?: 'standard' | 'moonshot_probe';
+  lane?: 'standard' | 'moonshot_probe' | 'mature_momentum';
 }
 
 /**
@@ -34,6 +38,7 @@ export interface Stage0Result {
  */
 export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): Stage0Result {
   const { pool, token } = candidate;
+  let matureMomentum = false;
 
   const blockedSymbols = new Set((cfg.blockedTokenSymbols ?? []).map(normalizeSymbol).filter(Boolean));
   if (blockedSymbols.size > 0) {
@@ -49,7 +54,8 @@ export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): 
 
   if (pool.poolCreatedAt !== undefined) {
     const ageMs = Date.now() - pool.poolCreatedAt.getTime();
-    if (ageMs > cfg.maxPoolAgeMs) {
+    matureMomentum = ageMs > cfg.maxPoolAgeMs && hasMatureMomentum(candidate, cfg);
+    if (ageMs > cfg.maxPoolAgeMs && !matureMomentum) {
       return { pass: false, reason: 'pool_too_old' };
     }
   }
@@ -59,7 +65,10 @@ export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): 
     return { pass: true, lane: 'moonshot_probe' };
   }
 
-  if (pool.liquidityUsd !== undefined && pool.liquidityUsd < cfg.minLiquidityUsd) {
+  const lowReportedLiquidity = pool.liquidityUsd !== undefined && pool.liquidityUsd < cfg.minLiquidityUsd;
+  const lowLiquidityMomentumLane = lowReportedLiquidity && hasMatureMomentum(candidate, cfg) &&
+    pool.liquidityUsd! >= (cfg.matureMomentumMinLiquidityUsd ?? 1_000);
+  if (lowReportedLiquidity && !lowLiquidityMomentumLane) {
     return { pass: false, reason: 'liquidity_too_low' };
   }
 
@@ -68,7 +77,17 @@ export function applyStage0Gate(candidate: CollectorResult, cfg: Stage0Config): 
     if (pool.fdvUsd > cfg.maxFdvUsd) return { pass: false, reason: 'fdv_too_high' };
   }
 
-  return { pass: true };
+  return matureMomentum || lowLiquidityMomentumLane
+    ? { pass: true, lane: 'mature_momentum' }
+    : { pass: true };
+}
+
+/** Recent activity can make an older listing feed entry worth inspecting. */
+function hasMatureMomentum(candidate: CollectorResult, cfg: Stage0Config): boolean {
+  const { pool } = candidate;
+  return (pool.vol1h ?? 0) >= (cfg.matureMomentumMinVol1hUsd ?? 1_000) ||
+    (pool.txCount1h ?? 0) >= (cfg.matureMomentumMinTx1h ?? 20) ||
+    (pool.buys1h ?? 0) >= (cfg.matureMomentumMinBuys1h ?? 10);
 }
 
 function normalizeSymbol(symbol: string | null | undefined): string {

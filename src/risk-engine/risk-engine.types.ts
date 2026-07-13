@@ -42,6 +42,9 @@ export interface NormalizedRiskData {
   ownerRenounced?: boolean;          // ownership has been burned/zeroed (undefined if ambiguous)
   lpLockedOrBurned?: boolean;        // ≥50% of LP tokens are on dead/locker addresses
   deployerAddress?: string;          // creator/deployer address when provider exposes it
+  topNonContractHolderPct?: number;  // 0-1; undefined when provider has no usable list
+  top10NonContractHolderPct?: number;
+  holderCount?: number;
 }
 
 export interface ContractRiskResult {

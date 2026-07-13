@@ -113,6 +113,10 @@ describe('applyContractRiskGate', () => {
     expect(rejectReasons).toContain('proxy_risk');
   });
 
+  it('keeps holder concentration as data for scoring, not an unvalidated hard gate', () => {
+    expect(applyContractRiskGate({ ...CLEAN, topNonContractHolderPct: 0.99 }).decision).toBe('CONTRACT_SAFE');
+  });
+
   it('accumulates multiple reject reasons without short-circuiting', () => {
     const { decision, rejectReasons } = applyContractRiskGate({
       ...CLEAN,
@@ -181,5 +185,14 @@ describe('mergeRiskData', () => {
       { honeypot: false },
     );
     expect(merged.honeypot).toBe(false);
+  });
+
+  it('takes the most concentrated provider reading when merging holder data', () => {
+    const merged = mergeRiskData(
+      { topNonContractHolderPct: 0.4, top10NonContractHolderPct: 0.7 },
+      { topNonContractHolderPct: 0.8, top10NonContractHolderPct: 0.9 },
+    );
+    expect(merged.topNonContractHolderPct).toBe(0.8);
+    expect(merged.top10NonContractHolderPct).toBe(0.9);
   });
 });

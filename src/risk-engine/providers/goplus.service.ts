@@ -5,6 +5,7 @@ import axiosRetry from 'axios-retry';
 import { createHash } from 'crypto';
 import {
   GoPlusAccessTokenResponse,
+  GoPlusHolder,
   GoPlusApiResponse,
   GoPlusLpHolder,
   GoPlusTokenResult,
@@ -39,6 +40,10 @@ const LOCK_TAGS = new Set([
 // GoPlus lp_holders[].percent is a decimal fraction (e.g. "0.95" = 95%).
 // LP_LOCK_THRESHOLD = 0.5 means at least 50% of LP must be on dead/locked addresses.
 const LP_LOCK_THRESHOLD = 0.5;
+const DEAD_TOKEN_ADDRESSES = new Set([
+  '0x0000000000000000000000000000000000000000',
+  '0x000000000000000000000000000000000000dead',
+]);
 
 const CRITICAL_GOPLUS_FIELDS: Array<keyof GoPlusTokenResult> = [
   'is_honeypot',
@@ -354,6 +359,7 @@ export class GoPlusService {
     // is_contract alone does not count. Only is_locked===1, known dead addresses,
     // or lock tags qualify.
     const lpLockedOrBurned = this.calcLpLocked(r.lp_holders);
+    const holderConcentration = this.calcHolderConcentration(r.holders);
 
     const cannotSellAll = flag(r.cannot_sell_all);
     const isHoneypot = flag(r.is_honeypot);
@@ -389,6 +395,9 @@ export class GoPlusService {
       ownerRenounced,
       lpLockedOrBurned,
       deployerAddress: this.normalizeAddress(r.creator_address),
+      topNonContractHolderPct: holderConcentration?.top1 ?? undefined,
+      top10NonContractHolderPct: holderConcentration?.top10 ?? undefined,
+      holderCount: this.nonNegativeInteger(r.holder_count),
     };
   }
 
@@ -414,5 +423,25 @@ export class GoPlusService {
       .reduce((sum, h) => sum + parseFloat(h.percent ?? '0'), 0);
 
     return lockedPct >= LP_LOCK_THRESHOLD;
+  }
+
+  private calcHolderConcentration(holders?: GoPlusHolder[]): { top1: number; top10: number } | null {
+    if (!holders || holders.length === 0) return null;
+    const fractions = holders
+      .filter((holder) => {
+        const address = (holder.address ?? '').toLowerCase();
+        const isContract = holder.is_contract === 1 || holder.is_contract === '1';
+        return !isContract && !DEAD_TOKEN_ADDRESSES.has(address);
+      })
+      .map((holder) => Number(holder.percent))
+      .filter((fraction) => Number.isFinite(fraction) && fraction >= 0 && fraction <= 1)
+      .sort((a, b) => b - a);
+    if (fractions.length === 0) return null;
+    return { top1: fractions[0], top10: fractions.slice(0, 10).reduce((sum, value) => sum + value, 0) };
+  }
+
+  private nonNegativeInteger(value?: string): number | undefined {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 0 ? n : undefined;
   }
 }

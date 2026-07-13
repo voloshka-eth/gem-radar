@@ -62,7 +62,9 @@ describe('PaperService', () => {
   const prismaMock = {
     paperPosition: {
       findFirst: jest.fn(),
+      findMany: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
     },
     paperEvent: {
       create: jest.fn(),
@@ -70,9 +72,13 @@ describe('PaperService', () => {
   };
   const fileLoggerMock = {
     logPaperEntry: jest.fn(),
+    logTakeCohortDecision: jest.fn(),
   };
   const gemScreenMock = {
     screenPosition: jest.fn(),
+  };
+  const liquidityVerifierMock = {
+    verify: jest.fn(),
   };
 
   beforeEach(() => {
@@ -90,7 +96,7 @@ describe('PaperService', () => {
 
   it('defaults candidate entries to immediate paper fills when no detection delay is configured', async () => {
     const config = { get: jest.fn(() => undefined) } as unknown as ConfigService;
-    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any);
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any, liquidityVerifierMock as any);
 
     await service.recordEntry(buildCandidate());
 
@@ -110,13 +116,80 @@ describe('PaperService', () => {
 
   it('keeps the paper entry when the optional gem screen fails', async () => {
     const config = { get: jest.fn(() => undefined) } as unknown as ConfigService;
-    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any);
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any, liquidityVerifierMock as any);
     gemScreenMock.screenPosition.mockRejectedValueOnce(new Error('temporary RPC failure'));
 
     await expect(service.recordEntry(buildCandidate())).resolves.toBeUndefined();
 
     expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(1);
     expect(fileLoggerMock.logPaperEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it('queues Base/Ethereum candidates instead of treating discovery as a buy', async () => {
+    const config = {
+      get: jest.fn((key: string) => key === 'paper.takeCohortEnabled' ? true : undefined),
+    } as unknown as ConfigService;
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any, liquidityVerifierMock as any);
+
+    await service.recordEntry(buildCandidate());
+
+    expect(prismaMock.paperPosition.create.mock.calls[0][0].data).toMatchObject({
+      status: 'PENDING_CONFIRMATION',
+      detectionDelaySec: 600,
+      entryFeatures: expect.objectContaining({ takeCohort: 'PENDING_CONFIRMATION' }),
+    });
+    expect(fileLoggerMock.logPaperEntry).not.toHaveBeenCalled();
+    expect(fileLoggerMock.logTakeCohortDecision).toHaveBeenCalledWith(expect.objectContaining({
+      decision: 'PENDING', reason: 'awaiting_confirmation',
+    }));
+  });
+
+  it('opens a pending position only after its confirmation snapshot passes', async () => {
+    const now = new Date('2026-07-09T12:00:00.000Z');
+    const position = {
+      id: 'pending-1', runId: 'run-1', chain: 'ethereum', tokenAddress: '0xtoken', poolAddress: '0xpool', symbol: 'GEM',
+      liquidityModel: 'V2', firstSeenAt: new Date('2026-07-09T11:45:00.000Z'),
+      entryFeatures: {
+        takeCohort: 'PENDING_CONFIRMATION', confirmationDueAt: new Date('2026-07-09T11:55:00.000Z').toISOString(),
+        t0SpotPriceUsd: 0.001, t0ExecutableDepthUsd: 1_000, t0OnchainTvlUsd: 50_000, t0BuyTaxPct: 0,
+        liquidityModel: 'V2', finalScore: 75, band: 'candidate', scoreConfidence: 0.5,
+      },
+      token: { decimals: 18 },
+      pool: { poolAddress: '0xpool', dex: 'uniswap_v2', token0: '0xtoken', token1: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', quoteAsset: 'WETH' },
+    };
+    prismaMock.paperPosition.findMany.mockResolvedValue([position]);
+    prismaMock.paperPosition.update.mockResolvedValue({});
+    liquidityVerifierMock.verify.mockResolvedValue({ ...buildCandidate().liq, spotPriceUsd: 0.0011, onchainTvlUsd: 45_000 });
+    const config = {
+      get: jest.fn((key: string) => key === 'paper.takeCohortEnabled' ? true : undefined),
+    } as unknown as ConfigService;
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any, liquidityVerifierMock as any);
+
+    await expect(service.processPendingConfirmations()).resolves.toEqual({ confirmed: 1, rejected: 0, deferred: 0 });
+
+    expect(prismaMock.paperPosition.update.mock.calls[0][0].data).toMatchObject({ status: 'OPEN', openedAt: now });
+    expect(prismaMock.paperEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ type: 'BUY' }) }));
+    expect(fileLoggerMock.logPaperEntry).toHaveBeenCalledWith(expect.objectContaining({ entered: 'true' }));
+  });
+
+  it('keeps a pending position pending when the confirmation read is unavailable', async () => {
+    prismaMock.paperPosition.findMany.mockResolvedValue([{
+      id: 'pending-1', runId: 'run-1', chain: 'ethereum', tokenAddress: '0xtoken', poolAddress: '0xpool', symbol: 'GEM',
+      liquidityModel: 'V2', firstSeenAt: new Date('2026-07-09T11:45:00.000Z'),
+      entryFeatures: { confirmationDueAt: new Date('2026-07-09T11:55:00.000Z').toISOString() },
+      token: { decimals: 18 },
+      pool: { poolAddress: '0xpool', dex: 'uniswap_v2', token0: '0xtoken', token1: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', quoteAsset: 'WETH' },
+    }]);
+    liquidityVerifierMock.verify.mockRejectedValueOnce(new Error('RPC unavailable'));
+    const config = { get: jest.fn((key: string) => key === 'paper.takeCohortEnabled' ? true : undefined) } as unknown as ConfigService;
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any, liquidityVerifierMock as any);
+
+    await expect(service.processPendingConfirmations()).resolves.toEqual({ confirmed: 0, rejected: 0, deferred: 1 });
+
+    expect(prismaMock.paperPosition.update).not.toHaveBeenCalled();
+    expect(fileLoggerMock.logTakeCohortDecision).toHaveBeenCalledWith(expect.objectContaining({
+      decision: 'DEFERRED', reason: 'confirmation_read_unavailable',
+    }));
   });
 
 });

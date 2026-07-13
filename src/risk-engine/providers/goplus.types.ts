@@ -6,6 +6,13 @@ export interface GoPlusLpHolder {
   tag?: string;      // 'Dead Wallet', 'Burned', 'Unicrypt', 'Team Finance', etc.
 }
 
+export interface GoPlusHolder {
+  address?: string;
+  percent?: string; // decimal fraction of supply, e.g. "0.82"
+  is_contract?: string | number;
+  tag?: string;
+}
+
 /** Subset of GoPlus token_security response fields used by M2A. */
 export interface GoPlusTokenResult {
   is_open_source?: string;              // "1" | "0"
@@ -32,7 +39,7 @@ export interface GoPlusTokenResult {
   holder_count?: string;
   lp_holders?: GoPlusLpHolder[];
   dex?: unknown[];
-  holders?: unknown[];
+  holders?: GoPlusHolder[];
 }
 
 export interface GoPlusApiResponse {

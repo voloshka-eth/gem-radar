@@ -7,6 +7,10 @@ import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
 import type { CandidateResult, ResearchCandidatePaperResult } from './paper.types';
 import { modelEntry, slipForSize, EntryParams } from './fills';
 import { GemScreenService } from '../gem/gem-screen.service';
+import { LiquidityVerificationService } from '../onchain/liquidity-verification.service';
+import { QUOTE_ASSET_MAP, type CandidatePool, type SupportedChain } from '../collector/collector.types';
+import type { LiquidityCheckResult } from '../onchain/onchain.types';
+import { assessTakeCohortConfirmation, type TakeCohortBaseline, type TakeCohortParams } from './take-cohort';
 
 /** A tax value may arrive as a fraction (0.05) or a percent (5). Normalize to a fraction. */
 export function taxFraction(t: number | null | undefined): number {
@@ -33,6 +37,7 @@ export class PaperService {
     private readonly prisma: PrismaService,
     private readonly fileLogger: FileLoggerService,
     private readonly gemScreen: GemScreenService,
+    private readonly liquidityVerifier: LiquidityVerificationService,
   ) {}
 
   async recordEntry(c: CandidateResult): Promise<void> {
@@ -47,6 +52,11 @@ export class PaperService {
     });
     if (existing) {
       this.logger.debug(`Paper entry skipped (position exists): ${pool.chain}:${token.tokenAddress}`);
+      return;
+    }
+
+    if (this.shouldQueueForTakeConfirmation(pool.chain, riskCohort)) {
+      await this.queueTakeConfirmation(c, riskCohort);
       return;
     }
 
@@ -89,6 +99,7 @@ export class PaperService {
       deployerBlocklisted: token.deployerBlocklisted ?? null,
       riskCohort,
       experimentalSafety: c.experimentalSafety ?? null,
+      discoverySource: pool.source,
     };
 
     const status = fill.entered ? 'OPEN' : 'NOT_ENTERED';
@@ -207,12 +218,246 @@ export class PaperService {
       lp_locked: '',
       lp_lock_source: '',
       lp_lock_fraction: '',
+      discovery_source: pool.source,
+      risk_cohort: riskCohort,
     });
 
     this.logger.log(
       `Paper entry [${riskCohort}]: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) ` +
       `${fill.entered ? `OPEN size=$${sizeUsd} effPx=${fill.effectivePriceUsd?.toExponential(4)} slip=${((fill.slipPct ?? 0) * 100).toFixed(2)}%` : `NOT_ENTERED (${fill.reason})`}`,
     );
+  }
+
+  /** Resolve due Base/Ethereum hypotheses into actual paper buys or explicit rejects. */
+  async processPendingConfirmations(): Promise<{ confirmed: number; rejected: number; deferred: number }> {
+    if (!(this.config.get<boolean>('paper.takeCohortEnabled') ?? false)) {
+      return { confirmed: 0, rejected: 0, deferred: 0 };
+    }
+
+    const pending = await this.prisma.paperPosition.findMany({
+      where: { status: 'PENDING_CONFIRMATION' },
+      include: { pool: true, token: true },
+      orderBy: { firstSeenAt: 'asc' },
+    });
+    let confirmed = 0;
+    let rejected = 0;
+    let deferred = 0;
+
+    for (const position of pending) {
+      const features = this.features(position.entryFeatures);
+      const dueAt = this.dateFeature(features.confirmationDueAt);
+      if (!dueAt || dueAt.getTime() > Date.now()) {
+        deferred++;
+        continue;
+      }
+
+      const pool = this.toVerificationPool(position.chain as SupportedChain, position.pool);
+      const current = pool
+        ? await this.liquidityVerifier.verify(pool, position.token?.decimals ?? undefined).catch((err) => {
+            this.logger.warn(`Take confirmation read failed for ${position.chain}:${position.tokenAddress}: ${(err as Error).message}`);
+            return null;
+          })
+        : null;
+      // An RPC outage is not adverse token evidence. Keep the hypothesis pending and
+      // retry it on the next evaluator run instead of manufacturing a rejection.
+      if (!current) {
+        this.logTakeDecision(position, features, 'DEFERRED', 'confirmation_read_unavailable', null, {
+          priceMultiple: null,
+          liquidityRetention: null,
+        });
+        deferred++;
+        continue;
+      }
+      const baseline: TakeCohortBaseline = {
+        spotPriceUsd: this.numberFeature(features.t0SpotPriceUsd),
+        executableDepthUsd: this.numberFeature(features.t0ExecutableDepthUsd),
+        onchainTvlUsd: this.numberFeature(features.t0OnchainTvlUsd),
+        liquidityModel: String(features.liquidityModel ?? position.liquidityModel),
+      };
+      const decision = assessTakeCohortConfirmation(baseline, current, this.takeCohortParams());
+
+      if (!decision.confirmed) {
+        const now = new Date();
+        await this.prisma.paperPosition.update({
+          where: { id: position.id },
+          data: {
+            status: 'NOT_ENTERED', notEnteredReason: decision.reason, lastEvalAt: now,
+            priceNowUsd: current?.spotPriceUsd ?? null, onchainLiqNowUsd: current?.onchainTvlUsd ?? null,
+            entryFeatures: {
+              ...features, takeCohort: 'REJECTED', confirmationDecisionAt: now.toISOString(),
+              confirmationReason: decision.reason, confirmationPriceMultiple: decision.priceMultiple,
+              confirmationLiquidityRetention: decision.liquidityRetention,
+            } as Prisma.InputJsonValue,
+          },
+        });
+        await this.prisma.paperEvent.create({
+          data: { positionId: position.id, ts: now, type: 'NOT_ENTERED', price: current?.spotPriceUsd ?? 0, note: decision.reason },
+        });
+        this.logTakeDecision(position, features, 'REJECTED', decision.reason, current, decision);
+        rejected++;
+        continue;
+      }
+
+      const opened = await this.openConfirmedPosition(position, features, current, decision);
+      if (opened) confirmed++;
+      else rejected++;
+    }
+    return { confirmed, rejected, deferred };
+  }
+
+  private shouldQueueForTakeConfirmation(chain: SupportedChain, riskCohort: string): boolean {
+    const enabled = this.config.get<boolean>('paper.takeCohortEnabled') ?? false;
+    const chains = this.config.get<string[]>('paper.takeCohortChains') ?? ['ethereum', 'base'];
+    return enabled && riskCohort === 'CONTRACT_SAFE' && chains.includes(chain);
+  }
+
+  private async queueTakeConfirmation(c: CandidateResult, riskCohort: string): Promise<void> {
+    const { pool, token, liq, score, ageDays, tokenId, poolId, runId, buyTax } = c;
+    const firstSeenAt = new Date();
+    const delaySec = Math.max(0, this.config.get<number>('paper.takeConfirmationDelaySec') ?? 600);
+    const confirmationDueAt = new Date(firstSeenAt.getTime() + delaySec * 1000);
+    const features = {
+      liquidityModel: liq.liquidityModel, onchainTvlUsd: liq.onchainTvlUsd, slip1000: liq.slip1000, ageDays,
+      fdvUsd: pool.fdvUsd ?? null, divergenceScore: score.divergenceScore, finalScore: score.finalScore,
+      liquidityScore: score.liquidityScore, depthScore: score.depthScore, ageScore: score.ageScore,
+      tractionScore: score.tractionScore, deployerReputationScore: score.deployerReputationScore,
+      scoreConfidence: score.scoreConfidence, band: score.band, deployerDeploymentsCount: token.deployerDeploymentsCount ?? null,
+      deployerRugLikeCount: token.deployerRugLikeCount ?? null, deployerRiskScore: token.deployerRiskScore ?? null,
+      deployerBlocklisted: token.deployerBlocklisted ?? null, riskCohort, experimentalSafety: c.experimentalSafety ?? null,
+      discoverySource: pool.source,
+      takeCohort: 'PENDING_CONFIRMATION', confirmationDueAt: confirmationDueAt.toISOString(),
+      t0SpotPriceUsd: liq.spotPriceUsd, t0ExecutableDepthUsd: liq.executableDepthUsd,
+      t0OnchainTvlUsd: liq.onchainTvlUsd, t0BuyTaxPct: taxFraction(buyTax),
+    };
+    try {
+      const created = await this.prisma.paperPosition.create({
+        data: {
+          runId, chain: pool.chain, tokenId, poolId, tokenAddress: token.tokenAddress, poolAddress: pool.poolAddress,
+          symbol: token.symbol ?? null, liquidityModel: liq.liquidityModel, firstSeenAt, detectionDelaySec: delaySec,
+          openedAt: firstSeenAt, sizeUsd: this.config.get<number>('paper.positionSizeUsd') ?? 20,
+          entryPriceUsd: liq.spotPriceUsd ?? null, entryFeatures: features as Prisma.InputJsonValue,
+          status: 'PENDING_CONFIRMATION', maxMultipleObserved: null, maxDrawdownObserved: null,
+        },
+      });
+      await this.prisma.paperEvent.create({
+        data: { positionId: created.id, ts: firstSeenAt, type: 'PENDING_CONFIRMATION', price: liq.spotPriceUsd ?? 0, note: `due ${confirmationDueAt.toISOString()}` },
+      });
+      this.logTakeDecision({ ...created, runId, chain: pool.chain, tokenAddress: token.tokenAddress, symbol: token.symbol, poolAddress: pool.poolAddress, firstSeenAt }, features, 'PENDING', 'awaiting_confirmation', liq, { priceMultiple: null, liquidityRetention: null });
+      this.logger.log(`Paper take cohort pending: ${pool.chain}:${token.tokenAddress} (${token.symbol ?? '?'}) due=${confirmationDueAt.toISOString()}`);
+    } catch (err) {
+      this.logger.warn(`Take cohort DB write failed (${pool.chain}:${token.tokenAddress}): ${(err as Error).message}`);
+    }
+  }
+
+  private async openConfirmedPosition(position: any, features: Record<string, unknown>, liq: LiquidityCheckResult, decision: { reason: string; priceMultiple: number | null; liquidityRetention: number | null }): Promise<boolean> {
+    const sizeUsd = this.config.get<number>('paper.positionSizeUsd') ?? 20;
+    const sandwichPct = this.config.get<number>('paper.sandwichPct') ?? 0.01;
+    const gasUsd = this.config.get<number>('paper.gasUsd') ?? 1.5;
+    const maxEntrySlip = this.config.get<number>('paper.maxEntrySlipPct') ?? 0.5;
+    const buyTaxPct = this.numberFeature(features.t0BuyTaxPct) ?? 0;
+    const fill = modelEntry(liq.spotPriceUsd ?? 0, slipForSize(sizeUsd, liq), { sizeUsd, sandwichPct, gasUsd, buyTaxPct, maxEntrySlipPct: maxEntrySlip });
+    const now = new Date();
+    if (!fill.entered || fill.tokensBought == null) {
+      const reason = fill.reason ?? 'confirmation_entry_unfillable';
+      await this.prisma.paperPosition.update({ where: { id: position.id }, data: { status: 'NOT_ENTERED', notEnteredReason: reason, lastEvalAt: now } });
+      await this.prisma.paperEvent.create({ data: { positionId: position.id, ts: now, type: 'NOT_ENTERED', price: liq.spotPriceUsd ?? 0, note: reason } });
+      this.logTakeDecision(position, features, 'REJECTED', reason, liq, decision);
+      return false;
+    }
+    const nextFeatures = {
+      ...features, takeCohort: 'CONFIRMED', confirmationDecisionAt: now.toISOString(),
+      confirmationReason: decision.reason, confirmationPriceMultiple: decision.priceMultiple,
+      confirmationLiquidityRetention: decision.liquidityRetention,
+    };
+    await this.prisma.paperPosition.update({
+      where: { id: position.id },
+      data: {
+        status: 'OPEN', openedAt: now, detectionDelaySec: Math.round((now.getTime() - position.firstSeenAt.getTime()) / 1000),
+        entryPriceUsd: liq.spotPriceUsd ?? null, entryPriceEffectiveUsd: fill.effectivePriceUsd, modeledSlippagePct: fill.slipPct,
+        modeledSandwichPct: sandwichPct, modeledGasUsd: gasUsd, modeledBuyTaxPct: buyTaxPct, tokensBought: fill.tokensBought,
+        onchainLiqEntryUsd: liq.onchainTvlUsd ?? null, entryFeatures: nextFeatures as Prisma.InputJsonValue,
+        notEnteredReason: null, maxMultipleObserved: 1, maxDrawdownObserved: 0,
+      },
+    });
+    await this.prisma.paperEvent.create({
+      data: { positionId: position.id, ts: now, type: 'BUY', price: fill.effectivePriceUsd ?? 0, multiple: 1, fraction: 1, tokens: fill.tokensBought, usd: -sizeUsd, slipPct: fill.slipPct, note: 'paper entry after take-cohort confirmation (pessimistic fill)' },
+    });
+    this.logPaperEntryFromPosition(position, features, liq, fill, now, sandwichPct, gasUsd, buyTaxPct);
+    this.logTakeDecision(position, features, 'CONFIRMED', decision.reason, liq, decision);
+    if (this.config.get<boolean>('gem.autoScreenEnabled') ?? true) {
+      await this.gemScreen.screenPosition({
+        chain: position.chain, tokenAddress: position.tokenAddress, poolAddress: position.poolAddress,
+        symbol: position.symbol ?? null, liquidityModel: liq.liquidityModel,
+        deployerAddress: position.token?.deployerAddress ?? null, firstSeenAt: position.firstSeenAt,
+        entryFdvUsd: this.numberFeature(features.fdvUsd), entryPriceUsd: fill.effectivePriceUsd,
+        entryLiquidityUsd: liq.onchainTvlUsd ?? null,
+      }).catch((err) => this.logger.warn(`Gem screen failed for ${position.chain}:${position.tokenAddress}: ${(err as Error).message}`));
+    }
+    this.logger.log(`Paper take cohort confirmed: ${position.chain}:${position.tokenAddress} (${position.symbol ?? '?'})`);
+    return true;
+  }
+
+  private takeCohortParams(): TakeCohortParams {
+    return {
+      minPriceMultiple: this.config.get<number>('paper.takeMinPriceMultiple') ?? 1,
+      minExecutableDepthUsd: this.config.get<number>('paper.takeMinExecutableDepthUsd') ?? 100,
+      minLiquidityRetention: this.config.get<number>('paper.takeMinLiquidityRetention') ?? 0.8,
+      minV2OnchainTvlUsd: this.config.get<number>('paper.takeMinV2OnchainTvlUsd') ?? 5_000,
+    };
+  }
+
+  private toVerificationPool(chain: SupportedChain, pool: any): CandidatePool | null {
+    if (!pool) return null;
+    const quotes = QUOTE_ASSET_MAP[chain] ?? {};
+    const quote = [pool.token0, pool.token1].find((address: string) => quotes[address.toLowerCase()] != null);
+    if (!quote) return null;
+    return {
+      chain, poolAddress: pool.poolAddress, dex: pool.dex, token0Address: pool.token0, token1Address: pool.token1,
+      quoteAsset: pool.quoteAsset, quoteAssetAddress: quote.toLowerCase(),
+      v4Metadata: this.v4MetadataFromStorage(pool.v4Metadata), source: 'paper-take-confirmation',
+    };
+  }
+
+  private features(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {}; }
+  private numberFeature(value: unknown): number | null { const n = typeof value === 'number' ? value : Number(value); return Number.isFinite(n) ? n : null; }
+  private dateFeature(value: unknown): Date | null { const date = typeof value === 'string' ? new Date(value) : null; return date && Number.isFinite(date.getTime()) ? date : null; }
+  private formatNumber(value: number | null): string { return value != null && Number.isFinite(value) ? String(value) : ''; }
+
+  private v4MetadataFromStorage(value: unknown): CandidatePool['v4Metadata'] | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const currency0 = typeof raw.currency0 === 'string' ? raw.currency0 : null;
+    const currency1 = typeof raw.currency1 === 'string' ? raw.currency1 : null;
+    const hooks = typeof raw.hooks === 'string' ? raw.hooks : null;
+    const fee = Number(raw.fee);
+    const tickSpacing = Number(raw.tickSpacing);
+    try {
+      const sqrtPriceX96 = typeof raw.sqrtPriceX96 === 'string' ? BigInt(raw.sqrtPriceX96) : null;
+      if (!currency0 || !currency1 || !hooks || !Number.isFinite(fee) || !Number.isFinite(tickSpacing) || sqrtPriceX96 == null) return undefined;
+      return { currency0, currency1, hooks, fee, tickSpacing, sqrtPriceX96 };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private logTakeDecision(position: any, features: Record<string, unknown>, decision: string, reason: string, liq: LiquidityCheckResult | null, metrics: { priceMultiple: number | null; liquidityRetention: number | null }): void {
+    this.fileLogger.logTakeCohortDecision({
+      ts: new Date().toISOString(), run_id: position.runId ?? '', schema_version: CSV_SCHEMA_VERSION, decision, reason,
+      chain: position.chain, token_address: position.tokenAddress, symbol: position.symbol ?? '', pool_address: position.poolAddress,
+      first_seen_at: position.firstSeenAt.toISOString(), confirmation_due_at: String(features.confirmationDueAt ?? ''), decided_at: new Date().toISOString(),
+      baseline_price_usd: this.formatNumber(this.numberFeature(features.t0SpotPriceUsd)), current_price_usd: this.formatNumber(liq?.spotPriceUsd ?? null), price_multiple: this.formatNumber(metrics.priceMultiple),
+      baseline_onchain_tvl_usd: this.formatNumber(this.numberFeature(features.t0OnchainTvlUsd)), current_onchain_tvl_usd: this.formatNumber(liq?.onchainTvlUsd ?? null), liquidity_retention: this.formatNumber(metrics.liquidityRetention),
+      current_executable_depth_usd: this.formatNumber(liq?.executableDepthUsd ?? null), final_score: this.formatNumber(this.numberFeature(features.finalScore)), band: String(features.band ?? ''), discovery_source: String(features.discoverySource ?? ''),
+    });
+  }
+
+  private logPaperEntryFromPosition(position: any, features: Record<string, unknown>, liq: LiquidityCheckResult, fill: ReturnType<typeof modelEntry>, openedAt: Date, sandwichPct: number, gasUsd: number, buyTaxPct: number): void {
+    this.fileLogger.logPaperEntry({
+      ts: new Date().toISOString(), run_id: position.runId ?? '', schema_version: CSV_SCHEMA_VERSION, chain: position.chain, token_address: position.tokenAddress, symbol: position.symbol ?? '', pool_address: position.poolAddress,
+      liquidity_model: liq.liquidityModel, first_seen_at: position.firstSeenAt.toISOString(), detection_delay_sec: String(Math.round((openedAt.getTime() - position.firstSeenAt.getTime()) / 1000)), opened_at: openedAt.toISOString(),
+      size_usd: (this.config.get<number>('paper.positionSizeUsd') ?? 20).toFixed(2), spot_price_usd: this.formatNumber(liq.spotPriceUsd), entry_price_effective_usd: this.formatNumber(fill.effectivePriceUsd), slippage_pct: this.formatNumber(fill.slipPct), sandwich_pct: sandwichPct.toFixed(6), gas_usd: gasUsd.toFixed(2), buy_tax_pct: buyTaxPct.toFixed(6), tokens_bought: this.formatNumber(fill.tokensBought), onchain_liq_entry_usd: this.formatNumber(liq.onchainTvlUsd), entered: 'true', not_entered_reason: '',
+      final_score: this.formatNumber(this.numberFeature(features.finalScore)), band: String(features.band ?? ''), score_confidence: this.formatNumber(this.numberFeature(features.scoreConfidence)), deployer_address: position.token?.deployerAddress ?? '', deployer_deployments_count: this.formatNumber(this.numberFeature(features.deployerDeploymentsCount)), deployer_rug_count: this.formatNumber(this.numberFeature(features.deployerRugLikeCount)), lp_locked: '', lp_lock_source: '', lp_lock_fraction: '', discovery_source: String(features.discoverySource ?? ''), risk_cohort: String(features.riskCohort ?? 'CONTRACT_SAFE'),
+    });
   }
 
   async recordResearchEntry(c: ResearchCandidatePaperResult): Promise<void> {

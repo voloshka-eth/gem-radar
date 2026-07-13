@@ -17,6 +17,7 @@ import { modelExit, slipForSize } from './fills';
 import { taxFraction } from './paper.service';
 import type { EvalViewRow } from './paper.types';
 import { DeployerReputationService } from '../deployer/deployer-reputation.service';
+import { PaperService } from './paper.service';
 
 const num = (d: unknown): number | null => (d == null ? null : Number(d));
 const DEFAULT_PRICE_READ_FAILURE_RUG_THRESHOLD = 3;
@@ -55,6 +56,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     private readonly riskEngine: RiskEngineService,
     private readonly geckoTerminal: GeckoTerminalService,
     private readonly deployerReputation: DeployerReputationService,
+    private readonly paper: PaperService,
   ) {}
 
   onModuleInit(): void {
@@ -95,7 +97,8 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       const result = await this.evaluateOpenPositions();
       this.logger.log(
         `Scheduled paper eval done: evaluated ${result.evaluated}/${result.openTotal}, ` +
-        `closed=${result.closed}, deferred=${result.deferred}`,
+        `closed=${result.closed}, deferred=${result.deferred}, ` +
+        `takeConfirmed=${result.takeConfirmed}, takeRejected=${result.takeRejected}`,
       );
     } catch (err) {
       this.logger.error(`Scheduled paper eval failed: ${(err as Error).message}`);
@@ -112,24 +115,60 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     closed: number;
     deployersRefreshed: number;
     rugLikeTokens: number;
+    takeConfirmed: number;
+    takeRejected: number;
+    takeDeferred: number;
   }> {
     const runId = `eval-${randomUUID().slice(0, 8)}`;
+    const take = await this.paper.processPendingConfirmations();
     const evalMaxOpenPositions = this.config.get<number>('paper.evalMaxOpenPositions');
     const openTotal = await this.prisma.paperPosition.count({
       where: { status: 'OPEN' },
     });
-    const open = await this.prisma.paperPosition.findMany({
+    const youngWindowSec = this.config.get<number>('paper.evalYoungWindowSec');
+    const youngIntervalMs = this.config.get<number>('paper.evalYoungIntervalMs');
+    const matureIntervalMs = this.config.get<number>('paper.evalMatureIntervalMs');
+    const cadenceEnabled = youngWindowSec != null && youngIntervalMs != null && matureIntervalMs != null;
+    const openRows = await this.prisma.paperPosition.findMany({
       where: { status: 'OPEN' },
       include: { pool: true, token: true },
       orderBy: { openedAt: 'asc' },
-      ...(evalMaxOpenPositions && evalMaxOpenPositions > 0
+      ...(!cadenceEnabled && evalMaxOpenPositions && evalMaxOpenPositions > 0
         ? { take: Math.floor(evalMaxOpenPositions) }
         : {}),
     });
+    const nowMs = Date.now();
+    const dueRows = cadenceEnabled
+      ? openRows.filter((position) => {
+          if (!position.lastEvalAt) return true;
+          const openedAt = position.openedAt?.getTime?.() ?? position.firstSeenAt.getTime();
+          const ageMs = Math.max(0, nowMs - openedAt);
+          const cadenceMs = ageMs <= youngWindowSec! * 1000 ? youngIntervalMs! : matureIntervalMs!;
+          return nowMs - position.lastEvalAt.getTime() >= cadenceMs;
+      })
+      : openRows;
+    if (cadenceEnabled) {
+      dueRows.sort((a, b) => {
+        const aOpened = a.openedAt?.getTime?.() ?? a.firstSeenAt.getTime();
+        const bOpened = b.openedAt?.getTime?.() ?? b.firstSeenAt.getTime();
+        const aYoung = nowMs - aOpened <= youngWindowSec! * 1000;
+        const bYoung = nowMs - bOpened <= youngWindowSec! * 1000;
+        if (aYoung !== bYoung) return aYoung ? -1 : 1;
+        return aOpened - bOpened;
+      });
+    }
+    const open = evalMaxOpenPositions && evalMaxOpenPositions > 0
+      ? dueRows.slice(0, Math.floor(evalMaxOpenPositions))
+      : dueRows;
     const deferred = Math.max(0, openTotal - open.length);
     if (deferred > 0) {
+      const deferReason = cadenceEnabled && evalMaxOpenPositions && evalMaxOpenPositions > 0
+        ? 'cadence/cap'
+        : cadenceEnabled
+          ? 'cadence'
+          : 'cap';
       this.logger.warn(
-        `Paper eval capped: evaluating ${open.length}/${openTotal} OPEN positions; ` +
+        `Paper eval deferred (${deferReason}): evaluating ${open.length}/${openTotal} OPEN positions; ` +
         `${deferred} deferred until next run`,
       );
     }
@@ -201,7 +240,6 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         liquidityGoneReadCount,
         lowLiquidityRead ? liqNow : null,
       );
-
       // RE-RUN sell simulation against current state (existing exit behavior unchanged).
       const { sellSimOk, sellTaxNow } = await this.reCheckSell(chain, pos.tokenAddress, pos.symbol ?? '');
 
@@ -241,6 +279,14 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         : !priceUnreadable && liqNow == null && status === 'alive'
           ? 'liquidity_unreadable'
         : status;
+      nextEntryFeatures = this.withSurvivalObservation(
+        nextEntryFeatures,
+        pos.openedAt ?? pos.firstSeenAt,
+        entryEff,
+        priceNow,
+        liq,
+        status,
+      );
 
       // ── Multiple / drawdown ───────────────────────────────────────────────────
       const currentMultiple = entryEff && priceNow != null ? priceNow / entryEff : null;
@@ -397,13 +443,23 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       closed,
       deployersRefreshed: reputation.deployersUpdated,
       rugLikeTokens: reputation.rugLikeTokens,
+      takeConfirmed: take.confirmed,
+      takeRejected: take.rejected,
+      takeDeferred: take.deferred,
     };
   }
 
   // Re-verify the pool's CURRENT on-chain liquidity/price. Includes a failure reason.
   private async reReadOnchain(
     chain: SupportedChain,
-    pool: { poolAddress: string; dex: string; token0: string; token1: string; quoteAsset: string } | null,
+    pool: {
+      poolAddress: string;
+      dex: string;
+      token0: string;
+      token1: string;
+      quoteAsset: string;
+      v4Metadata?: unknown;
+    } | null,
     decimals: number | undefined,
   ): Promise<OnchainReadResult> {
     if (!pool) return { liq: null, error: 'missing_pool' };
@@ -418,6 +474,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       token1Address: pool.token1,
       quoteAsset: pool.quoteAsset,
       quoteAssetAddress: quoteAddr.toLowerCase(),
+      v4Metadata: this.v4MetadataFromStorage(pool.v4Metadata),
       source: 'paper-eval',
     };
     try {
@@ -461,6 +518,23 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     return this.readCounter(value);
   }
 
+  private v4MetadataFromStorage(value: unknown): CandidatePool['v4Metadata'] | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const currency0 = typeof raw.currency0 === 'string' ? raw.currency0 : null;
+    const currency1 = typeof raw.currency1 === 'string' ? raw.currency1 : null;
+    const hooks = typeof raw.hooks === 'string' ? raw.hooks : null;
+    const fee = Number(raw.fee);
+    const tickSpacing = Number(raw.tickSpacing);
+    try {
+      const sqrtPriceX96 = typeof raw.sqrtPriceX96 === 'string' ? BigInt(raw.sqrtPriceX96) : null;
+      if (!currency0 || !currency1 || !hooks || !Number.isFinite(fee) || !Number.isFinite(tickSpacing) || sqrtPriceX96 == null) return undefined;
+      return { currency0, currency1, hooks, fee, tickSpacing, sqrtPriceX96 };
+    } catch {
+      return undefined;
+    }
+  }
+
   private readCounter(value: unknown): number {
     const n = Number(value);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
@@ -493,6 +567,42 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     } else {
       delete next.lastLowLiquidityUsd;
     }
+    return next as Prisma.InputJsonValue;
+  }
+
+  /**
+   * Record what happened ten minutes after the real t0 paper entry. This is
+   * deliberately observation-only: it never changes entry or exit decisions.
+   */
+  private withSurvivalObservation(
+    rawFeatures: unknown,
+    openedAt: Date | null,
+    entryPrice: number | null,
+    priceNow: number | null,
+    liq: LiquidityCheckResult | null,
+    status: string,
+  ): Prisma.InputJsonValue {
+    const next = this.entryFeaturesRecord(rawFeatures);
+    if (next.survival10mStatus != null || !(this.config.get<boolean>('paper.survivalObservationEnabled') ?? true)) {
+      return next as Prisma.InputJsonValue;
+    }
+    const delaySec = Math.max(0, this.config.get<number>('paper.survivalObservationDelaySec') ?? 600);
+    if (!openedAt || Date.now() - openedAt.getTime() < delaySec * 1000) {
+      return next as Prisma.InputJsonValue;
+    }
+    const priceMultiple = entryPrice && priceNow != null ? priceNow / entryPrice : null;
+    const entryLiquidity = Number(next.onchainTvlUsd);
+    const liquidityRetention = Number.isFinite(entryLiquidity) && entryLiquidity > 0 && liq?.onchainTvlUsd != null
+      ? liq.onchainTvlUsd / entryLiquidity
+      : null;
+    const depthUsd = liq?.executableDepthUsd ?? null;
+    const survived = status === 'alive' && priceMultiple != null && priceMultiple >= 1 &&
+      depthUsd != null && depthUsd >= 100 && (liquidityRetention == null || liquidityRetention >= 0.8);
+    next.survival10mStatus = survived ? 'SURVIVED' : status === 'alive' ? 'WEAK_OR_UNVERIFIED' : status.toUpperCase();
+    next.survival10mAt = new Date().toISOString();
+    next.survival10mPriceMultiple = priceMultiple;
+    next.survival10mLiquidityRetention = liquidityRetention;
+    next.survival10mExecutableDepthUsd = depthUsd;
     return next as Prisma.InputJsonValue;
   }
 

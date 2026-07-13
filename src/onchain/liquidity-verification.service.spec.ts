@@ -55,4 +55,38 @@ describe('LiquidityVerificationService physicality guard', () => {
       executableDepthUsd: 1000,
     });
   });
+
+  it('reads V4 gem decimals from the non-native currency', async () => {
+    const gem = '0x1111111111111111111111111111111111111111';
+    const native = '0x0000000000000000000000000000000000000000';
+    const weth = '0x4200000000000000000000000000000000000006';
+    const resolver = { resolveModel: jest.fn().mockResolvedValue({ model: 'V4' }) };
+    const v4 = {
+      readDecimals: jest.fn().mockResolvedValue(9),
+      readLiquidity: jest.fn().mockResolvedValue(quoterBackedRead),
+    };
+    service = new LiquidityVerificationService(resolver as any, {} as any, {} as any, v4 as any);
+
+    await service.verify({
+      chain: 'base',
+      poolAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      dex: 'Uniswap V4',
+      token0Address: native,
+      token1Address: gem,
+      quoteAsset: 'WETH',
+      quoteAssetAddress: weth,
+      source: 'test',
+      v4Metadata: {
+        currency0: native,
+        currency1: gem,
+        fee: 3000,
+        tickSpacing: 60,
+        hooks: native,
+        sqrtPriceX96: 2n ** 96n,
+      },
+    });
+
+    expect(v4.readDecimals).toHaveBeenCalledWith('base', gem);
+    expect(v4.readLiquidity).toHaveBeenCalledWith(expect.any(Object), 9);
+  });
 });

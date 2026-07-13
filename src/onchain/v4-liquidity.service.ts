@@ -63,6 +63,10 @@ const QUOTER_V4_ABI = [{
     { name: 'amountOut', type: 'uint256' },
     { name: 'gasEstimate', type: 'uint256' },
   ],
+}, {
+  type: 'error',
+  name: 'UnexpectedRevertBytes',
+  inputs: [{ name: 'revertData', type: 'bytes' }],
 }] as const;
 
 const DECIMALS_ABI = [{
@@ -128,7 +132,7 @@ export class V4LiquidityService {
     if (!poolManager || !quoter || !stateView) {
       throw new Error(`Incomplete V4 deployment config for ${pool.chain}`);
     }
-    const metadata = await this.getMetadata(client, pool.chain, poolId, poolManager);
+    const metadata = await this.getMetadata(client, pool.chain, poolId, poolManager, pool.v4Metadata);
     const quotePriceUsd = await this.priceService.getUsdPrice(pool.chain, pool.quoteAssetAddress);
     if (!quotePriceUsd) throw new Error(`DefiLlama price unavailable for ${pool.chain}:${pool.quoteAssetAddress}`);
 
@@ -168,11 +172,26 @@ export class V4LiquidityService {
     }
 
     const zeroForOne = gemIsToken0;
-    const slippages = await Promise.all(PROBE_SIZES_USD.map((sizeUsd) =>
+    const slip50 = await this.quoteSlippage(
+      client, quoter, metadata.key, zeroForOne,
+      PROBE_SIZES_USD[0], spotPriceUsd, gemDecimals, quoteDec, quotePriceUsd,
+    );
+    if (slip50 === null) {
+      return {
+        spotPriceUsd,
+        slip50: null,
+        slip100: null,
+        slip500: null,
+        slip1000: null,
+        executableDepthUsd: 0,
+      };
+    }
+    const remainingSlippages = await Promise.all(PROBE_SIZES_USD.slice(1).map((sizeUsd) =>
       this.quoteSlippage(client, quoter, metadata.key, zeroForOne,
         sizeUsd, spotPriceUsd, gemDecimals, quoteDec, quotePriceUsd),
     ));
-    const [slip50, slip100, slip500, slip1000] = slippages;
+    const slippages = [slip50, ...remainingSlippages];
+    const [slip100, slip500, slip1000] = remainingSlippages;
     let executableDepthUsd = 0;
     for (let i = PROBE_SIZES_USD.length - 1; i >= 0; i--) {
       if ((slippages[i] ?? 1) < MAX_SLIPPAGE_FOR_DEPTH) {
@@ -203,10 +222,26 @@ export class V4LiquidityService {
     chain: SupportedChain,
     poolId: `0x${string}`,
     poolManager: string,
+    discovered?: CandidatePool['v4Metadata'],
   ): Promise<PoolMetadata> {
     const cacheKey = `${chain}:${poolId.toLowerCase()}`;
     const cached = this.metadataCache.get(cacheKey);
     if (cached) return cached;
+
+    if (discovered) {
+      const metadata = {
+        key: {
+          currency0: discovered.currency0 as `0x${string}`,
+          currency1: discovered.currency1 as `0x${string}`,
+          fee: discovered.fee,
+          tickSpacing: discovered.tickSpacing,
+          hooks: discovered.hooks as `0x${string}`,
+        },
+        sqrtPriceX96: discovered.sqrtPriceX96,
+      };
+      this.metadataCache.set(cacheKey, metadata);
+      return metadata;
+    }
 
     const logs = await client.getLogs({
       address: poolManager as `0x${string}`,
@@ -256,8 +291,23 @@ export class V4LiquidityService {
       const actualOutUsd = rawToDecimalNumber(result[0], quoteDecimals) * quotePriceUsd;
       return 1 - actualOutUsd / sizeUsd;
     } catch (err) {
-      this.logger.debug(`V4 quoter failed for $${sizeUsd}: ${(err as Error).message}`);
+      this.logger.debug(this.quoteFailureMessage(err, sizeUsd, poolKey));
       return null;
     }
+  }
+
+  private quoteFailureMessage(err: unknown, sizeUsd: number, poolKey: PoolKey): string {
+    const message = err instanceof Error ? err.message : String(err);
+    const selector = message.includes('UnexpectedRevertBytes')
+      ? '0x6190b2b0'
+      : message.match(/signature:\s*(0x[0-9a-fA-F]{8})/s)?.[1]
+        ?? message.match(/data[:=]\s*(0x[0-9a-fA-F]{8})/i)?.[1]
+        ?? 'unknown';
+    const reason = selector === '0x6190b2b0'
+      ? 'underlying swap/hook reverted'
+      : message.split(/\r?\n/, 1)[0];
+    return `V4 quote $${sizeUsd} unavailable (${reason}, selector=${selector}) ` +
+      `pool=${poolKey.currency0}/${poolKey.currency1} fee=${poolKey.fee} ` +
+      `tickSpacing=${poolKey.tickSpacing} hooks=${poolKey.hooks}`;
   }
 }
