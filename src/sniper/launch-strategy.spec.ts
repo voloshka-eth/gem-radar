@@ -31,6 +31,22 @@ describe('launch sniper entry trigger', () => {
     expect(decision.snapshot.priceMomentum).toBeCloseTo(1.05);
   });
 
+  it('uses launch age to clear the fee window for an API-seeded launch', () => {
+    const state = launchState();
+    state.launchBlockNumber = 'api';
+    state.launchedAtMs = 1_000;
+    addTrade(state, trade('BUY', address(3), 3_000, 0.04, 1), config.windowMs);
+    addTrade(state, trade('BUY', address(4), 3_200, 0.05, 2), config.windowMs);
+    addTrade(state, trade('BUY', address(5), 3_400, 0.06, 3), config.windowMs);
+
+    const decision = evaluateEntryTrigger(state, 25_000, config);
+
+    expect(decision.snapshot.blocksSinceLaunch).toBe(8);
+    expect(decision.snapshot.buys).toBe(3);
+    expect(decision.triggered).toBe(true);
+    expect(decision.reasons).not.toContain('dynamic_fee_window');
+  });
+
   it('does not count creator buys as independent demand', () => {
     const state = launchState();
     addTrade(state, trade('BUY', CREATOR, 3_000, 1, 1), config.windowMs);

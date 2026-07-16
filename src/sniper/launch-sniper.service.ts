@@ -7,6 +7,7 @@ import { SniperJournalService } from './sniper-journal.service';
 import {
   EntryTriggerConfig,
   FourMemeEvent,
+  LaunchTradeEvent,
   LaunchState,
   PaperAction,
   PaperSniperConfig,
@@ -41,6 +42,9 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
   private readonly launches = new Map<string, LaunchState>();
   private readonly positions = new Map<string, SniperPaperPosition>();
   private readonly seenEventIds = new Set<string>();
+  // The API can announce a launch after its first on-chain swaps were already polled.
+  // Keep that short gap so a newly discovered token starts with the real early flow.
+  private readonly unmatchedTrades = new Map<string, LaunchTradeEvent[]>();
   private cursor: string | null = null;
   private interval: ReturnType<typeof setInterval> | null = null;
   private polling = false;
@@ -122,6 +126,7 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
       this.cursor = result.cursor;
       await this.evaluateOpenPositions(touchedTokens, Date.now());
       this.expireStaleLaunches(Date.now());
+      this.pruneUnmatchedTrades(Date.now());
       this.pruneLaunches();
       this.persistState();
       this.logHeartbeat(result, Date.now());
@@ -182,11 +187,30 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
         symbol: event.symbol,
         reason: blocked ? 'blocked_creator' : 'official_factory_launch',
       });
+      if (!blocked) {
+        const buffered = this.unmatchedTrades.get(key) ?? [];
+        this.unmatchedTrades.delete(key);
+        for (const trade of buffered) addTrade(state, trade, this.triggerConfig.windowMs);
+        if (buffered.length > 0) {
+          touchedTokens.add(key);
+          this.record('HOT_WATCH_REPLAYED_TRADES', {
+            token: state.token,
+            symbol: state.symbol,
+            trades: buffered.length,
+            buys: buffered.filter((trade) => trade.kind === 'BUY').length,
+            sells: buffered.filter((trade) => trade.kind === 'SELL').length,
+          });
+          await this.tryOpen(state, Date.now());
+        }
+      }
       return;
     }
 
     const state = this.launches.get(key);
-    if (!state) return;
+    if (!state) {
+      if (event.kind === 'BUY' || event.kind === 'SELL') this.bufferUnmatchedTrade(event);
+      return;
+    }
     touchedTokens.add(key);
     if (event.kind === 'TRADE_STOPPED') {
       await this.closeStoppedPosition(state, event.occurredAtMs);
@@ -400,6 +424,22 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
       if (this.launches.size <= this.maxTrackedLaunches) break;
       this.launches.delete(key);
       this.positions.delete(key);
+    }
+  }
+
+  private bufferUnmatchedTrade(event: LaunchTradeEvent): void {
+    const key = event.token.toLowerCase();
+    const trades = this.unmatchedTrades.get(key) ?? [];
+    trades.push(event);
+    this.unmatchedTrades.set(key, trades);
+  }
+
+  private pruneUnmatchedTrades(nowMs: number): void {
+    const expiresAtMs = nowMs - this.triggerConfig.maxAgeSec * 1_000;
+    for (const [key, trades] of this.unmatchedTrades) {
+      const recent = trades.filter((trade) => trade.occurredAtMs >= expiresAtMs);
+      if (recent.length === 0) this.unmatchedTrades.delete(key);
+      else this.unmatchedTrades.set(key, recent);
     }
   }
 }

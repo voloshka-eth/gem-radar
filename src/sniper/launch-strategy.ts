@@ -23,10 +23,15 @@ export function computeFlowSnapshot(
   minBlocksAfterLaunch = 0,
 ): FlowSnapshot {
   const cutoff = nowMs - windowMs;
+  const ageSec = Math.max(0, (nowMs - state.launchedAtMs) / 1000);
   const trades = state.trades.filter(
-    (trade) =>
-      trade.occurredAtMs >= cutoff &&
-      safeBlockDistance(state.launchBlockNumber, trade.blockNumber) >= minBlocksAfterLaunch,
+    (trade) => {
+      if (trade.occurredAtMs < cutoff) return false;
+      // API discovery has no creation-block number. The age gate below still
+      // enforces the anti-fee delay; do not discard every valid swap here.
+      if (state.launchBlockNumber === 'api') return trade.occurredAtMs >= state.launchedAtMs;
+      return safeBlockDistance(state.launchBlockNumber, trade.blockNumber) >= minBlocksAfterLaunch;
+    },
   );
   const creator = state.creator.toLowerCase();
   const externalBuys = trades.filter(
@@ -47,10 +52,17 @@ export function computeFlowSnapshot(
   const firstPrice = buyPrices[0] ?? null;
   const lastPrice = buyPrices.at(-1) ?? lastValidPrice(trades);
   const lastBlock = trades.at(-1)?.blockNumber ?? state.launchBlockNumber;
+  const onchainBlockDistance = safeBlockDistance(state.launchBlockNumber, lastBlock);
+  // API-discovered launches have no creation block, but still carry an authoritative
+  // creation timestamp. Estimate BSC blocks from age so the anti-sniper window
+  // expires instead of staying at zero forever.
+  const blocksSinceLaunch = onchainBlockDistance > 0 || state.launchBlockNumber !== 'api'
+    ? onchainBlockDistance
+    : Math.floor(ageSec / 3);
 
   return {
-    ageSec: Math.max(0, (nowMs - state.launchedAtMs) / 1000),
-    blocksSinceLaunch: safeBlockDistance(state.launchBlockNumber, lastBlock),
+    ageSec,
+    blocksSinceLaunch,
     buys: externalBuys.length,
     sells: sells.length,
     uniqueBuyers: buyerTotals.size,

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import axios, { AxiosInstance } from 'axios';
 import {
   createPublicClient,
   formatUnits,
@@ -37,17 +38,38 @@ export interface LogPollPlan {
   skippedRange?: { fromBlock: bigint; toBlock: bigint };
 }
 
+type FourMemeApiToken = {
+  tokenId?: number;
+  tokenAddress?: string;
+  userAddress?: string;
+  name?: string;
+  shortName?: string;
+  createDate?: string | number;
+};
+
+type FourMemeApiResponse = {
+  code?: number;
+  data?: FourMemeApiToken[];
+};
+
 @Injectable()
 export class FourMemeSourceService {
   private readonly client: PublicClient | null;
+  private readonly api: AxiosInstance;
   private readonly contractAddress: Address;
   private readonly initialLookbackBlocks: number;
   private readonly maxLogRangeBlocks: number;
   private readonly requestDelayMs: number;
+  private readonly rpcTimeoutMs: number;
+  private readonly apiSeedEnabled: boolean;
+  private readonly apiSeedIntervalMs: number;
+  private readonly apiSeedPageSize: number;
   private readonly confirmations: number;
+  private lastApiSeedAtMs = 0;
 
   constructor(config: ConfigService) {
     const rpcUrl = config.get<string>('launchSniper.bscRpcUrl') ?? '';
+    const apiBaseUrl = config.get<string>('launchSniper.fourMemeApiBaseUrl') ?? 'https://four.meme/meme-api/v1';
     this.contractAddress = (
       config.get<string>('launchSniper.fourMemeTokenManager') ?? FOUR_MEME_TOKEN_MANAGER2
     ) as Address;
@@ -60,13 +82,33 @@ export class FourMemeSourceService {
       0,
       config.get<number>('launchSniper.rpcRequestDelayMs') ?? 500,
     );
+    this.rpcTimeoutMs = Math.max(
+      1_000,
+      config.get<number>('launchSniper.rpcTimeoutMs') ?? 15_000,
+    );
+    this.apiSeedEnabled = config.get<boolean>('launchSniper.apiSeedEnabled') ?? true;
+    this.apiSeedIntervalMs = Math.max(
+      3_000,
+      config.get<number>('launchSniper.apiSeedIntervalMs') ?? 15_000,
+    );
+    this.apiSeedPageSize = Math.max(
+      1,
+      Math.min(100, config.get<number>('launchSniper.apiSeedPageSize') ?? 30),
+    );
     this.confirmations = config.get<number>('launchSniper.confirmations') ?? 1;
     this.client = rpcUrl
       ? createPublicClient({
           chain: bsc,
-          transport: http(rpcUrl, { retryCount: 0 }),
+          // A stalled public RPC must become a recorded poll error, not leave the
+          // single watcher permanently stuck before it can write a heartbeat.
+          transport: http(rpcUrl, { retryCount: 0, timeout: this.rpcTimeoutMs }),
         }) as unknown as PublicClient
       : null;
+    this.api = axios.create({
+      baseURL: apiBaseUrl,
+      timeout: this.rpcTimeoutMs,
+      headers: { Accept: 'application/json' },
+    });
   }
 
   isConfigured(): boolean {
@@ -100,10 +142,12 @@ export class FourMemeSourceService {
       const block = await client.getBlock({ blockNumber: BigInt(blockNumber) });
       blockTimes.set(blockNumber, Number(block.timestamp) * 1000);
     }
-    const events = rawLogs
+    const chainEvents = rawLogs
       .sort(compareLogs)
       .map((log) => this.decode(log, blockTimes))
       .filter((event): event is FourMemeEvent => event != null);
+    const apiEvents = await this.getApiSeedEvents();
+    const events = [...apiEvents, ...chainEvents].sort((a, b) => a.occurredAtMs - b.occurredAtMs);
     return {
       events,
       cursor: plan.toBlock.toString(),
@@ -118,6 +162,46 @@ export class FourMemeSourceService {
           }
         : undefined,
     };
+  }
+
+  private async getApiSeedEvents(): Promise<FourMemeEvent[]> {
+    const nowMs = Date.now();
+    if (!this.apiSeedEnabled || nowMs - this.lastApiSeedAtMs < this.apiSeedIntervalMs) return [];
+    this.lastApiSeedAtMs = nowMs;
+    try {
+      const response = await this.api.post<FourMemeApiResponse>('/public/token/search', {
+        type: 'NEW',
+        listType: 'NOR',
+        keyword: '',
+        status: 'PUBLISH',
+        sort: 'DESC',
+        pageIndex: 1,
+        pageSize: this.apiSeedPageSize,
+      });
+      if (response.data.code !== 0 || !Array.isArray(response.data.data)) return [];
+      return response.data.data.flatMap((token) => this.decodeApiSeed(token));
+    } catch {
+      // The chain watcher remains the primary source when the supplementary API is unavailable.
+      return [];
+    }
+  }
+
+  private decodeApiSeed(token: FourMemeApiToken): FourMemeEvent[] {
+    const tokenAddress = normaliseAddress(token.tokenAddress);
+    const creator = normaliseAddress(token.userAddress);
+    const occurredAtMs = Number(token.createDate);
+    if (!tokenAddress || !creator || !Number.isFinite(occurredAtMs) || occurredAtMs <= 0) return [];
+    return [{
+      kind: 'LAUNCH_CREATED',
+      id: `fourmeme-api:${token.tokenId ?? tokenAddress}`,
+      blockNumber: 'api',
+      occurredAtMs,
+      token: tokenAddress,
+      creator,
+      name: token.name ?? '',
+      symbol: token.shortName ?? '',
+      totalSupply: 1_000_000_000,
+    }];
   }
 
   async readSafety(token: SniperAddress): Promise<FourMemeSafetyState> {
@@ -190,8 +274,8 @@ export class FourMemeSourceService {
       };
     }
     if (log.eventName === 'TokenPurchase' || log.eventName === 'TokenSale') {
-      const tokenAmount = Number(formatUnits(asBigInt(log.args.tokenAmount), 18));
-      const quoteAmount = Number(formatUnits(asBigInt(log.args.etherAmount), 18));
+      const tokenAmount = Number(formatUnits(asBigInt(log.args.amount ?? log.args.tokenAmount), 18));
+      const quoteAmount = Number(formatUnits(asBigInt(log.args.cost ?? log.args.etherAmount), 18));
       return {
         kind: log.eventName === 'TokenPurchase' ? 'BUY' : 'SELL',
         id,
@@ -248,6 +332,11 @@ function asAddress(value: unknown): SniperAddress {
   const text = String(value ?? '').toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(text)) throw new Error(`Invalid event address: ${text}`);
   return text as SniperAddress;
+}
+
+function normaliseAddress(value: unknown): SniperAddress | null {
+  const text = String(value ?? '').toLowerCase();
+  return /^0x[0-9a-f]{40}$/.test(text) ? text as SniperAddress : null;
 }
 
 function asBigInt(value: unknown): bigint {
