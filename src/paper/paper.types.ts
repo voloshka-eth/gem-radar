@@ -13,8 +13,9 @@ export interface CandidateResult {
   poolId: string;
   runId: string;
   buyTax: number | null | undefined; // from the entry-time risk check (fraction or percent)
-  // Default is the normal CONTRACT_SAFE cohort. The Robinhood value is temporary,
-  // paper-only, and must never be mixed into the primary edge calculation.
+  // New Robinhood static-safe admissions use CONTRACT_SAFE and retain their
+  // provider limitation in experimentalSafety. The explicit Robinhood value is
+  // kept only so historical isolated rows remain readable.
   riskCohort?: 'CONTRACT_SAFE' | 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER' | 'CONTRACT_MINTABLE_RESEARCH' | 'CONTRACT_UNKNOWN_RESEARCH';
   experimentalSafety?: {
     passed: boolean;

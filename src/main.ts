@@ -15,7 +15,8 @@ async function bootstrap(): Promise<void> {
   logger.log(`Gem Radar running on port ${port}`);
   const config = app.get(ConfigService);
   logger.log(
-    `Runtime config: chains=${(config.get<string[]>('chain.enabledChains') ?? []).join(',')} ` +
+    `Runtime config: strategy=${config.get<string>('app.strategyMode') ?? 'unknown'} ` +
+    `chains=${(config.get<string[]>('chain.enabledChains') ?? []).join(',')} ` +
     `unknownResearch=${config.get<boolean>('collector.promoteCleanUnknownEnabled') ?? false} ` +
     `mintShadow=${config.get<boolean>('collector.contractRiskShadowEnabled') ?? false} ` +
     `evalIntervalMs=${config.get<number>('paper.evalIntervalMs') ?? 300000} ` +

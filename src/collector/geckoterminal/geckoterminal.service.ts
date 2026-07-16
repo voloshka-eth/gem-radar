@@ -82,6 +82,8 @@ export class GeckoTerminalService {
 
     const pageCount = Math.max(1, this.config.get<number>('collector.geckoTerminalPages') ?? 1);
     const results: CollectorResult[] = [];
+    let rawPoolCount = 0;
+    let discardedPoolCount = 0;
 
     try {
       for (let page = 1; page <= pageCount; page++) {
@@ -93,10 +95,15 @@ export class GeckoTerminalService {
         );
 
         const data = res.data;
+        rawPoolCount += (data.data ?? []).length;
         const includedMap = this.buildIncludedMap(data.included ?? []);
         for (const pool of data.data) {
           const result = this.normalise(chain, pool, includedMap);
-          if (result) results.push(result);
+          if (result) {
+            results.push(result);
+          } else {
+            discardedPoolCount += 1;
+          }
         }
 
         if ((data.data ?? []).length === 0) break;
@@ -109,7 +116,10 @@ export class GeckoTerminalService {
       return [];
     }
 
-    this.logger.debug(`GeckoTerminal ${path} fetched ${results.length} pools for ${chain} across ${pageCount} page(s)`);
+    this.logger.debug(
+      `GeckoTerminal ${path} ${chain}: raw=${rawPoolCount} normalised=${results.length} ` +
+        `discarded=${discardedPoolCount} requestedPages=${pageCount}`,
+    );
     return results;
   }
 

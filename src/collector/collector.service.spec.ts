@@ -295,10 +295,10 @@ describe('CollectorService', () => {
                 'scoring.minLiquidityUsd': 5_000,
                 'scoring.minFdvUsd': 10_000,
                 'scoring.maxFdvUsd': 50_000_000,
-                'collector.robinhoodExperimentalPaperEnabled': false,
-                'collector.robinhoodExperimentalMinDepthUsd': 100,
-                'collector.robinhoodExperimentalMinOnchainTvlUsd': 200,
-                'collector.robinhoodExperimentalMinScore': 50,
+                'collector.robinhoodPaperEnabled': false,
+                'collector.robinhoodMinDepthUsd': 100,
+                'collector.robinhoodMinOnchainTvlUsd': 200,
+                'collector.robinhoodMinScore': 50,
               };
               return cfg[key];
             }),
@@ -873,8 +873,8 @@ describe('CollectorService', () => {
     expect(paperMock.recordResearchEntry).toHaveBeenCalled();
   });
 
-  it('admits a Robinhood no-provider token only into the isolated experimental paper cohort', async () => {
-    (service as any).robinhoodExperimentalPaperEnabled = true;
+  it('admits a static-safe Robinhood no-provider token into the primary paper lane', async () => {
+    (service as any).robinhoodPaperEnabled = true;
     const robinhoodUnknown: ContractRiskResult = {
       decision: 'CONTRACT_UNKNOWN',
       rejectReasons: [],
@@ -914,15 +914,15 @@ describe('CollectorService', () => {
 
     expect(robinhoodExperimentalSafetyMock.inspect).toHaveBeenCalledWith('0xdeadbeef');
     expect(paperMock.recordEntry).toHaveBeenCalledWith(expect.objectContaining({
-      riskCohort: 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER',
+      riskCohort: 'CONTRACT_SAFE',
       buyTax: null,
     }));
-    expect(paperMock.recordResearchEntry).toHaveBeenCalled();
-    expect(fs.existsSync(path.join(tempDir, 'decisions', 'candidates.csv'))).toBe(false);
+    expect(paperMock.recordResearchEntry).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(tempDir, 'decisions', 'candidates.csv'))).toBe(true);
   });
 
-  it('keeps a Robinhood experimental token with dust on-chain TVL out of paper entries', async () => {
-    (service as any).robinhoodExperimentalPaperEnabled = true;
+  it('keeps a Robinhood token with dust on-chain TVL out of paper entries', async () => {
+    (service as any).robinhoodPaperEnabled = true;
     const risk: ContractRiskResult = {
       decision: 'CONTRACT_UNKNOWN',
       rejectReasons: [],
@@ -947,7 +947,7 @@ describe('CollectorService', () => {
       },
     };
 
-    await expect((service as any).tryPromoteRobinhoodExperimentalCandidate(
+    await expect((service as any).tryAdmitRobinhoodPaperCandidate(
       buildResult({ chain: 'robinhood' }), risk, 'run-id', evaluation,
     )).resolves.toBe(false);
 

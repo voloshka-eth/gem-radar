@@ -58,10 +58,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly tokenMaxAgeDays: number;
   private readonly tokenAgeHardGateEnabled: boolean;
   private readonly promoteCleanUnknownEnabled: boolean;
-  private readonly robinhoodExperimentalPaperEnabled: boolean;
-  private readonly robinhoodExperimentalMinDepthUsd: number;
-  private readonly robinhoodExperimentalMinOnchainTvlUsd: number;
-  private readonly robinhoodExperimentalMinScore: number;
+  private readonly robinhoodPaperEnabled: boolean;
+  private readonly robinhoodMinDepthUsd: number;
+  private readonly robinhoodMinOnchainTvlUsd: number;
+  private readonly robinhoodMinScore: number;
   private readonly deployerGateEnabled: boolean;
   private readonly factoryDiscoveryMinExecutableDepthUsd: number;
   private readonly manualProbeTokens: TokenProbe[];
@@ -121,14 +121,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       this.config.get<boolean>('collector.tokenAgeHardGateEnabled') ?? false;
     this.promoteCleanUnknownEnabled =
       this.config.get<boolean>('collector.promoteCleanUnknownEnabled') ?? false;
-    this.robinhoodExperimentalPaperEnabled =
-      this.config.get<boolean>('collector.robinhoodExperimentalPaperEnabled') ?? false;
-    this.robinhoodExperimentalMinDepthUsd =
-      this.config.get<number>('collector.robinhoodExperimentalMinDepthUsd') ?? 100;
-    this.robinhoodExperimentalMinOnchainTvlUsd =
-      this.config.get<number>('collector.robinhoodExperimentalMinOnchainTvlUsd') ?? 200;
-    this.robinhoodExperimentalMinScore =
-      this.config.get<number>('collector.robinhoodExperimentalMinScore') ?? 50;
+    this.robinhoodPaperEnabled = this.config.get<boolean>('collector.robinhoodPaperEnabled') ?? false;
+    this.robinhoodMinDepthUsd = this.config.get<number>('collector.robinhoodMinDepthUsd') ?? 100;
+    this.robinhoodMinOnchainTvlUsd = this.config.get<number>('collector.robinhoodMinOnchainTvlUsd') ?? 200;
+    this.robinhoodMinScore = this.config.get<number>('collector.robinhoodMinScore') ?? 50;
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
     this.factoryDiscoveryMinExecutableDepthUsd =
@@ -447,7 +443,24 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     if (riskResult.decision === 'CONTRACT_UNKNOWN') {
       let researchEvaluation: ResearchEvaluation | null = null;
-      if (this.shouldLogResearchCandidate(candidate, riskResult)) {
+      if (this.isRobinhoodNoProviderCandidate(candidate, riskResult)) {
+        researchEvaluation = await this.evaluateResearchCandidate(candidate);
+        const admitted = await this.tryAdmitRobinhoodPaperCandidate(
+          candidate,
+          riskResult,
+          runId,
+          researchEvaluation,
+        );
+        if (admitted) {
+          return { outcome: 'SAFE', riskResult };
+        }
+        // Keep rejected Robinhood tokens observable, but never create a duplicate
+        // research row for a token that was admitted to the main paper lane.
+        if (researchEvaluation) {
+          this.logResearchCandidate(candidate, riskResult, runId);
+          await this.recordResearchPaperEntry(candidate, riskResult, runId, researchEvaluation);
+        }
+      } else if (this.shouldLogResearchCandidate(candidate, riskResult)) {
         this.logResearchCandidate(candidate, riskResult, runId);
         researchEvaluation = await this.recordResearchPaperEntry(candidate, riskResult, runId);
         const promoted = await this.tryPromoteCleanUnknownCandidate(
@@ -457,15 +470,6 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
           researchEvaluation,
         );
         if (promoted) {
-          return { outcome: 'SAFE', riskResult };
-        }
-        const experimentalPromoted = await this.tryPromoteRobinhoodExperimentalCandidate(
-          candidate,
-          riskResult,
-          runId,
-          researchEvaluation,
-        );
-        if (experimentalPromoted) {
           return { outcome: 'SAFE', riskResult };
         }
       }
@@ -504,12 +508,14 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     candidate: CollectorResult,
     riskResult: ContractRiskResult,
     runId: string,
+    existingEvaluation?: ResearchEvaluation,
   ): Promise<ResearchEvaluation | null> {
     const { pool, token } = candidate;
+    const evaluation = existingEvaluation ?? await this.evaluateResearchCandidate(candidate);
+    if (!evaluation) return null;
+
     try {
-      const liq = await this.liquidityVerifier.verify(pool, token.decimals);
-      const ageDays = await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
-      const score = this.scoreCandidate(candidate, liq, ageDays, 'Research score');
+      const { liq, ageDays, score } = evaluation;
 
       await this.paper.recordResearchEntry({
         pool,
@@ -607,6 +613,21 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  private async evaluateResearchCandidate(candidate: CollectorResult): Promise<ResearchEvaluation | null> {
+    const { pool, token } = candidate;
+    try {
+      const liq = await this.liquidityVerifier.verify(pool, token.decimals);
+      const ageDays = await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
+      const score = this.scoreCandidate(candidate, liq, ageDays, 'Research score');
+      return { liq, ageDays, score };
+    } catch (err) {
+      this.logger.warn(
+        `Candidate evaluation failed for ${pool.chain}:${token.tokenAddress} - ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
   /**
    * A mintable token is structurally risky, but mintability alone is not proof
    * of a honeypot or an inevitable rug. Track the narrow clean subset as paper
@@ -668,53 +689,94 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  /**
-   * Temporary paper-only admission path while Robinhood has no GoPlus/Honeypot
-   * coverage. Deliberately omits normal candidate and score logs so this cohort
-   * cannot make the primary strategy look better than it is.
-   */
-  private async tryPromoteRobinhoodExperimentalCandidate(
+  /** Robinhood primary paper lane while external contract-risk providers lack coverage. */
+  private async tryAdmitRobinhoodPaperCandidate(
     candidate: CollectorResult,
     riskResult: ContractRiskResult,
     runId: string,
     evaluation: ResearchEvaluation | null,
   ): Promise<boolean> {
-    if (!this.robinhoodExperimentalPaperEnabled || !evaluation) return false;
+    if (!this.robinhoodPaperEnabled || !evaluation) return false;
     if (candidate.pool.chain !== 'robinhood') return false;
-    if (riskResult.decision !== 'CONTRACT_UNKNOWN' || riskResult.rejectReasons.length > 0) return false;
+    if (riskResult.decision !== 'CONTRACT_UNKNOWN' || riskResult.rejectReasons.length > 0) {
+      this.logRobinhoodPaperGate(candidate, runId, 'risk_reject_reasons', {
+        decision: riskResult.decision,
+        rejectReasons: riskResult.rejectReasons,
+      });
+      return false;
+    }
 
     const providerStatus = riskResult.providerStatus ?? riskResult.merged.providerStatus;
-    if (providerStatus !== 'NO_RISK_PROVIDER_SUPPORT') return false;
-    if (evaluation.liq.liquidityVerified !== true) return false;
-    if ((evaluation.liq.executableDepthUsd ?? 0) < this.robinhoodExperimentalMinDepthUsd) return false;
-    if ((evaluation.liq.onchainTvlUsd ?? 0) < this.robinhoodExperimentalMinOnchainTvlUsd) {
+    if (providerStatus !== 'NO_RISK_PROVIDER_SUPPORT') {
+      this.logRobinhoodPaperGate(candidate, runId, 'provider_status', { providerStatus });
+      return false;
+    }
+    if (evaluation.liq.liquidityVerified !== true) {
+      this.logRobinhoodPaperGate(candidate, runId, 'liquidity_unverified', {
+        onchainTvlUsd: evaluation.liq.onchainTvlUsd,
+        executableDepthUsd: evaluation.liq.executableDepthUsd,
+      });
+      return false;
+    }
+    if ((evaluation.liq.executableDepthUsd ?? 0) < this.robinhoodMinDepthUsd) {
+      this.logRobinhoodPaperGate(candidate, runId, 'executable_depth_too_low', {
+        executableDepthUsd: evaluation.liq.executableDepthUsd,
+        minimumUsd: this.robinhoodMinDepthUsd,
+      });
+      return false;
+    }
+    if ((evaluation.liq.onchainTvlUsd ?? 0) < this.robinhoodMinOnchainTvlUsd) {
+      this.logRobinhoodPaperGate(candidate, runId, 'onchain_tvl_too_low', {
+        onchainTvlUsd: evaluation.liq.onchainTvlUsd,
+        minimumUsd: this.robinhoodMinOnchainTvlUsd,
+      });
       this.logger.debug(
-        `Robinhood experimental paper gate rejected ${candidate.token.tokenAddress}: ` +
+        `Robinhood paper gate rejected ${candidate.token.tokenAddress}: ` +
         `onchain TVL $${(evaluation.liq.onchainTvlUsd ?? 0).toFixed(2)} < ` +
-        `$${this.robinhoodExperimentalMinOnchainTvlUsd.toFixed(2)}`,
+        `$${this.robinhoodMinOnchainTvlUsd.toFixed(2)}`,
       );
       return false;
     }
-    if (evaluation.score.finalScore < this.robinhoodExperimentalMinScore) return false;
-    if (evaluation.score.band === 'reject_band') return false;
+    if (evaluation.score.finalScore < this.robinhoodMinScore) {
+      this.logRobinhoodPaperGate(candidate, runId, 'score_too_low', {
+        finalScore: evaluation.score.finalScore,
+        minimumScore: this.robinhoodMinScore,
+      });
+      return false;
+    }
+    if (evaluation.score.band === 'reject_band') {
+      this.logRobinhoodPaperGate(candidate, runId, 'reject_band', {
+        finalScore: evaluation.score.finalScore,
+      });
+      return false;
+    }
 
     const staticSafety = await this.robinhoodExperimentalSafety.inspect(candidate.token.tokenAddress);
     if (!staticSafety.passed) {
+      this.logRobinhoodPaperGate(candidate, runId, 'static_safety_failed', {
+        reasons: staticSafety.reasons,
+      });
       this.logger.warn(
-        `Robinhood experimental paper gate rejected ${candidate.token.tokenAddress}: ` +
+        `Robinhood paper gate rejected ${candidate.token.tokenAddress}: ` +
         staticSafety.reasons.join(', '),
       );
       return false;
     }
 
     const persisted = await this.persistCandidate(candidate, runId, riskResult, evaluation.liq);
-    if (!persisted) return false;
+    if (!persisted) {
+      this.logRobinhoodPaperGate(candidate, runId, 'persistence_failed');
+      return false;
+    }
 
     if (persisted.isNewDiscovery) {
-      this.logNewPool(candidate, runId, 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER');
+      this.logNewPool(candidate, runId, 'ROBINHOOD_STATIC_SAFE_NO_PROVIDER');
     }
     this.logPoolSnapshot(candidate, runId);
     this.logLiquiditySnapshot(candidate, runId, evaluation.liq);
+    this.logCandidate(candidate, runId, evaluation.liq, evaluation.ageDays);
+    await this.storeScore(runId, candidate, persisted.id, evaluation.liq.liquidityModel, evaluation.score);
+    this.logScore(runId, candidate, evaluation.liq.liquidityModel, evaluation.score);
     await this.paper.recordEntry({
       pool: candidate.pool,
       token: candidate.token,
@@ -725,16 +787,48 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       poolId: persisted.poolId,
       runId,
       buyTax: null,
-      riskCohort: 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER',
+      riskCohort: 'CONTRACT_SAFE',
       experimentalSafety: staticSafety,
     });
 
     this.logger.warn(
-      `Robinhood experimental paper entry: ${candidate.token.tokenAddress} (${candidate.token.symbol ?? '?'}) ` +
+      `Robinhood paper entry: ${candidate.token.tokenAddress} (${candidate.token.symbol ?? '?'}) ` +
       `depth=$${evaluation.liq.executableDepthUsd?.toFixed(0) ?? '0'} ` +
       `score=${evaluation.score.finalScore.toFixed(2)}; no supported tax/sell simulation provider`,
     );
     return true;
+  }
+
+  private isRobinhoodNoProviderCandidate(
+    candidate: CollectorResult,
+    riskResult: ContractRiskResult,
+  ): boolean {
+    const providerStatus = riskResult.providerStatus ?? riskResult.merged.providerStatus;
+    return this.robinhoodPaperEnabled &&
+      candidate.pool.chain === 'robinhood' &&
+      riskResult.decision === 'CONTRACT_UNKNOWN' &&
+      riskResult.rejectReasons.length === 0 &&
+      providerStatus === 'NO_RISK_PROVIDER_SUPPORT';
+  }
+
+  private logRobinhoodPaperGate(
+    candidate: CollectorResult,
+    runId: string,
+    reason: string,
+    details: Record<string, unknown> = {},
+  ): void {
+    this.fileLogger.logRawPayload({
+      run_id: runId,
+      ts: new Date().toISOString(),
+      source: 'robinhood_paper_gate',
+      decision: 'not_admitted',
+      reason,
+      chain: candidate.pool.chain,
+      pool_address: candidate.pool.poolAddress,
+      token_address: candidate.token.tokenAddress,
+      symbol: candidate.token.symbol ?? '',
+      ...details,
+    });
   }
 
   private enrichCandidateDeployer(

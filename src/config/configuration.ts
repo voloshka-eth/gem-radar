@@ -1,5 +1,9 @@
 import { registerAs } from '@nestjs/config';
 import tokenSymbolBlocklist from './token-symbol-blocklist.json';
+import blockedCreatorsFile from './blocked-creators.json';
+
+const activeStrategyMode = (): string =>
+  process.env.STRATEGY_MODE ?? 'legacy_contract_radar';
 
 const blockedTokenSymbols = tokenSymbolBlocklist.symbols
   .map((entry) => entry.symbol.trim().replace(/^\$/, '').toLowerCase())
@@ -9,6 +13,7 @@ export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: parseInt(process.env.PORT ?? '3000', 10),
   logDir: process.env.LOG_DIR ?? './logs',
+  strategyMode: activeStrategyMode(),
 }));
 
 export const redisConfig = registerAs('redis', () => ({
@@ -59,8 +64,10 @@ export const apiConfig = registerAs('api', () => ({
 }));
 
 export const collectorConfig = registerAs('collector', () => ({
-  autoStart: process.env.COLLECTOR_AUTOSTART !== 'false',
-  pollIntervalMs: parseInt(process.env.COLLECTOR_POLL_INTERVAL_MS ?? '120000', 10),
+  autoStart: process.env.COLLECTOR_AUTOSTART != null
+    ? process.env.COLLECTOR_AUTOSTART !== 'false'
+    : activeStrategyMode() === 'legacy_contract_radar',
+  pollIntervalMs: parseInt(process.env.COLLECTOR_POLL_INTERVAL_MS ?? '30000', 10),
   newPoolMaxAgeHours: parseInt(process.env.NEW_POOL_MAX_AGE_HOURS ?? '24', 10),
   matureMomentumMinVol1hUsd: parseFloat(process.env.MATURE_MOMENTUM_MIN_VOL_1H_USD ?? '1000'),
   matureMomentumMinTx1h: parseInt(process.env.MATURE_MOMENTUM_MIN_TX_1H ?? '20', 10),
@@ -88,12 +95,14 @@ export const collectorConfig = registerAs('collector', () => ({
   moonshotMinTx1h: parseInt(process.env.MOONSHOT_MIN_TX_1H ?? '30', 10),
   moonshotMinBuys1h: parseInt(process.env.MOONSHOT_MIN_BUYS_1H ?? '15', 10),
   promoteCleanUnknownEnabled: process.env.PROMOTE_CLEAN_UNKNOWN_ENABLED !== 'false',
-  // Temporary paper-only lane for Robinhood until a supported contract-risk provider exists.
-  // It is intentionally separate from normal candidates and primary edge statistics.
-  robinhoodExperimentalPaperEnabled: process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
-  robinhoodExperimentalMinDepthUsd: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
-  robinhoodExperimentalMinOnchainTvlUsd: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_ONCHAIN_TVL_USD ?? '200'),
-  robinhoodExperimentalMinScore: parseFloat(process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),
+  // Robinhood has no GoPlus/Honeypot coverage yet. Static bytecode checks plus
+  // executable liquidity are the paper-entry safety contract for this chain.
+  robinhoodPaperEnabled: process.env.ROBINHOOD_PAPER_ENABLED != null
+    ? process.env.ROBINHOOD_PAPER_ENABLED !== 'false'
+    : process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
+  robinhoodMinDepthUsd: parseFloat(process.env.ROBINHOOD_MIN_DEPTH_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
+  robinhoodMinOnchainTvlUsd: parseFloat(process.env.ROBINHOOD_MIN_ONCHAIN_TVL_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_ONCHAIN_TVL_USD ?? '200'),
+  robinhoodMinScore: parseFloat(process.env.ROBINHOOD_MIN_SCORE ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),
   deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
   deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
   deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '1', 10),
@@ -205,11 +214,12 @@ export const paperConfig = registerAs('paper', () => ({
   survivalObservationDelaySec: parseInt(process.env.PAPER_SURVIVAL_OBSERVATION_DELAY_SEC ?? '600', 10),
   evalAutostart:      process.env.PAPER_EVAL_AUTOSTART != null
     ? process.env.PAPER_EVAL_AUTOSTART !== 'false'
-    : process.env.COLLECTOR_AUTOSTART !== 'false',
-  evalIntervalMs:     parseInt(process.env.PAPER_EVAL_INTERVAL_MS ?? '60000', 10),
-  evalYoungWindowSec: parseInt(process.env.PAPER_EVAL_YOUNG_WINDOW_SEC ?? '900', 10),
-  evalYoungIntervalMs: parseInt(process.env.PAPER_EVAL_YOUNG_INTERVAL_MS ?? '60000', 10),
+    : activeStrategyMode() === 'legacy_contract_radar',
+  evalIntervalMs:     parseInt(process.env.PAPER_EVAL_INTERVAL_MS ?? '30000', 10),
+  evalYoungWindowSec: parseInt(process.env.PAPER_EVAL_YOUNG_WINDOW_SEC ?? '3600', 10),
+  evalYoungIntervalMs: parseInt(process.env.PAPER_EVAL_YOUNG_INTERVAL_MS ?? '30000', 10),
   evalMatureIntervalMs: parseInt(process.env.PAPER_EVAL_MATURE_INTERVAL_MS ?? '300000', 10),
+  collectTradeStats:  process.env.PAPER_COLLECT_TRADE_STATS === 'true',
   evalInitialDelayMs: parseInt(process.env.PAPER_EVAL_INITIAL_DELAY_MS ?? '30000', 10),
   sandwichPct:        parseFloat(process.env.PAPER_SANDWICH_PCT        ?? '0.01'),  // 1% MEV/sandwich haircut
   gasUsd:             parseFloat(process.env.PAPER_GAS_USD             ?? '1.5'),   // modeled gas per tx (each way)
@@ -247,7 +257,7 @@ export const gemConfig = registerAs('gem', () => ({
   autoScreenEnabled: process.env.GEM_AUTOSCREEN_ENABLED !== 'false',
   shadowAutostart: process.env.GEM_SHADOW_AUTOSTART != null
     ? process.env.GEM_SHADOW_AUTOSTART !== 'false'
-    : process.env.COLLECTOR_AUTOSTART !== 'false',
+    : activeStrategyMode() === 'legacy_contract_radar',
   shadowIntervalMs: parseInt(process.env.GEM_SHADOW_INTERVAL_MS ?? '300000', 10),
   shadowInitialDelayMs: parseInt(process.env.GEM_SHADOW_INITIAL_DELAY_MS ?? '180000', 10),
   // FDV-headroom gate: cut dust below the floor; cap entry FDV so x1000 stays geometrically possible.
@@ -286,6 +296,57 @@ export const gemConfig = registerAs('gem', () => ({
   } as Record<string, Record<string, string>>,
 }));
 
+export const launchSniperConfig = registerAs('launchSniper', () => ({
+  enabled: process.env.LAUNCH_SNIPER_ENABLED != null
+    ? process.env.LAUNCH_SNIPER_ENABLED === 'true'
+    : activeStrategyMode() === 'launch_sniper_paper',
+  mode: process.env.LAUNCH_SNIPER_MODE ?? 'paper',
+  bscRpcUrl: process.env.BSC_RPC_URL ?? 'https://bsc.blockrazor.xyz',
+  fourMemeTokenManager:
+    process.env.FOUR_MEME_TOKEN_MANAGER ?? '0x5c952063c7fc8610ffdb798152d69f0b9550762b',
+  pollIntervalMs: parseInt(process.env.LAUNCH_SNIPER_POLL_INTERVAL_MS ?? '3000', 10),
+  initialLookbackBlocks: parseInt(process.env.LAUNCH_SNIPER_INITIAL_LOOKBACK_BLOCKS ?? '300', 10),
+  maxLogRangeBlocks: parseInt(process.env.LAUNCH_SNIPER_MAX_LOG_RANGE_BLOCKS ?? '25', 10),
+  rpcRequestDelayMs: parseInt(process.env.LAUNCH_SNIPER_RPC_REQUEST_DELAY_MS ?? '500', 10),
+  pollErrorBackoffMs: parseInt(process.env.LAUNCH_SNIPER_POLL_ERROR_BACKOFF_MS ?? '10000', 10),
+  rateLimitBackoffMs: parseInt(process.env.LAUNCH_SNIPER_RATE_LIMIT_BACKOFF_MS ?? '60000', 10),
+  maxPollBackoffMs: parseInt(process.env.LAUNCH_SNIPER_MAX_BACKOFF_MS ?? '300000', 10),
+  heartbeatIntervalMs: parseInt(process.env.LAUNCH_SNIPER_HEARTBEAT_INTERVAL_MS ?? '30000', 10),
+  confirmations: parseInt(process.env.LAUNCH_SNIPER_CONFIRMATIONS ?? '1', 10),
+  maxTrackedLaunches: parseInt(process.env.LAUNCH_SNIPER_MAX_TRACKED ?? '2000', 10),
+  blockedCreators: (blockedCreatorsFile.creators as Array<{ address: string }>)
+    .map((entry) => entry.address.trim().toLowerCase())
+    .filter((entry) => /^0x[0-9a-f]{40}$/.test(entry)),
+  trigger: {
+    windowMs: parseInt(process.env.LAUNCH_SNIPER_WINDOW_MS ?? '300000', 10),
+    minAgeSec: parseFloat(process.env.LAUNCH_SNIPER_MIN_AGE_SEC ?? '2'),
+    minBlocksAfterLaunch: parseInt(process.env.LAUNCH_SNIPER_MIN_BLOCKS_AFTER_LAUNCH ?? '6', 10),
+    maxAgeSec: parseFloat(process.env.LAUNCH_SNIPER_MAX_AGE_SEC ?? '300'),
+    minBuys: parseInt(process.env.LAUNCH_SNIPER_MIN_BUYS ?? '3', 10),
+    minUniqueBuyers: parseInt(process.env.LAUNCH_SNIPER_MIN_UNIQUE_BUYERS ?? '3', 10),
+    minBuyQuote: parseFloat(process.env.LAUNCH_SNIPER_MIN_BUY_BNB ?? '0.10'),
+    minBuySellRatio: parseFloat(process.env.LAUNCH_SNIPER_MIN_BUY_SELL_RATIO ?? '2'),
+    maxLargestBuyerShare: parseFloat(process.env.LAUNCH_SNIPER_MAX_BUYER_SHARE ?? '0.65'),
+    minPriceMomentum: parseFloat(process.env.LAUNCH_SNIPER_MIN_PRICE_MOMENTUM ?? '1.02'),
+  },
+  paper: {
+    positionSizeQuote: parseFloat(process.env.LAUNCH_SNIPER_POSITION_BNB ?? '0.02'),
+    protocolFeePct: parseFloat(process.env.LAUNCH_SNIPER_PROTOCOL_FEE_PCT ?? '0.01'),
+    entrySlippagePct: parseFloat(process.env.LAUNCH_SNIPER_ENTRY_SLIPPAGE_PCT ?? '0.02'),
+    exitSlippagePct: parseFloat(process.env.LAUNCH_SNIPER_EXIT_SLIPPAGE_PCT ?? '0.03'),
+    stopMultiple: parseFloat(process.env.LAUNCH_SNIPER_STOP_MULTIPLE ?? '0.80'),
+    timeExitMs: parseInt(process.env.LAUNCH_SNIPER_TIME_EXIT_MS ?? '3600000', 10),
+    momentumWindowMs: parseInt(process.env.LAUNCH_SNIPER_MOMENTUM_WINDOW_MS ?? '30000', 10),
+    momentumExitRatio: parseFloat(process.env.LAUNCH_SNIPER_MOMENTUM_EXIT_RATIO ?? '0.70'),
+    momentumConfirmations: parseInt(process.env.LAUNCH_SNIPER_MOMENTUM_CONFIRMATIONS ?? '2', 10),
+    ladder: [
+      { multiple: 2, sellFraction: 0.80 },
+      { multiple: 10, sellFraction: 0.15 },
+      { multiple: 1000, sellFraction: 0.05 },
+    ],
+  },
+}));
+
 export const telegramConfig = registerAs('telegram', () => ({
   botToken: process.env.TELEGRAM_BOT_TOKEN,
   chatId: process.env.TELEGRAM_CHAT_ID,
@@ -302,6 +363,7 @@ export default [
   scoringConfig,
   paperConfig,
   gemConfig,
+  launchSniperConfig,
   telegramConfig,
   explorerConfig,
   onchainConfig,

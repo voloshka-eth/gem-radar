@@ -66,7 +66,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const intervalMs = Math.max(60_000, this.config.get<number>('paper.evalIntervalMs') ?? 300_000);
+    const intervalMs = Math.max(15_000, this.config.get<number>('paper.evalIntervalMs') ?? 30_000);
     const initialDelayMs = Math.max(0, this.config.get<number>('paper.evalInitialDelayMs') ?? 120_000);
     this.evalTimeout = setTimeout(() => void this.runScheduledEval(), initialDelayMs);
     this.evalInterval = setInterval(() => void this.runScheduledEval(), intervalMs);
@@ -128,6 +128,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     const youngWindowSec = this.config.get<number>('paper.evalYoungWindowSec');
     const youngIntervalMs = this.config.get<number>('paper.evalYoungIntervalMs');
     const matureIntervalMs = this.config.get<number>('paper.evalMatureIntervalMs');
+    const collectTradeStats = this.config.get<boolean>('paper.collectTradeStats') ?? false;
     const cadenceEnabled = youngWindowSec != null && youngIntervalMs != null && matureIntervalMs != null;
     const openRows = await this.prisma.paperPosition.findMany({
       where: { status: 'OPEN' },
@@ -243,8 +244,11 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       // RE-RUN sell simulation against current state (existing exit behavior unchanged).
       const { sellSimOk, sellTaxNow } = await this.reCheckSell(chain, pos.tokenAddress, pos.symbol ?? '');
 
-      // Capture current trade stats (sellers/buyers signal) — COLLECTION ONLY.
-      const stats = await this.geckoTerminal.getPoolTradeStats(chain, pos.poolAddress);
+      // Trade stats are research-only. Keeping them off the shared Gecko budget
+      // prevents a large open-position book from starving new-pool discovery.
+      const stats = collectTradeStats
+        ? await this.geckoTerminal.getPoolTradeStats(chain, pos.poolAddress)
+        : null;
       const uniqueBuyers  = stats?.uniqueBuyers ?? null;
       const uniqueSellers = stats?.uniqueSellers ?? null;
       const sellersToBuyersRatio =
