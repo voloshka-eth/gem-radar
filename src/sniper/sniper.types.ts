@@ -1,4 +1,4 @@
-export const SNIPER_STRATEGY_VERSION = 'four-meme-flow-v2';
+export const SNIPER_STRATEGY_VERSION = 'four-meme-flow-v4';
 
 export type SniperAddress = `0x${string}`;
 
@@ -130,7 +130,7 @@ export interface SniperPaperPosition {
 }
 
 export interface PaperAction {
-  type: 'ENTER' | 'LADDER_EXIT' | 'STOP_EXIT' | 'MOMENTUM_EXIT' | 'TIME_EXIT' | 'TRADE_STOP_EXIT';
+  type: 'ENTER' | 'LADDER_EXIT' | 'STOP_EXIT' | 'MOMENTUM_EXIT' | 'TIME_EXIT' | 'TRADE_STOP_EXIT' | 'CREATOR_EXIT';
   occurredAtMs: number;
   token: SniperAddress;
   symbol: string;

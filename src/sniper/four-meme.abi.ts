@@ -8,7 +8,6 @@ export const FOUR_MEME_READ_ABI = parseAbi([
   'event TokenPurchase(address token, address account, uint256 price, uint256 amount, uint256 cost, uint256 fee, uint256 offers, uint256 funds)',
   'event TokenSale(address token, address account, uint256 price, uint256 amount, uint256 cost, uint256 fee, uint256 offers, uint256 funds)',
   'event TradeStop(address token)',
-  'function _tokenInfos(address token) view returns (bool initialized, uint256 launchTime, uint256 K, uint256 T, uint256 offers, uint256 ethers, bool tradeEnable, bool liquidityAdded, bool tradingHalt)',
 ]);
 
 export const FOUR_MEME_TOKEN_MANAGER2 =

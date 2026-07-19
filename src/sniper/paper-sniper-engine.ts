@@ -58,7 +58,7 @@ export class PaperSniperEngine {
     marketPrice: number,
     nowMs: number,
     recentFlowRatio: number,
-    tradeStopped = false,
+    forcedExit: 'TRADE_STOP_EXIT' | 'CREATOR_EXIT' | null = null,
   ): PaperAction[] {
     if (position.status !== 'OPEN') return [];
     assertPositiveFinite(marketPrice, 'marketPrice');
@@ -66,8 +66,9 @@ export class PaperSniperEngine {
     const netMultiple = this.netMultiple(position, marketPrice);
     position.maxNetMultiple = Math.max(position.maxNetMultiple, netMultiple);
 
-    if (tradeStopped) {
-      actions.push(this.close(position, 'TRADE_STOP_EXIT', nowMs, marketPrice, 0, 'launchpad stopped trading'));
+    if (forcedExit) {
+      const note = forcedExit === 'CREATOR_EXIT' ? 'creator sold after entry' : 'launchpad stopped trading';
+      actions.push(this.close(position, forcedExit, nowMs, marketPrice, 0, note));
       return actions;
     }
 

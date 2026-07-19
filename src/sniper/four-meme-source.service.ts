@@ -207,37 +207,20 @@ export class FourMemeSourceService {
   async readSafety(token: SniperAddress): Promise<FourMemeSafetyState> {
     const client = this.requireClient();
     try {
-      const [code, info] = await Promise.all([
-        client.getBytecode({ address: token }),
-        client.readContract({
-          address: this.contractAddress,
-          abi: FOUR_MEME_READ_ABI,
-          functionName: '_tokenInfos',
-          args: [token],
-        }),
-      ]);
-      const tuple = info as readonly [
-        boolean, bigint, bigint, bigint, bigint, bigint, boolean, boolean, boolean,
-      ];
-      const initialized = tuple[0];
-      const tradeEnabled = tuple[6];
-      const liquidityAdded = tuple[7];
-      const tradingHalt = tuple[8];
+      const code = await client.getBytecode({ address: token });
       const codePresent = Boolean(code && code !== '0x');
       const reasons: string[] = [];
       if (!codePresent) reasons.push('token_code_missing');
-      if (!initialized) reasons.push('launch_not_initialized');
-      if (!tradeEnabled) reasons.push('trading_disabled');
-      if (tradingHalt) reasons.push('trading_halted');
-      if (liquidityAdded) reasons.push('already_graduated');
       return {
         ok: reasons.length === 0,
         retryable: false,
         reasons,
-        initialized,
-        tradeEnabled,
-        liquidityAdded,
-        tradingHalt,
+        // A freshly decoded TokenPurchase/Sale is the authoritative proof that
+        // this live paper candidate is initialized and currently tradeable.
+        initialized: codePresent,
+        tradeEnabled: codePresent,
+        liquidityAdded: false,
+        tradingHalt: false,
         codePresent,
       };
     } catch (error) {

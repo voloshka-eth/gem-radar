@@ -217,6 +217,14 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     addTrade(state, event, this.triggerConfig.windowMs);
+    if (
+      state.status === 'OPEN' &&
+      event.kind === 'SELL' &&
+      event.account.toLowerCase() === state.creator.toLowerCase()
+    ) {
+      await this.closeCreatorSoldPosition(state, event.occurredAtMs);
+      return;
+    }
     if (state.status === 'WATCHING') await this.tryOpen(state, event.occurredAtMs);
   }
 
@@ -266,11 +274,17 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
     this.recordAction(action, {
       creator: state.creator,
       name: state.name,
+      firstSeenAt: new Date(state.firstSeenAtMs).toISOString(),
+      detectionDelaySec: (nowMs - state.launchedAtMs) / 1_000,
       features: decision.snapshot,
       safety,
       quoteAsset: 'BNB',
       positionSizeQuote: position.positionSizeQuote,
+      tokensBought: position.tokensBought,
+      entryMarketPrice: position.entryMarketPrice,
       entryEffectivePrice: position.entryEffectivePrice,
+      entrySlippagePct: this.paperConfig.entrySlippagePct * 100,
+      protocolFeePct: this.paperConfig.protocolFeePct * 100,
     });
     this.logger.log(
       `PAPER ENTER ${state.symbol} ${state.token} buys=${decision.snapshot.buys} ` +
@@ -283,11 +297,21 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
       if (position.status !== 'OPEN') continue;
       const state = this.launches.get(key);
       if (!state) continue;
+      if (state.creatorSold) {
+        await this.closeCreatorSoldPosition(state, nowMs);
+        continue;
+      }
       const lastTrade = state.trades.at(-1);
       const marketPrice = lastTrade?.priceQuotePerToken ?? position.entryMarketPrice;
       const ratio = recentBuySellRatio(state, nowMs, this.paperConfig.momentumWindowMs);
       const actions = this.paperEngine.evaluate(position, marketPrice, nowMs, ratio);
-      for (const action of actions) this.recordAction(action, { recentFlowRatio: ratio });
+      for (const action of actions) {
+        this.recordAction(action, {
+          recentFlowRatio: ratio,
+          creator: position.creator,
+          exitSlippagePct: this.paperConfig.exitSlippagePct * 100,
+        });
+      }
       if (position.closeReason != null || position.remainingFraction <= 1e-9) {
         state.status = 'CLOSED';
         this.logClose(position);
@@ -312,8 +336,30 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const price = state.trades.at(-1)?.priceQuotePerToken ?? position.entryMarketPrice;
-    const actions = this.paperEngine.evaluate(position, price, nowMs, 0, true);
-    for (const action of actions) this.recordAction(action, { recentFlowRatio: 0 });
+    const actions = this.paperEngine.evaluate(position, price, nowMs, 0, 'TRADE_STOP_EXIT');
+    for (const action of actions) {
+      this.recordAction(action, {
+        recentFlowRatio: 0,
+        creator: state.creator,
+        exitSlippagePct: this.paperConfig.exitSlippagePct * 100,
+      });
+    }
+    state.status = 'CLOSED';
+    this.logClose(position);
+  }
+
+  private async closeCreatorSoldPosition(state: LaunchState, nowMs: number): Promise<void> {
+    const position = this.positions.get(state.token.toLowerCase());
+    if (!position || position.status !== 'OPEN') return;
+    const price = state.trades.at(-1)?.priceQuotePerToken ?? position.entryMarketPrice;
+    const actions = this.paperEngine.evaluate(position, price, nowMs, 0, 'CREATOR_EXIT');
+    for (const action of actions) {
+      this.recordAction(action, {
+        exitSignal: 'creator_sold',
+        creator: state.creator,
+        exitSlippagePct: this.paperConfig.exitSlippagePct * 100,
+      });
+    }
     state.status = 'CLOSED';
     this.logClose(position);
   }
@@ -356,7 +402,7 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
       : 'caught_up';
     this.logger.log(
       `BSC watcher healthy: blocks=${range} events=${result.events.length} cursor=${result.cursor} ` +
-      `watching=${watching} open=${open}`,
+      `hotWatch=${watching} openPositions=${open}`,
     );
     this.record('WATCHER_HEARTBEAT', {
       fromBlock: result.range?.fromBlock ?? null,
@@ -365,6 +411,8 @@ export class LaunchSniperService implements OnModuleInit, OnModuleDestroy {
       cursor: result.cursor,
       watching,
       open,
+      hotWatch: watching,
+      openPositions: open,
     });
   }
 

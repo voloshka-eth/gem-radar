@@ -81,10 +81,21 @@ describe('PaperSniperEngine', () => {
     const engine = new PaperSniperEngine(config);
     const { position } = engine.open({ token, creator, symbol: 'TEST' }, 1, 0);
 
-    const actions = engine.evaluate(position, 1.5, 10_000, 2, true);
+    const actions = engine.evaluate(position, 1.5, 10_000, 2, 'TRADE_STOP_EXIT');
 
     expect(actions[0].type).toBe('TRADE_STOP_EXIT');
     expect(actions[0].quoteValue).toBe(0);
+    expect(position.status).toBe('CLOSED');
+  });
+
+  it('closes an open position when its creator sells', () => {
+    const engine = new PaperSniperEngine(config);
+    const { position } = engine.open({ token, creator, symbol: 'TEST' }, 1, 0);
+
+    const actions = engine.evaluate(position, 1.2, 10_000, 2, 'CREATOR_EXIT');
+
+    expect(actions[0].type).toBe('CREATOR_EXIT');
+    expect(actions[0].note).toBe('creator sold after entry');
     expect(position.status).toBe('CLOSED');
   });
 });
