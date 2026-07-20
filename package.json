@@ -28,6 +28,7 @@
     "edge": "ts-node scripts/edge.ts",
     "benchmark": "ts-node scripts/benchmark.ts",
     "benchmark:csv": "ts-node scripts/benchmark-csv.ts",
+    "benchmark:flow": "ts-node scripts/flow-benchmark.ts",
     "sniper:report": "ts-node scripts/sniper-report.ts",
     "deployers:refresh": "ts-node scripts/deployer-reputation.ts",
     "deployers:block": "ts-node scripts/block-deployer.ts",

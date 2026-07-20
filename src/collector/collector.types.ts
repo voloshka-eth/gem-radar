@@ -70,6 +70,9 @@ export interface CandidatePool {
   sells1h?: number;
   txCount1h?: number;
   poolCreatedAt?: Date;
+  creationBlockNumber?: string;
+  creationTxHash?: string;
+  creationLogIndex?: number;
   source: string;
 }
 

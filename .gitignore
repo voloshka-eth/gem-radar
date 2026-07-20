@@ -8,4 +8,8 @@ prisma/migrations/
 dev.bat
 logs_old_pre_fix
 docs/*
+!docs/research/
+docs/research/*
+!docs/research/robinhood-stages-v1-2026-07-20.md
+!docs/research/gem-radar-research-timeline-2026-07-20.md
 

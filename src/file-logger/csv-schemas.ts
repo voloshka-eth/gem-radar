@@ -301,6 +301,13 @@ export interface PaperEntryRow {
   lp_lock_fraction: string;        // locked/burned fraction (0–1) | ''
   discovery_source: string;
   risk_cohort: string;
+  strategy_version: string;
+  exit_policy: string;
+  benchmark_eligible: string;
+  trigger_unique_buyers: string;
+  trigger_buy_quote_usd: string;
+  trigger_buy_sell_ratio: string;
+  trigger_price_momentum: string;
 }
 
 export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
@@ -337,6 +344,13 @@ export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
   { id: 'lp_lock_fraction', title: 'lp_lock_fraction' },
   { id: 'discovery_source', title: 'discovery_source' },
   { id: 'risk_cohort', title: 'risk_cohort' },
+  { id: 'strategy_version', title: 'strategy_version' },
+  { id: 'exit_policy', title: 'exit_policy' },
+  { id: 'benchmark_eligible', title: 'benchmark_eligible' },
+  { id: 'trigger_unique_buyers', title: 'trigger_unique_buyers' },
+  { id: 'trigger_buy_quote_usd', title: 'trigger_buy_quote_usd' },
+  { id: 'trigger_buy_sell_ratio', title: 'trigger_buy_sell_ratio' },
+  { id: 'trigger_price_momentum', title: 'trigger_price_momentum' },
 ];
 
 export interface ResearchPaperEntryRow {
@@ -580,6 +594,9 @@ export interface PaperExitRow {
   deployer_deployments_count: string;
   deployer_rug_count: string;
   outcome_class: string;      // RUG | UNSELLABLE | LIQ_PULL | WIN | LOSS
+  strategy_version: string;
+  risk_cohort: string;
+  exit_policy: string;
 }
 
 export const PAPER_EXIT_HEADERS: CsvHeader[] = [
@@ -604,6 +621,9 @@ export const PAPER_EXIT_HEADERS: CsvHeader[] = [
   { id: 'deployer_deployments_count', title: 'deployer_deployments_count' },
   { id: 'deployer_rug_count', title: 'deployer_rug_count' },
   { id: 'outcome_class', title: 'outcome_class' },
+  { id: 'strategy_version', title: 'strategy_version' },
+  { id: 'risk_cohort', title: 'risk_cohort' },
+  { id: 'exit_policy', title: 'exit_policy' },
 ];
 
 // ─── raw/contract_risk_checks.csv ─────────────────────────────────────────────

@@ -51,6 +51,7 @@ describe('V4LiquidityService', () => {
       chain: 'base', poolAddress: POOL_ID, dex: 'Uniswap V4',
       token0Address: GEM, token1Address: WETH,
       quoteAsset: 'WETH', quoteAssetAddress: WETH, source: 'test',
+      creationBlockNumber: '100',
     }, 18);
 
     expect(result.spotPriceUsd).toBeCloseTo(2_000, 8);
@@ -59,9 +60,28 @@ describe('V4LiquidityService', () => {
     expect(client.getLogs).toHaveBeenCalledTimes(1);
     expect(client.getLogs).toHaveBeenCalledWith(expect.objectContaining({
       address: '0x498581ff718922c3f8e6a244956af099b2652b2b',
-      fromBlock: 0n,
+      fromBlock: 100n,
       toBlock: 'latest',
     }));
+  });
+
+  it('does not scan from genesis when enrichment omitted V4 metadata', async () => {
+    const client = { getLogs: jest.fn(), readContract: jest.fn() };
+    const config = {
+      get: (key: string) => ({
+        'onchain.v4PoolManagerBase': '0x498581ff718922c3f8e6a244956af099b2652b2b',
+        'onchain.v4QuoterBase': '0x0d5e0f971ed27fbff6c2837bf31316121532048d',
+        'onchain.v4StateViewBase': '0xa3c0c9b65bad0b08107aa264b0f3db444b867a71',
+      })[key],
+    } as ConfigService;
+    const service = new V4LiquidityService(config, new Map([['base', client]]) as any, {} as any);
+
+    await expect(service.readLiquidity({
+      chain: 'base', poolAddress: POOL_ID, dex: 'Uniswap V4',
+      token0Address: GEM, token1Address: WETH,
+      quoteAsset: 'WETH', quoteAssetAddress: WETH, source: 'enrichment',
+    }, 18)).rejects.toThrow('metadata unavailable without a creation block');
+    expect(client.getLogs).not.toHaveBeenCalled();
   });
 
   it('uses factory-discovered PoolKey metadata without a genesis-wide log scan', async () => {

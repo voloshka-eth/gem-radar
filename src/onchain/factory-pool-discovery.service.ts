@@ -67,9 +67,20 @@ export class FactoryPoolDiscoveryService {
       const results = await Promise.all(this.factories(chain).map(async (factory) => {
         const cursorKey = `${chain}:${factory.address}`;
         const previous = this.lastProcessedBlock.get(cursorKey);
-        const fromBlock = previous == null
+        let fromBlock = previous == null
           ? (toBlock > lookback ? toBlock - lookback : 0n)
           : previous + 1n;
+        // Public RPC fallbacks are deliberately non-archive. After a long
+        // downtime, resume the small live window instead of retrying an
+        // unserviceable multi-day eth_getLogs range forever.
+        const earliestLiveBlock = toBlock > lookback ? toBlock - lookback : 0n;
+        if (fromBlock < earliestLiveBlock) {
+          this.logger.warn(
+            `Factory discovery fast-forwarded stale ${chain}:${factory.dex} cursor ` +
+            `${fromBlock}-${toBlock} to live window ${earliestLiveBlock}-${toBlock}`,
+          );
+          fromBlock = earliestLiveBlock;
+        }
         if (fromBlock > toBlock) return 0;
         try {
           const logs = await client.getLogs({
@@ -109,8 +120,24 @@ export class FactoryPoolDiscoveryService {
     client: PublicClient,
   ): Promise<number> {
     let added = 0;
-    const timestamps = new Map<bigint, Date | undefined>();
-    for (const log of logs as Array<{ args?: Record<string, unknown>; blockNumber?: bigint }>) {
+    const observedAt = new Date();
+    const typedLogs = logs as Array<{
+      args?: Record<string, unknown>;
+      blockNumber?: bigint;
+      transactionHash?: string;
+      logIndex?: number;
+    }>;
+    const blockTimes = new Map<string, Date>();
+    await Promise.all([...new Set(typedLogs.map((log) => log.blockNumber?.toString()).filter((v): v is string => Boolean(v)))]
+      .map(async (blockNumber) => {
+        try {
+          const block = await client.getBlock({ blockNumber: BigInt(blockNumber) });
+          blockTimes.set(blockNumber, new Date(Number(block.timestamp) * 1000));
+        } catch {
+          blockTimes.set(blockNumber, observedAt);
+        }
+      }));
+    for (const log of typedLogs) {
       const token0 = this.addressArg(log.args?.token0 ?? log.args?.currency0);
       const token1 = this.addressArg(log.args?.token1 ?? log.args?.currency1);
       const poolAddress = factory.poolArg === 'id'
@@ -124,23 +151,19 @@ export class FactoryPoolDiscoveryService {
       const quoteAddress = quote0 ?? quote1;
       if (!quoteAddress) continue;
       const tokenAddress = quote0 ? token1 : token0;
-      let poolCreatedAt: Date | undefined;
-      if (log.blockNumber != null) {
-        if (!timestamps.has(log.blockNumber)) {
-          const timestamp = await client.getBlock({ blockNumber: log.blockNumber })
-            .then((block) => new Date(Number(block.timestamp) * 1000))
-            .catch(() => undefined);
-          timestamps.set(log.blockNumber, timestamp);
-        }
-        poolCreatedAt = timestamps.get(log.blockNumber);
-      }
       const candidate: CollectorResult = {
         token: { chain, tokenAddress, symbol: '', name: '', source: 'onchain_factory' },
         pool: {
           chain, poolAddress, dex: factory.dex, token0Address: token0, token1Address: token1,
           quoteAsset: quotes[quoteAddress], quoteAssetAddress: quoteAddress,
           v4Metadata: factory.poolArg === 'id' ? this.v4Metadata(log.args) : undefined,
-          poolCreatedAt, source: 'onchain_factory',
+          poolCreatedAt: log.blockNumber
+            ? blockTimes.get(log.blockNumber.toString()) ?? observedAt
+            : observedAt,
+          creationBlockNumber: log.blockNumber?.toString(),
+          creationTxHash: log.transactionHash?.toLowerCase(),
+          creationLogIndex: log.logIndex,
+          source: 'onchain_factory',
         },
       };
       const key = this.key(candidate);

@@ -121,6 +121,9 @@ describe('outcomeClass — maps close reason + realized multiple', () => {
     expect(outcomeClass('unsellable', 0.1)).toBe('UNSELLABLE');
     expect(outcomeClass('liquidity_pulled', 0.5)).toBe('LIQ_PULL');
   });
+  it('keeps realized profit visible after a terminal rug', () => {
+    expect(outcomeClass('rug', 1.2)).toBe('PARTIAL_PROFIT_RUG');
+  });
   it('maps graceful closes by realized multiple', () => {
     expect(outcomeClass('ladder_complete', 3)).toBe('WIN');
     expect(outcomeClass('drawdown', 0.2)).toBe('LOSS');

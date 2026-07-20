@@ -70,6 +70,22 @@ describe('FactoryPoolDiscoveryService', () => {
     await expect(service.getPendingPools('ethereum')).resolves.toEqual([]);
   });
 
+  it('fast-forwards a stale cursor to the live lookback instead of requesting archive logs', async () => {
+    const client = {
+      getBlockNumber: jest.fn().mockResolvedValue(1_000n),
+      getLogs: jest.fn().mockResolvedValue([]),
+    };
+    const service = new FactoryPoolDiscoveryService(config(), new Map([['ethereum', client]]) as any);
+    (service as any).lastProcessedBlock.set(
+      'ethereum:0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f',
+      1n,
+    );
+
+    await service.getPendingPools('ethereum');
+
+    expect(client.getLogs).toHaveBeenCalledWith(expect.objectContaining({ fromBlock: 970n, toBlock: 1_000n }));
+  });
+
   it('recognizes a V4 Initialize event with native ETH as a WETH-quoted pool', async () => {
     const client = {
       getBlockNumber: jest.fn().mockResolvedValue(2_000n),

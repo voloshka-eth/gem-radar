@@ -247,19 +247,24 @@ model PaperPosition {
   poolAddress        String    @map("pool_address")
   symbol             String?
   liquidityModel     String    @map("liquidity_model")
+  strategyVersion   String    @default("legacy_static_v0") @map("strategy_version")
+  signalId          String?   @unique @map("signal_id")
+  riskCohort        String    @default("CONTRACT_SAFE") @map("risk_cohort")
+  exitPolicy        String    @default("SAFE_LADDER") @map("exit_policy")
+  benchmarkEligible Boolean   @default(true) @map("benchmark_eligible")
   // Entry timing (no look-ahead: entry uses a snapshot with ts ≤ openedAt).
   firstSeenAt        DateTime  @map("first_seen_at")
   detectionDelaySec  Int       @map("detection_delay_sec")
   openedAt           DateTime  @map("opened_at")
   sizeUsd            Decimal   @map("size_usd") @db.Decimal(12, 4)
   // Entry economics (pessimistic fill).
-  entryPriceUsd          Decimal? @map("entry_price_usd") @db.Decimal(40, 18)            // spot at entry
-  entryPriceEffectiveUsd Decimal? @map("entry_price_effective_usd") @db.Decimal(40, 18)  // after all costs
+  entryPriceUsd          Decimal? @map("entry_price_usd") @db.Decimal(80, 36)            // spot at entry
+  entryPriceEffectiveUsd Decimal? @map("entry_price_effective_usd") @db.Decimal(80, 36)  // after all costs
   modeledSlippagePct Decimal?  @map("modeled_slippage_pct") @db.Decimal(10, 6)
   modeledSandwichPct Decimal?  @map("modeled_sandwich_pct") @db.Decimal(10, 6)
   modeledGasUsd      Decimal?  @map("modeled_gas_usd") @db.Decimal(12, 4)
   modeledBuyTaxPct   Decimal?  @map("modeled_buy_tax_pct") @db.Decimal(10, 6)
-  tokensBought       Decimal?  @map("tokens_bought") @db.Decimal(40, 18)
+  tokensBought       Decimal?  @map("tokens_bought") @db.Decimal(80, 18)
   onchainLiqEntryUsd Decimal?  @map("onchain_liq_entry_usd") @db.Decimal(20, 4)
   entryFeatures      Json?     @map("entry_features")  // t0 snapshot features for post-mortem
   // Lifecycle.
@@ -270,7 +275,7 @@ model PaperPosition {
   realizedValueUsd   Decimal   @default(0) @map("realized_value_usd") @db.Decimal(20, 4)
   // Eval state (refreshed on demand).
   lastEvalAt          DateTime? @map("last_eval_at")
-  priceNowUsd         Decimal?  @map("price_now_usd") @db.Decimal(40, 18)
+  priceNowUsd         Decimal?  @map("price_now_usd") @db.Decimal(80, 36)
   onchainLiqNowUsd    Decimal?  @map("onchain_liq_now_usd") @db.Decimal(20, 4)
   currentMultiple     Decimal?  @map("current_multiple") @db.Decimal(16, 4)
   maxMultipleObserved Decimal?  @map("max_multiple_observed") @db.Decimal(16, 4)
@@ -293,11 +298,109 @@ model PaperPosition {
   token  Token        @relation(fields: [tokenId], references: [id])
   pool   Pool         @relation(fields: [poolId], references: [id])
   events PaperEvent[]
+  signal StrategySignal? @relation(fields: [signalId], references: [id])
 
   @@index([chain, tokenId])
+  @@index([chain, strategyVersion, openedAt])
   @@index([status])
   @@index([outcomeClass])
   @@map("paper_positions")
+}
+
+// Canonical ETH/Base flow research state. Raw swaps are retained so strategy
+// thresholds can be replayed without relying on third-party aggregate fields.
+model EvmPoolWatch {
+  id                       String   @id @default(cuid())
+  chain                    String
+  tokenAddress             String   @map("token_address")
+  poolAddress              String   @map("pool_address")
+  dex                      String
+  liquidityModel           String?  @map("liquidity_model")
+  watchType                String   @map("watch_type") // FRESH | MATURE
+  source                   String
+  status                   String   @default("WATCHING")
+  discoveredAt             DateTime @map("discovered_at")
+  expiresAt                DateTime @map("expires_at")
+  outcomeDueAt             DateTime @map("outcome_due_at")
+  creationBlock            String?  @map("creation_block")
+  creationTxHash           String?  @map("creation_tx_hash")
+  creationLogIndex         Int?     @map("creation_log_index")
+  creatorAddress           String?  @map("creator_address")
+  lastProcessedBlock       String?  @map("last_processed_block")
+  lastProcessedBlockHash   String?  @map("last_processed_block_hash")
+  candidateJson            Json     @map("candidate_json")
+  latestFlowSnapshot       Json?    @map("latest_flow_snapshot")
+  firstPriceUsd            Decimal? @map("first_price_usd") @db.Decimal(80, 36)
+  spotMaxMultiple          Decimal? @map("spot_max_multiple") @db.Decimal(20, 6)
+  executableNetMaxMultiple Decimal? @map("executable_net_max_multiple") @db.Decimal(20, 6)
+  benchmarkTokensBought    Decimal? @map("benchmark_tokens_bought") @db.Decimal(80, 18)
+  benchmarkEntryEffectiveUsd Decimal? @map("benchmark_entry_effective_usd") @db.Decimal(80, 36)
+  benchmarkEntryGasUsd     Decimal? @map("benchmark_entry_gas_usd") @db.Decimal(12, 4)
+  timeTo2xSec              Int?     @map("time_to_2x_sec")
+  maxDrawdown              Decimal? @map("max_drawdown") @db.Decimal(10, 6)
+  outcome1h                String?  @map("outcome_1h")
+  outcome6h                String?  @map("outcome_6h")
+  outcome24h               String?  @map("outcome_24h")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  swaps   EvmSwapObservation[]
+  signals StrategySignal[]
+
+  @@unique([chain, poolAddress, watchType])
+  @@index([chain, status, expiresAt])
+  @@index([outcomeDueAt])
+  @@map("evm_pool_watches")
+}
+
+model EvmSwapObservation {
+  id             String   @id @default(cuid())
+  watchId        String   @map("watch_id")
+  chain          String
+  poolAddress    String   @map("pool_address")
+  blockNumber    String   @map("block_number")
+  blockHash      String?  @map("block_hash")
+  txHash         String   @map("tx_hash")
+  logIndex       Int      @map("log_index")
+  ts             DateTime
+  trader         String
+  kind           String   // BUY | SELL
+  quoteAmountUsd Decimal  @map("quote_amount_usd") @db.Decimal(30, 8)
+  tokenAmount    Decimal? @map("token_amount") @db.Decimal(80, 18)
+  priceUsd       Decimal? @map("price_usd") @db.Decimal(80, 36)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  watch EvmPoolWatch @relation(fields: [watchId], references: [id], onDelete: Cascade)
+
+  @@unique([chain, txHash, logIndex])
+  @@index([watchId, ts])
+  @@map("evm_swap_observations")
+}
+
+model StrategySignal {
+  id                 String   @id @default(cuid())
+  watchId            String   @map("watch_id")
+  strategyVersion    String   @map("strategy_version")
+  chain              String
+  tokenAddress       String   @map("token_address")
+  poolAddress        String   @map("pool_address")
+  observedAt         DateTime @map("observed_at")
+  observedBlock      String   @map("observed_block")
+  expiresAt          DateTime @map("expires_at")
+  executablePriceUsd Decimal? @map("executable_price_usd") @db.Decimal(80, 36)
+  flowSnapshot       Json     @map("flow_snapshot")
+  riskSnapshot       Json?    @map("risk_snapshot")
+  status             String   @default("OBSERVED") // OBSERVED | ENTERED | HARD_REJECT | REORG_INVALIDATED
+  idempotencyKey     String   @unique @map("idempotency_key")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  watch         EvmPoolWatch  @relation(fields: [watchId], references: [id], onDelete: Cascade)
+  paperPosition PaperPosition?
+
+  @@unique([watchId, strategyVersion])
+  @@index([chain, strategyVersion, observedAt])
+  @@map("strategy_signals")
 }
 
 // ─── Shadow gem-tracker (OBSERVATION ONLY — never wired into entry/exit) ─────────
@@ -380,10 +483,10 @@ model PaperEvent {
   positionId String   @map("position_id")
   ts         DateTime
   type       String   // BUY | LADDER_SELL | INVALIDATE_SELL | NOT_ENTERED
-  price      Decimal  @db.Decimal(40, 18)
+  price      Decimal  @db.Decimal(80, 36)
   multiple   Decimal? @db.Decimal(16, 4)
   fraction   Decimal? @db.Decimal(8, 6)   // fraction of original position transacted
-  tokens     Decimal? @db.Decimal(40, 18)
+  tokens     Decimal? @db.Decimal(80, 18)
   usd        Decimal? @db.Decimal(20, 4)  // net USD (proceeds for sells, cost for buys)
   slipPct    Decimal? @map("slip_pct") @db.Decimal(10, 6)
   note       String?

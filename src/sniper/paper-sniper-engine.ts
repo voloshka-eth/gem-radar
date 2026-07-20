@@ -105,7 +105,10 @@ export class PaperSniperEngine {
       return actions;
     }
 
-    if (nowMs - position.openedAtMs >= this.config.timeExitMs) {
+    // If 2x never arrives, realize the actual outcome instead of leaving a
+    // stagnant position open forever. Once 80% has been sold at 2x, the runner
+    // is protected by realized profit and may continue toward the higher rungs.
+    if (nowMs - position.openedAtMs >= this.config.timeExitMs && position.executedRungs.length === 0) {
       actions.push(this.close(position, 'TIME_EXIT', nowMs, marketPrice, netMultiple, 'maximum holding time reached'));
     }
     return actions;

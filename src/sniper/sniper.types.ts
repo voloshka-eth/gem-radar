@@ -1,4 +1,4 @@
-export const SNIPER_STRATEGY_VERSION = 'four-meme-flow-v4';
+export const SNIPER_STRATEGY_VERSION = 'four-meme-flow-v6';
 
 export type SniperAddress = `0x${string}`;
 

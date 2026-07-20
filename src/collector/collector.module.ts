@@ -9,9 +9,10 @@ import { OnchainModule } from '../onchain/onchain.module';
 import { ScoringModule } from '../scoring/scoring.module';
 import { PaperModule } from '../paper/paper.module';
 import { DeployerModule } from '../deployer/deployer.module';
+import { FlowModule } from '../flow/flow.module';
 
 @Module({
-  imports: [RiskEngineModule, OnchainModule, ScoringModule, PaperModule, DeployerModule],
+  imports: [RiskEngineModule, OnchainModule, ScoringModule, PaperModule, DeployerModule, FlowModule],
   providers: [GeckoTerminalService, DexScreenerService, MoralisService, BirdeyeService, CollectorService],
   exports: [CollectorService],
 })

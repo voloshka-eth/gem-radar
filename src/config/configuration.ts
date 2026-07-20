@@ -27,8 +27,10 @@ export const chainConfig = registerAs('chain', () => ({
   // publicnode.com is the fallback — no archive, but handles latest-state calls on RPC outage.
   ethereumRpcUrl:         process.env.ETHEREUM_RPC_URL          ?? 'https://eth.drpc.org',
   ethereumRpcUrlFallback: process.env.ETHEREUM_RPC_URL_FALLBACK ?? 'https://ethereum.publicnode.com',
+  ethereumRpcWsUrl:       process.env.ETHEREUM_RPC_WS_URL || undefined,
   baseRpcUrl:             process.env.BASE_RPC_URL              ?? 'https://base.drpc.org',
   baseRpcUrlFallback:     process.env.BASE_RPC_URL_FALLBACK     ?? 'https://base.publicnode.com',
+  baseRpcWsUrl:           process.env.BASE_RPC_WS_URL || undefined,
   robinhoodRpcUrl:        process.env.ROBINHOOD_RPC_URL         ?? 'https://rpc.mainnet.chain.robinhood.com',
   robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK || undefined,
   // Robinhood's public RPC currently rejects historical eth_getCode. Keep token
@@ -38,6 +40,22 @@ export const chainConfig = registerAs('chain', () => ({
     .split(',')
     .map((chain) => chain.trim())
     .filter(Boolean),
+}));
+
+export const evmFlowConfig = registerAs('evmFlow', () => ({
+  enabled: process.env.EVM_FLOW_ENABLED !== 'false',
+  factoryPollMs: parseInt(process.env.EVM_FLOW_FACTORY_POLL_MS ?? '3000', 10),
+  healthLogMs: parseInt(process.env.EVM_FLOW_HEALTH_LOG_MS ?? '30000', 10),
+  freshWatchMs: parseInt(process.env.EVM_FLOW_FRESH_WATCH_MS ?? '300000', 10),
+  matureWatchMs: parseInt(process.env.EVM_FLOW_MATURE_WATCH_MS ?? '900000', 10),
+  outcomeTrackMs: parseInt(process.env.EVM_FLOW_OUTCOME_TRACK_MS ?? '86400000', 10),
+  maxHeadLagBlocks: parseInt(process.env.EVM_FLOW_MAX_HEAD_LAG_BLOCKS ?? '2', 10),
+  minExecutableDepthUsd: parseFloat(process.env.EVM_FLOW_MIN_EXECUTABLE_DEPTH_USD ?? '100'),
+  maxEntrySlipPct: parseFloat(process.env.EVM_FLOW_MAX_ENTRY_SLIP_PCT ?? '0.10'),
+  httpPollMsEthereum: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_ETHEREUM ?? '12000', 10),
+  httpPollMsBase: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_BASE ?? '4000', 10),
+  matureBackfillBlocksEthereum: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_ETHEREUM ?? '25', 10),
+  matureBackfillBlocksBase: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_BASE ?? '150', 10),
 }));
 
 export const apiConfig = registerAs('api', () => ({
@@ -80,6 +98,10 @@ export const collectorConfig = registerAs('collector', () => ({
   // RPC-native factory events arrive before third-party pool listings. They are
   // pre-filtered by an on-chain liquidity quote before any risk-provider request.
   factoryDiscoveryEnabled: process.env.FACTORY_DISCOVERY_ENABLED !== 'false',
+  factoryDiscoveryHotPollMs: parseInt(process.env.FACTORY_DISCOVERY_HOT_POLL_MS ?? '5000', 10),
+  factoryDiscoveryHotAutostart: process.env.FACTORY_DISCOVERY_HOT_AUTOSTART != null
+    ? process.env.FACTORY_DISCOVERY_HOT_AUTOSTART !== 'false'
+    : activeStrategyMode() === 'legacy_contract_radar',
   factoryDiscoveryInitialLookbackEthereum: parseInt(process.env.FACTORY_DISCOVERY_INITIAL_LOOKBACK_ETHEREUM ?? '30', 10),
   // Keep Base's first query inside public RPC non-archive log limits. Subsequent
   // cycles advance from the in-memory cursor, so this does not slow live discovery.
@@ -103,6 +125,18 @@ export const collectorConfig = registerAs('collector', () => ({
   robinhoodMinDepthUsd: parseFloat(process.env.ROBINHOOD_MIN_DEPTH_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
   robinhoodMinOnchainTvlUsd: parseFloat(process.env.ROBINHOOD_MIN_ONCHAIN_TVL_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_ONCHAIN_TVL_USD ?? '200'),
   robinhoodMinScore: parseFloat(process.env.ROBINHOOD_MIN_SCORE ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),
+  robinhoodShadowMinScore: parseFloat(process.env.ROBINHOOD_SHADOW_MIN_SCORE ?? '30'),
+  robinhoodStageMaxPoolAgeHours: parseFloat(process.env.ROBINHOOD_STAGE_MAX_POOL_AGE_HOURS ?? '6'),
+  robinhoodStageMinReportedLiquidityUsd: parseFloat(process.env.ROBINHOOD_STAGE_MIN_REPORTED_LIQUIDITY_USD ?? '2500'),
+  robinhoodStageStandardLiquidityUsd: parseFloat(process.env.ROBINHOOD_STAGE_STANDARD_LIQUIDITY_USD ?? '5000'),
+  robinhoodStageMinFdvUsd: parseFloat(process.env.ROBINHOOD_STAGE_MIN_FDV_USD ?? '1000'),
+  robinhoodStageMaxFdvUsd: parseFloat(process.env.ROBINHOOD_STAGE_MAX_FDV_USD ?? '50000000'),
+  robinhoodStageBootstrapMinVol5mUsd: parseFloat(process.env.ROBINHOOD_STAGE_BOOTSTRAP_MIN_VOL_5M_USD ?? '250'),
+  robinhoodStageBootstrapMinTx1h: parseInt(process.env.ROBINHOOD_STAGE_BOOTSTRAP_MIN_TX_1H ?? '5', 10),
+  robinhoodStageBootstrapMinBuys1h: parseInt(process.env.ROBINHOOD_STAGE_BOOTSTRAP_MIN_BUYS_1H ?? '3', 10),
+  robinhoodStageMatureMinVol1hUsd: parseFloat(process.env.ROBINHOOD_STAGE_MATURE_MIN_VOL_1H_USD ?? '1000'),
+  robinhoodStageMatureMinTx1h: parseInt(process.env.ROBINHOOD_STAGE_MATURE_MIN_TX_1H ?? '20', 10),
+  robinhoodStageMatureMinBuys1h: parseInt(process.env.ROBINHOOD_STAGE_MATURE_MIN_BUYS_1H ?? '10', 10),
   deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
   deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
   deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '1', 10),
@@ -227,6 +261,7 @@ export const paperConfig = registerAs('paper', () => ({
   // Exit ladder: sell fractions of the ORIGINAL position when the multiple is crossed.
   // Recover the stake at 2x, realize a further slice at 10x, and retain a small
   // asymmetric tail for the rare true outlier.
+  partialProfitTimeExitMs: parseInt(process.env.PAPER_PARTIAL_PROFIT_TIME_EXIT_MS ?? '3600000', 10),
   ladder: [
     { multiple: 2,    sellFraction: 0.80 },
     { multiple: 10,   sellFraction: 0.15 },
@@ -237,6 +272,7 @@ export const paperConfig = registerAs('paper', () => ({
   rugLiqUsd:             parseFloat(process.env.PAPER_RUG_LIQ_USD         ?? '50'),   // liq ≤ this → rug
   sellTaxSpikePct:       parseFloat(process.env.PAPER_SELL_TAX_SPIKE_PCT  ?? '0.50'), // sell tax ≥ 50% → unsellable
   maxDrawdownInvalidate: parseFloat(process.env.PAPER_MAX_DRAWDOWN        ?? '0.70'), // drawdown > 70% → invalidate
+  hardStopMultiple:      parseFloat(process.env.PAPER_HARD_STOP_MULTIPLE ?? '0.80'),
   priceReadFailureRugThreshold: parseInt(process.env.PAPER_PRICE_READ_FAILURE_RUG_THRESHOLD ?? '3', 10),
   rugLiquidityConfirmationCount: parseInt(process.env.PAPER_RUG_LIQUIDITY_CONFIRMATIONS ?? '1', 10),
   robinhoodRugLiquidityConfirmationCount: parseInt(
@@ -346,8 +382,8 @@ export const launchSniperConfig = registerAs('launchSniper', () => ({
     momentumConfirmations: parseInt(process.env.LAUNCH_SNIPER_MOMENTUM_CONFIRMATIONS ?? '2', 10),
     ladder: [
       { multiple: 2, sellFraction: 0.80 },
-      { multiple: 10, sellFraction: 0.15 },
-      { multiple: 1000, sellFraction: 0.05 },
+      { multiple: 5, sellFraction: 0.15 },
+      { multiple: parseFloat(process.env.LAUNCH_SNIPER_RUNNER_MULTIPLE ?? '100'), sellFraction: 0.05 },
     ],
   },
 }));
@@ -363,6 +399,7 @@ export default [
   appConfig,
   redisConfig,
   chainConfig,
+  evmFlowConfig,
   apiConfig,
   collectorConfig,
   scoringConfig,

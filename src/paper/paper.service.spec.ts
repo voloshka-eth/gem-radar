@@ -125,6 +125,40 @@ describe('PaperService', () => {
     expect(fileLoggerMock.logPaperEntry).toHaveBeenCalledTimes(1);
   });
 
+  it('allows parallel strategies on one pool while keeping each signal idempotent', async () => {
+    const config = {
+      get: jest.fn((key: string) => key === 'paper.takeCohortEnabled' ? true : undefined),
+    } as unknown as ConfigService;
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any, liquidityVerifierMock as any);
+    const early = {
+      ...buildCandidate(), strategyVersion: 'fresh_early_v1', signalId: 'signal-early',
+      flowSnapshot: { uniqueBuyers: 2, buyQuoteUsd: 120, buySellRatio: 2, priceMomentum: 1.01 },
+    };
+    const confirmed = {
+      ...buildCandidate(), strategyVersion: 'fresh_confirmed_v1', signalId: 'signal-confirmed',
+      flowSnapshot: { uniqueBuyers: 4, buyQuoteUsd: 600, buySellRatio: 3, priceMomentum: 1.05 },
+    };
+
+    await service.recordEntry(early);
+    await service.recordEntry(confirmed);
+
+    expect(prismaMock.paperPosition.findFirst.mock.calls.map((call) => call[0].where)).toEqual([
+      { signalId: 'signal-early' },
+      { signalId: 'signal-confirmed' },
+    ]);
+    expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(2);
+    expect(prismaMock.paperPosition.create.mock.calls[0][0].data).toMatchObject({
+      strategyVersion: 'fresh_early_v1', signalId: 'signal-early', status: 'OPEN',
+    });
+    expect(prismaMock.paperPosition.create.mock.calls[1][0].data).toMatchObject({
+      strategyVersion: 'fresh_confirmed_v1', signalId: 'signal-confirmed', status: 'OPEN',
+    });
+
+    prismaMock.paperPosition.findFirst.mockResolvedValueOnce({ id: 'existing' });
+    await service.recordEntry(early);
+    expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(2);
+  });
+
   it('queues Base/Ethereum candidates instead of treating discovery as a buy', async () => {
     const config = {
       get: jest.fn((key: string) => key === 'paper.takeCohortEnabled' ? true : undefined),

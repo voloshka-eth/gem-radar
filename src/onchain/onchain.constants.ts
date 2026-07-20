@@ -2,6 +2,7 @@ export const ONCHAIN_REDIS_CLIENT = 'ONCHAIN_REDIS_CLIENT';
 
 // Injection token for a Map<SupportedChain, PublicClient> providing viem clients.
 export const VIEM_CLIENTS = 'VIEM_CLIENTS';
+export const VIEM_STREAM_CLIENTS = 'VIEM_STREAM_CLIENTS';
 
 // Known decimal counts for accepted quote assets — avoids an on-chain call.
 export const QUOTE_ASSET_DECIMALS: Record<string, number> = {

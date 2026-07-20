@@ -36,8 +36,8 @@ describe('LaunchSniperService', () => {
     momentumConfirmations: 2,
     ladder: [
       { multiple: 2, sellFraction: 0.8 },
-      { multiple: 10, sellFraction: 0.15 },
-      { multiple: 1000, sellFraction: 0.05 },
+      { multiple: 5, sellFraction: 0.15 },
+      { multiple: 100, sellFraction: 0.05 },
     ],
   };
 

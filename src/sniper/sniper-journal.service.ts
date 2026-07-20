@@ -198,7 +198,7 @@ export class SniperJournalService implements OnModuleInit, OnModuleDestroy {
         realized_multiple_total: record.realizedMultiple,
         note: record.note,
         deployer_address: record.creator,
-        outcome_class: outcomeClass(type),
+        outcome_class: outcomeClass(record),
         strategy_version: record.strategyVersion,
       });
       return;
@@ -266,9 +266,11 @@ function exitStatus(type: string): string {
   return type === 'LADDER_EXIT' ? 'alive' : 'closed';
 }
 
-function outcomeClass(type: string): string {
-  if (type === 'CREATOR_EXIT' || type === 'TRADE_STOP_EXIT') return 'RUG';
-  if (type === 'LADDER_EXIT') return 'WIN';
+function outcomeClass(record: SniperJournalRecord): string {
+  const realizedMultiple = Number(record.realizedMultiple);
+  if (Number.isFinite(realizedMultiple) && realizedMultiple > 1) return 'PARTIAL_PROFIT';
+  if (record.type === 'CREATOR_EXIT' || record.type === 'TRADE_STOP_EXIT') return 'RUG';
+  if (record.type === 'LADDER_EXIT') return 'PARTIAL_PROFIT';
   return 'LOSS';
 }
 

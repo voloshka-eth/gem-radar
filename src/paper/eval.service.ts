@@ -11,13 +11,15 @@ import { GeckoTerminalService } from '../collector/geckoterminal/geckoterminal.s
 import { QUOTE_ASSET_MAP, SupportedChain, CandidatePool } from '../collector/collector.types';
 import type { LiquidityCheckResult } from '../onchain/onchain.types';
 import {
-  detectStatus, isInvalidating, rungsTriggered, outcomeClass, PositionStatus, LadderRung,
+  detectStatus, isInvalidating, outcomeClass, PositionStatus, LadderRung,
 } from './exit-ladder';
 import { modelExit, slipForSize } from './fills';
 import { taxFraction } from './paper.service';
 import type { EvalViewRow } from './paper.types';
 import { DeployerReputationService } from '../deployer/deployer-reputation.service';
 import { PaperService } from './paper.service';
+import { GasModelService } from '../onchain/gas-model.service';
+import { nextConsecutiveWindowCount } from '../flow/flow-state';
 
 const num = (d: unknown): number | null => (d == null ? null : Number(d));
 const DEFAULT_PRICE_READ_FAILURE_RUG_THRESHOLD = 3;
@@ -57,6 +59,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     private readonly geckoTerminal: GeckoTerminalService,
     private readonly deployerReputation: DeployerReputationService,
     private readonly paper: PaperService,
+    private readonly gasModel: GasModelService,
   ) {}
 
   onModuleInit(): void {
@@ -107,7 +110,27 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async evaluateOpenPositions(): Promise<{
+  async requestEvaluation(): Promise<void> {
+    await this.runScheduledEval();
+  }
+
+  async requestFlowEvaluation(chain: string, poolAddresses: readonly string[]): Promise<void> {
+    if (this.isScheduledEvalRunning || poolAddresses.length === 0) return;
+    this.isScheduledEvalRunning = true;
+    try {
+      await this.evaluateOpenPositions({ forceFlow: true, chain, poolAddresses });
+    } catch (err) {
+      this.logger.error(`Flow paper eval failed: ${(err as Error).message}`);
+    } finally {
+      this.isScheduledEvalRunning = false;
+    }
+  }
+
+  async evaluateOpenPositions(options: {
+    forceFlow?: boolean;
+    chain?: string;
+    poolAddresses?: readonly string[];
+  } = {}): Promise<{
     rows: EvalViewRow[];
     evaluated: number;
     openTotal: number;
@@ -123,7 +146,17 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     const take = await this.paper.processPendingConfirmations();
     const evalMaxOpenPositions = this.config.get<number>('paper.evalMaxOpenPositions');
     const openTotal = await this.prisma.paperPosition.count({
-      where: { status: 'OPEN' },
+      where: {
+        status: 'OPEN',
+        ...(options.forceFlow ? {
+          chain: options.chain,
+          poolAddress: { in: [...(options.poolAddresses ?? [])] },
+          OR: [
+            { strategyVersion: { startsWith: 'fresh_' } },
+            { strategyVersion: { startsWith: 'mature_' } },
+          ],
+        } : {}),
+      },
     });
     const youngWindowSec = this.config.get<number>('paper.evalYoungWindowSec');
     const youngIntervalMs = this.config.get<number>('paper.evalYoungIntervalMs');
@@ -131,7 +164,17 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     const collectTradeStats = this.config.get<boolean>('paper.collectTradeStats') ?? false;
     const cadenceEnabled = youngWindowSec != null && youngIntervalMs != null && matureIntervalMs != null;
     const openRows = await this.prisma.paperPosition.findMany({
-      where: { status: 'OPEN' },
+      where: {
+        status: 'OPEN',
+        ...(options.forceFlow ? {
+          chain: options.chain,
+          poolAddress: { in: [...(options.poolAddresses ?? [])] },
+          OR: [
+            { strategyVersion: { startsWith: 'fresh_' } },
+            { strategyVersion: { startsWith: 'mature_' } },
+          ],
+        } : {}),
+      },
       include: { pool: true, token: true },
       orderBy: { openedAt: 'asc' },
       ...(!cadenceEnabled && evalMaxOpenPositions && evalMaxOpenPositions > 0
@@ -139,7 +182,9 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         : {}),
     });
     const nowMs = Date.now();
-    const dueRows = cadenceEnabled
+    const dueRows = options.forceFlow
+      ? openRows
+      : cadenceEnabled
       ? openRows.filter((position) => {
           if (!position.lastEvalAt) return true;
           const openedAt = position.openedAt?.getTime?.() ?? position.firstSeenAt.getTime();
@@ -148,7 +193,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
           return nowMs - position.lastEvalAt.getTime() >= cadenceMs;
       })
       : openRows;
-    if (cadenceEnabled) {
+    if (cadenceEnabled && !options.forceFlow) {
       dueRows.sort((a, b) => {
         const aOpened = a.openedAt?.getTime?.() ?? a.firstSeenAt.getTime();
         const bOpened = b.openedAt?.getTime?.() ?? b.firstSeenAt.getTime();
@@ -175,7 +220,10 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     }
 
     const sandwichPct  = this.config.get<number>('paper.sandwichPct') ?? 0.01;
-    const gasUsd       = this.config.get<number>('paper.gasUsd') ?? 1.5;
+    const partialProfitTimeExitMs = Math.max(
+      0,
+      this.config.get<number>('paper.partialProfitTimeExitMs') ?? 3_600_000,
+    );
     const ladder       = (this.config.get<LadderRung[]>('paper.ladder') ?? []) as LadderRung[];
     const statusParams = {
       liqPullDropPct:  this.config.get<number>('paper.liqPullDropPct') ?? 0.6,
@@ -183,6 +231,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       sellTaxSpikePct: this.config.get<number>('paper.sellTaxSpikePct') ?? 0.5,
     };
     const maxDrawdownInvalidate = this.config.get<number>('paper.maxDrawdownInvalidate') ?? 0.7;
+    const hardStopMultiple = this.config.get<number>('paper.hardStopMultiple') ?? 0.8;
     const priceReadFailureRugThreshold = Math.max(
       1,
       this.config.get<number>('paper.priceReadFailureRugThreshold') ??
@@ -204,6 +253,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
 
     for (const pos of open) {
       const chain = pos.chain as SupportedChain;
+      const gasUsd = await this.gasModel.estimateUsd(chain, pos.liquidityModel);
       const rugLiquidityConfirmationCount = chain === 'robinhood'
         ? robinhoodRugLiquidityConfirmationCount
         : defaultRugLiquidityConfirmationCount;
@@ -223,24 +273,22 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       const priceReadFailureCount = priceUnreadable
         ? this.readPriceFailureCount(entryFeatures.priceReadFailureCount) + 1
         : 0;
-      const priceFailureReached =
-        priceUnreadable && priceReadFailureCount >= priceReadFailureRugThreshold;
       const lowLiquidityRead = liqNow != null && liqNow <= statusParams.rugLiqUsd;
       const liquidityGoneReadCount = lowLiquidityRead
         ? this.readCounter(entryFeatures.liquidityGoneReadCount) + 1
         : 0;
       const liquidityGoneConfirmed =
         lowLiquidityRead && liquidityGoneReadCount >= rugLiquidityConfirmationCount;
-      let nextEntryFeatures = this.withPriceReadFailure(
+      let nextEntryFeatures = this.entryFeaturesRecord(this.withPriceReadFailure(
         pos.entryFeatures,
         priceReadFailureCount,
         priceUnreadable ? (onchainRead.error ?? 'no_price') : null,
-      );
-      nextEntryFeatures = this.withLiquidityGoneRead(
+      ));
+      nextEntryFeatures = this.entryFeaturesRecord(this.withLiquidityGoneRead(
         nextEntryFeatures,
         liquidityGoneReadCount,
         lowLiquidityRead ? liqNow : null,
-      );
+      ));
       // RE-RUN sell simulation against current state (existing exit behavior unchanged).
       const { sellSimOk, sellTaxNow } = await this.reCheckSell(chain, pos.tokenAddress, pos.symbol ?? '');
 
@@ -266,9 +314,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
             ? 'liquidity_pulled'
             : sellSideInvalid
               ? 'unsellable'
-              : priceFailureReached
-                ? 'rug'
-                : 'alive'
+              : 'alive'
         : liqNow == null
           ? sellSideInvalid ? 'unsellable' : 'alive'
           : (() => {
@@ -283,14 +329,14 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         : !priceUnreadable && liqNow == null && status === 'alive'
           ? 'liquidity_unreadable'
         : status;
-      nextEntryFeatures = this.withSurvivalObservation(
+      nextEntryFeatures = this.entryFeaturesRecord(this.withSurvivalObservation(
         nextEntryFeatures,
         pos.openedAt ?? pos.firstSeenAt,
         entryEff,
         priceNow,
         liq,
         status,
-      );
+      ));
 
       // ── Multiple / drawdown ───────────────────────────────────────────────────
       const currentMultiple = entryEff && priceNow != null ? priceNow / entryEff : null;
@@ -304,21 +350,53 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       const executed = (pos.executedRungs ? pos.executedRungs.split(',').filter(Boolean).map(Number) : []);
       let remainingFraction = num(pos.remainingFraction) ?? 1;
       let realizedValueUsd  = num(pos.realizedValueUsd) ?? 0;
+      const exitPolicy = (pos as any).exitPolicy ?? 'SAFE_LADDER';
+      const positionLadder: LadderRung[] = exitPolicy === 'SOFT_RISK_2X'
+        ? [{ multiple: 2, sellFraction: 1 }]
+        : ladder;
 
       if (currentMultiple != null && status === 'alive') {
-        for (const rung of rungsTriggered(currentMultiple, executed, ladder)) {
+        for (const rung of positionLadder.filter((item) => !executed.includes(item.multiple))) {
           const tokensToSell = tokensBought * rung.sellFraction;
           const usdValue = tokensToSell * (priceNow ?? 0);
           const exitSlip = slipForSize(usdValue, ladderFrom(liq));
           const fill = modelExit(tokensToSell, priceNow ?? 0, exitSlip, { sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow) });
+          const executableRungMultiple = sizeUsd > 0 && rung.sellFraction > 0
+            ? fill.netUsd / (sizeUsd * rung.sellFraction)
+            : 0;
+          if (executableRungMultiple < rung.multiple) continue;
           realizedValueUsd += fill.netUsd;
           remainingFraction = Math.max(0, remainingFraction - rung.sellFraction);
           executed.push(rung.multiple);
           await this.writeExit(runId, pos, 'LADDER_SELL', status, priceNow, currentMultiple, rung.sellFraction,
-            tokensToSell, fill.netUsd, exitSlip, realizedValueUsd / sizeUsd, `ladder ${rung.multiple}x`);
+            tokensToSell, fill.netUsd, exitSlip, realizedValueUsd / sizeUsd,
+            `ladder ${rung.multiple}x executable=${executableRungMultiple.toFixed(4)}x`);
         }
       }
       const ladderComplete = remainingFraction <= 1e-6;
+      const openedAtMs = (pos.openedAt ?? pos.firstSeenAt).getTime();
+      const timeExitDue =
+        partialProfitTimeExitMs > 0 &&
+        Date.now() - openedAtMs >= partialProfitTimeExitMs &&
+        status === 'alive' &&
+        currentMultiple != null;
+
+      const flowReversal = await this.flowReversalState(pos, nextEntryFeatures, entryEff, priceNow, drawdown);
+      nextEntryFeatures = {
+        ...nextEntryFeatures,
+        flowReversalCount: flowReversal.count,
+        flowReversalWindow: flowReversal.window,
+        flowBuySellRatio30s: flowReversal.ratio,
+      };
+
+      const fullExitTokens = tokensBought * remainingFraction;
+      const fullExitValue = fullExitTokens * (priceNow ?? 0);
+      const fullExitSlip = slipForSize(fullExitValue, ladderFrom(liq));
+      const fullExitFill = modelExit(fullExitTokens, priceNow ?? 0, fullExitSlip, {
+        sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow),
+      });
+      const executableIfClosed = sizeUsd > 0 ? (realizedValueUsd + fullExitFill.netUsd) / sizeUsd : 0;
+      const hardStop = status === 'alive' && currentMultiple != null && executableIfClosed <= hardStopMultiple;
 
       // Last-tick rug signals — persisted on the position (COLLECTION ONLY; the LAST
       // value before close feeds the post-mortem). NOT used in any exit decision.
@@ -329,7 +407,9 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       };
 
       // ── Invalidation exit ─────────────────────────────────────────────────────
-      const invalidate = !ladderComplete && (isInvalidating(status) || drawdown > maxDrawdownInvalidate);
+      const invalidate = !ladderComplete && (
+        isInvalidating(status) || hardStop || flowReversal.confirmed || drawdown > maxDrawdownInvalidate
+      );
       let finalStatus: string = tickStatus;
       if (ladderComplete) {
         const realizedMultiple = realizedValueUsd / sizeUsd;
@@ -343,12 +423,49 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
             executedRungs: executed.join(','), lastEvalAt: new Date(),
             priceNowUsd: priceNow, onchainLiqNowUsd: liqNow, currentMultiple,
             maxMultipleObserved: maxMult, maxDrawdownObserved: drawdown,
-            entryFeatures: nextEntryFeatures,
+            entryFeatures: nextEntryFeatures as Prisma.InputJsonValue,
             ...lastTickData,
           },
         });
         finalStatus = `closed:${closeOutcomeClass}`;
         closed++;
+      } else if (timeExitDue && !invalidate) {
+        const tokensToSell = tokensBought * remainingFraction;
+        const usdValue = tokensToSell * (priceNow ?? 0);
+        const exitSlip = slipForSize(usdValue, ladderFrom(liq));
+        const fill = modelExit(tokensToSell, priceNow ?? 0, exitSlip, {
+          sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow),
+        });
+        const finalRealizedValueUsd = realizedValueUsd + fill.netUsd;
+        const realizedMultiple = finalRealizedValueUsd / sizeUsd;
+
+        {
+          const closeReason = realizedMultiple >= 1 ? 'time_profit' : 'time_loss';
+          const closeOutcomeClass = outcomeClass(closeReason, realizedMultiple);
+          await this.writeExit(
+            runId, pos, realizedMultiple >= 1 ? 'TIME_PROFIT_SELL' : 'TIME_LOSS_SELL', status, priceNow, currentMultiple, remainingFraction,
+            tokensToSell, fill.netUsd, exitSlip, realizedMultiple,
+            `time exit after ${Math.round(partialProfitTimeExitMs / 60_000)}m`,
+            closeOutcomeClass,
+          );
+          remainingFraction = 0;
+          realizedValueUsd = finalRealizedValueUsd;
+          await this.prisma.paperPosition.update({
+            where: { id: pos.id },
+            data: {
+              status: 'CLOSED', closedAt: new Date(),
+              realizedMultiple, realizedValueUsd, remainingFraction: 0,
+              outcomeClass: closeOutcomeClass,
+              executedRungs: executed.join(','), lastEvalAt: new Date(),
+              priceNowUsd: priceNow, onchainLiqNowUsd: liqNow, currentMultiple,
+              maxMultipleObserved: maxMult, maxDrawdownObserved: drawdown,
+              entryFeatures: nextEntryFeatures as Prisma.InputJsonValue,
+              ...lastTickData,
+            },
+          });
+          finalStatus = `closed:${closeOutcomeClass}`;
+          closed++;
+        }
       } else if (invalidate) {
         const tokensToSell = tokensBought * remainingFraction;
         // On a rug, priceNow≈0 and depth is gone → modeled proceeds ≈ 0 (pessimistic).
@@ -356,12 +473,14 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         const exitSlip = liqNow == null ? 1 : slipForSize(usdValue, ladderFrom(liq));
         const fill = modelExit(tokensToSell, priceNow ?? 0, exitSlip, { sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow) });
         realizedValueUsd += fill.netUsd;
-        const reason = drawdown > maxDrawdownInvalidate && !isInvalidating(status) ? 'drawdown' : status;
+        const reason = hardStop
+          ? 'hard_stop'
+          : flowReversal.confirmed
+            ? 'flow_reversal'
+            : drawdown > maxDrawdownInvalidate && !isInvalidating(status) ? 'drawdown' : status;
         const realizedMultiple = realizedValueUsd / sizeUsd;
-        const closeOutcomeClass = outcomeClass(reason as PositionStatus | 'drawdown', realizedMultiple);
-        const invalidationReason = priceFailureReached && status === 'rug'
-          ? `price_unreadable_${priceReadFailureCount}x${onchainRead.error ? `: ${onchainRead.error}` : ''}`
-          : liquidityGoneConfirmed && status === 'rug'
+        const closeOutcomeClass = outcomeClass(reason as PositionStatus | 'drawdown' | 'hard_stop' | 'flow_reversal', realizedMultiple);
+        const invalidationReason = liquidityGoneConfirmed && status === 'rug'
             ? `liquidity_gone_${liquidityGoneReadCount}x`
           : reason;
         await this.writeExit(runId, pos, 'INVALIDATE_SELL', status, priceNow, currentMultiple, remainingFraction,
@@ -377,7 +496,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
             executedRungs: executed.join(','), lastEvalAt: new Date(),
             priceNowUsd: priceNow, onchainLiqNowUsd: liqNow, currentMultiple,
             maxMultipleObserved: maxMult, maxDrawdownObserved: drawdown,
-            entryFeatures: nextEntryFeatures,
+            entryFeatures: nextEntryFeatures as Prisma.InputJsonValue,
             ...lastTickData,
           },
         });
@@ -390,7 +509,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
             lastEvalAt: new Date(), priceNowUsd: priceNow, onchainLiqNowUsd: liqNow,
             currentMultiple, maxMultipleObserved: maxMult, maxDrawdownObserved: drawdown,
             remainingFraction, realizedValueUsd, executedRungs: executed.join(','),
-            entryFeatures: nextEntryFeatures,
+            entryFeatures: nextEntryFeatures as Prisma.InputJsonValue,
             ...lastTickData,
           },
         });
@@ -544,6 +663,11 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   }
 
+  private numberFeature(value: unknown): number | null {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
   private withPriceReadFailure(
     rawFeatures: unknown,
     count: number,
@@ -610,9 +734,54 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     return next as Prisma.InputJsonValue;
   }
 
+  private async flowReversalState(
+    pos: { chain: string; poolAddress: string; strategyVersion?: string },
+    features: Record<string, unknown>,
+    entryPrice: number | null,
+    priceNow: number | null,
+    drawdown: number,
+  ): Promise<{ confirmed: boolean; count: number; window: number; ratio: number | null }> {
+    const window = Math.floor(Date.now() / 30_000);
+    const previousWindow = this.readCounter(features.flowReversalWindow);
+    const previousCount = this.readCounter(features.flowReversalCount);
+    if (!pos.strategyVersion || !/^(fresh|mature)_/.test(pos.strategyVersion)) {
+      return { confirmed: false, count: previousCount, window, ratio: null };
+    }
+    if (previousWindow === window) {
+      return {
+        confirmed: previousCount >= 2,
+        count: previousCount,
+        window,
+        ratio: this.numberFeature(features.flowBuySellRatio30s),
+      };
+    }
+    const swapDelegate = (this.prisma as any).evmSwapObservation;
+    if (!swapDelegate) return { confirmed: false, count: previousCount, window, ratio: null };
+    const swaps = await swapDelegate.findMany({
+      where: {
+        chain: pos.chain,
+        poolAddress: pos.poolAddress,
+        ts: { gte: new Date(window * 30_000) },
+      },
+      select: { kind: true, quoteAmountUsd: true },
+    }).catch(() => []);
+    let buys = 0;
+    let sells = 0;
+    for (const swap of swaps) {
+      const value = Number(swap.quoteAmountUsd);
+      if (swap.kind === 'BUY') buys += value;
+      else if (swap.kind === 'SELL') sells += value;
+    }
+    const ratio = sells > 0 ? buys / sells : buys > 0 ? 999 : null;
+    const weak = sells > 0 && ratio != null && ratio < 0.5 && entryPrice != null &&
+      priceNow != null && priceNow < entryPrice && drawdown >= 0.20;
+    const count = nextConsecutiveWindowCount(previousWindow, previousCount, window, weak);
+    return { confirmed: count >= 2, count, window, ratio };
+  }
+
   private async writeExit(
     runId: string,
-    pos: { id: string; chain: string; tokenAddress: string; symbol: string | null; poolAddress: string },
+    pos: { id: string; chain: string; tokenAddress: string; symbol: string | null; poolAddress: string; strategyVersion?: string; riskCohort?: string; exitPolicy?: string },
     type: string,
     status: PositionStatus,
     priceNow: number | null,
@@ -648,6 +817,9 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       deployer_deployments_count: '',
       deployer_rug_count: '',
       outcome_class: outcomeClassValue,
+      strategy_version: pos.strategyVersion ?? 'legacy_static_v0',
+      risk_cohort: pos.riskCohort ?? 'CONTRACT_SAFE',
+      exit_policy: pos.exitPolicy ?? 'SAFE_LADDER',
     });
   }
 }

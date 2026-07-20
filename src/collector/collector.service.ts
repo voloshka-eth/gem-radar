@@ -28,6 +28,15 @@ import {
   DeployerReputationSummary,
   DeployerBlocklistHit,
 } from '../deployer/deployer-reputation.service';
+import { EvmFlowService } from '../flow/evm-flow.service';
+import {
+  applyRobinhoodAdmissionStages,
+  applyRobinhoodDiscoveryStages,
+  ROBINHOOD_STAGE_VERSION,
+  RobinhoodAdmissionStageConfig,
+  RobinhoodDiscoveryStageConfig,
+  RobinhoodDiscoveryStageResult,
+} from './robinhood-stage-gate';
 
 type CandidateProcessingResult = {
   outcome: 'SAFE' | 'REJECT' | 'QUARANTINE';
@@ -40,11 +49,15 @@ type ResearchEvaluation = {
   score: ScoreResult;
 };
 
+type DiscoveryGateResult = Stage0Result | RobinhoodDiscoveryStageResult;
+
 @Injectable()
 export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CollectorService.name);
   private collectInterval: ReturnType<typeof setInterval> | null = null;
+  private factoryDiscoveryInterval: ReturnType<typeof setInterval> | null = null;
   private isCollecting = false;
+  private isFactoryCollecting = false;
   // Cross-cycle dedup: chain:tokenAddress seen in this session.
   // Resets on restart. Key = "chain:tokenAddress" (not pool) — same token in a new
   // pool still uses the same contract, so re-checking is wasteful.
@@ -54,7 +67,11 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly enabledChains: SupportedChain[];
   private readonly autoStart: boolean;
   private readonly pollIntervalMs: number;
+  private readonly factoryDiscoveryHotAutostart: boolean;
+  private readonly factoryDiscoveryHotPollMs: number;
   private readonly stage0Config: Stage0Config;
+  private readonly robinhoodDiscoveryStageConfig: RobinhoodDiscoveryStageConfig;
+  private readonly robinhoodAdmissionStageConfig: RobinhoodAdmissionStageConfig;
   private readonly tokenMaxAgeDays: number;
   private readonly tokenAgeHardGateEnabled: boolean;
   private readonly promoteCleanUnknownEnabled: boolean;
@@ -83,6 +100,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     private readonly deployerReputation: DeployerReputationService,
     private readonly factoryPoolDiscovery: FactoryPoolDiscoveryService,
     private readonly tokenMetadata: TokenMetadataService,
+    private readonly evmFlow: EvmFlowService,
   ) {
     const configuredChains = this.config.get<string[]>('chain.enabledChains') ?? [...SUPPORTED_CHAINS];
     const supported = new Set<string>(SUPPORTED_CHAINS);
@@ -97,6 +115,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     this.pollIntervalMs =
       this.config.get<number>('collector.pollIntervalMs') ?? 120_000;
+    this.factoryDiscoveryHotAutostart =
+      this.config.get<boolean>('collector.factoryDiscoveryHotAutostart') ?? true;
+    this.factoryDiscoveryHotPollMs =
+      Math.max(1_000, this.config.get<number>('collector.factoryDiscoveryHotPollMs') ?? 5_000);
 
     const maxAgeHours = this.config.get<number>('collector.newPoolMaxAgeHours') ?? 24;
     this.stage0Config = {
@@ -116,6 +138,20 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       moonshotMinBuys1h: this.config.get<number>('collector.moonshotMinBuys1h') ?? 15,
       blockedTokenSymbols: this.config.get<string[]>('collector.blockedTokenSymbols') ?? [],
     };
+    this.robinhoodDiscoveryStageConfig = {
+      maxPoolAgeMs: (this.config.get<number>('collector.robinhoodStageMaxPoolAgeHours') ?? 6) * 60 * 60 * 1000,
+      minReportedLiquidityUsd: this.config.get<number>('collector.robinhoodStageMinReportedLiquidityUsd') ?? 2_500,
+      standardLiquidityUsd: this.config.get<number>('collector.robinhoodStageStandardLiquidityUsd') ?? 5_000,
+      minFdvUsd: this.config.get<number>('collector.robinhoodStageMinFdvUsd') ?? 1_000,
+      maxFdvUsd: this.config.get<number>('collector.robinhoodStageMaxFdvUsd') ?? 50_000_000,
+      bootstrapMinVol5mUsd: this.config.get<number>('collector.robinhoodStageBootstrapMinVol5mUsd') ?? 250,
+      bootstrapMinTx1h: this.config.get<number>('collector.robinhoodStageBootstrapMinTx1h') ?? 5,
+      bootstrapMinBuys1h: this.config.get<number>('collector.robinhoodStageBootstrapMinBuys1h') ?? 3,
+      matureMinVol1hUsd: this.config.get<number>('collector.robinhoodStageMatureMinVol1hUsd') ?? 1_000,
+      matureMinTx1h: this.config.get<number>('collector.robinhoodStageMatureMinTx1h') ?? 20,
+      matureMinBuys1h: this.config.get<number>('collector.robinhoodStageMatureMinBuys1h') ?? 10,
+      blockedTokenSymbols: this.config.get<string[]>('collector.blockedTokenSymbols') ?? [],
+    };
     this.tokenMaxAgeDays = this.config.get<number>('collector.tokenMaxAgeDays') ?? 7;
     this.tokenAgeHardGateEnabled =
       this.config.get<boolean>('collector.tokenAgeHardGateEnabled') ?? false;
@@ -125,6 +161,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     this.robinhoodMinDepthUsd = this.config.get<number>('collector.robinhoodMinDepthUsd') ?? 100;
     this.robinhoodMinOnchainTvlUsd = this.config.get<number>('collector.robinhoodMinOnchainTvlUsd') ?? 200;
     this.robinhoodMinScore = this.config.get<number>('collector.robinhoodMinScore') ?? 50;
+    this.robinhoodAdmissionStageConfig = {
+      minExecutableDepthUsd: this.robinhoodMinDepthUsd,
+      minOnchainTvlUsd: this.robinhoodMinOnchainTvlUsd,
+      primaryMinScore: this.robinhoodMinScore,
+      shadowMinScore: this.config.get<number>('collector.robinhoodShadowMinScore') ?? 30,
+    };
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
     this.factoryDiscoveryMinExecutableDepthUsd =
@@ -150,6 +192,27 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `Collector scheduled — chains: [${this.enabledChains.join(', ')}], interval: ${this.pollIntervalMs}ms`,
     );
+    this.startFactoryHotWatcher();
+  }
+
+  private startFactoryHotWatcher(): void {
+    if (this.config.get<boolean>('evmFlow.enabled') ?? true) {
+      this.logger.log('Legacy factory entry watcher disabled - ETH/Base flow watcher owns factory discovery');
+      return;
+    }
+    if (!this.factoryDiscoveryHotAutostart) return;
+    if (!(this.config.get<boolean>('collector.factoryDiscoveryEnabled') ?? true)) return;
+    if (this.factoryDiscoveryInterval) return;
+    this.factoryDiscoveryInterval = setInterval(
+      () => void this.runFactoryDiscoveryCycle(),
+      this.factoryDiscoveryHotPollMs,
+    );
+    const hotChains = this.enabledChains.filter((chain) => chain === 'ethereum' || chain === 'base');
+    this.logger.log(
+      `Legacy factory hot watcher scheduled - chains: [${hotChains.join(', ')}], interval: ${this.factoryDiscoveryHotPollMs}ms`,
+    );
+    // Avoid an unnecessary full polling interval before the first factory read.
+    void this.runFactoryDiscoveryCycle();
   }
 
   onModuleDestroy(): void {
@@ -157,6 +220,21 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.collectInterval);
       this.collectInterval = null;
     }
+    if (this.factoryDiscoveryInterval) {
+      clearInterval(this.factoryDiscoveryInterval);
+      this.factoryDiscoveryInterval = null;
+    }
+  }
+
+  private applyDiscoveryGate(candidate: CollectorResult): DiscoveryGateResult {
+    return candidate.pool.chain === 'robinhood'
+      ? applyRobinhoodDiscoveryStages(candidate, this.robinhoodDiscoveryStageConfig)
+      : applyStage0Gate(candidate, this.stage0Config);
+  }
+
+  private discoveryStageName(gate: DiscoveryGateResult, suffix = ''): string {
+    const stage = 'version' in gate ? gate.stage.toLowerCase() : 'stage0';
+    return suffix ? `${stage}_${suffix}` : stage;
   }
 
   // ─── Main cycle (also callable directly for testing) ─────────────────────────
@@ -174,6 +252,27 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async runFactoryDiscoveryCycle(): Promise<void> {
+    if (this.isFactoryCollecting) {
+      this.logger.debug('Factory hot watcher skipped - previous factory tick is still running');
+      return;
+    }
+    this.isFactoryCollecting = true;
+    try {
+      const runId = randomUUID();
+      const started = Date.now();
+      const result = await this.processFactoryDiscovery(runId, new Set<string>());
+      if (result.pending > 0 || result.total > 0 || result.waiting > 0) {
+        this.emitContractGateSanityAlert(runId, result.riskResults);
+        this.logger.log(
+          `Factory hot watcher done - run_id: ${runId} | pending: ${result.pending} total: ${result.total} passed: ${result.passed} rejected: ${result.rejected} quarantined: ${result.quarantined} skipped: ${result.skipped} waiting: ${result.waiting} | elapsed: ${Date.now() - started}ms`,
+        );
+      }
+    } finally {
+      this.isFactoryCollecting = false;
+    }
+  }
+
   private async doCollectionCycle(): Promise<void> {
     const runId = randomUUID();
     const cycleStart = Date.now();
@@ -188,6 +287,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     const seenThisCycle = new Set<string>();
     const cycleRiskResults: ContractRiskResult[] = [];
 
+    if (!this.factoryDiscoveryHotAutostart && !(this.config.get<boolean>('evmFlow.enabled') ?? true)) {
     // RPC factory logs arrive before third-party listings. Keep a creation event
     // pending until on-chain liquidity is executable, then spend risk-provider quota.
     for (const chain of this.enabledChains) {
@@ -204,7 +304,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
       for (const candidate of candidates) {
         const tokenKey = `${candidate.pool.chain}:${candidate.token.tokenAddress}`;
-        const gate = applyStage0Gate(candidate, this.stage0Config);
+        const gate = this.applyDiscoveryGate(candidate);
         if (this.seenAcrossCycles.has(tokenKey)) {
           skipped++;
           this.factoryPoolDiscovery.markHandled(candidate);
@@ -215,7 +315,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         total++;
         if (!gate.pass) {
           rejected++;
-          this.logRejection(candidate, 'stage0', gate.reason!, runId);
+          this.logRejection(candidate, this.discoveryStageName(gate), gate.reason!, runId);
           this.factoryPoolDiscovery.markHandled(candidate);
           this.seenAcrossCycles.add(tokenKey);
           continue;
@@ -231,10 +331,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         const metadata = await this.tokenMetadata.read(candidate.pool.chain, candidate.token.tokenAddress);
         candidate.token.symbol = metadata.symbol || candidate.token.symbol;
         candidate.token.name = metadata.name || candidate.token.name;
-        const enrichedGate = applyStage0Gate(candidate, this.stage0Config);
+        const enrichedGate = this.applyDiscoveryGate(candidate);
         if (!enrichedGate.pass) {
           rejected++;
-          this.logRejection(candidate, 'stage0_after_metadata', enrichedGate.reason!, runId);
+          this.logRejection(candidate, this.discoveryStageName(enrichedGate, 'after_metadata'), enrichedGate.reason!, runId);
           this.factoryPoolDiscovery.markHandled(candidate);
           this.seenAcrossCycles.add(tokenKey);
           continue;
@@ -257,10 +357,13 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     // ── GeckoTerminal pass (per chain) ──
+    }
+
     for (const chain of this.enabledChains) {
       const gtNewPools = await this.geckoTerminal.getNewPools(chain);
       const gtTrendingPools = await this.geckoTerminal.getTrendingPools(chain);
       const gtNormalized = [...gtNewPools, ...gtTrendingPools];
+      await Promise.all(gtNormalized.map((candidate) => this.evmFlow.registerMatureCandidate(candidate)));
       const candidates = filterDuplicates(gtNormalized, seenThisCycle);
 
       this.fileLogger.logRawPayload({
@@ -284,7 +387,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
       for (const candidate of candidates) {
         const tokenKey = `${candidate.pool.chain}:${candidate.token.tokenAddress}`;
-        const gate = applyStage0Gate(candidate, this.stage0Config);
+        const gate = this.applyDiscoveryGate(candidate);
         if (this.seenAcrossCycles.has(tokenKey)) {
           skipped++;
           this.logTrajectorySnapshot(candidate, runId, gate, 'seen_across_cycles');
@@ -295,7 +398,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         total++;
         if (!gate.pass) {
           rejected++;
-          this.logRejection(candidate, 'stage0', gate.reason!, runId);
+          this.logRejection(candidate, this.discoveryStageName(gate), gate.reason!, runId);
         } else if (await this.shouldRejectForTokenAge(candidate, runId)) {
           rejected++;
         } else {
@@ -311,14 +414,24 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     }
 
     // ── DexScreener supplementary pass ──
-    const dsProfileAddresses = await this.dexScreener.getLatestProfileAddresses(this.enabledChains);
-    const dsBoostAddresses = await this.dexScreener.getLatestBoostAddresses(this.enabledChains);
-    const dsTopBoostAddresses = await this.dexScreener.getTopBoostAddresses(this.enabledChains);
-    const dsCommunityAddresses = await this.dexScreener.getLatestCommunityTakeoverAddresses(this.enabledChains);
-    const dsAdAddresses = await this.dexScreener.getLatestAdAddresses(this.enabledChains);
-    const moralisTrendingAddresses = await this.moralis.getTrendingTokenAddresses(this.enabledChains);
+    const [
+      dsProfileAddresses,
+      dsBoostAddresses,
+      dsTopBoostAddresses,
+      dsCommunityAddresses,
+      dsAdAddresses,
+      moralisTrendingAddresses,
+      birdeyeVolumeAddresses,
+    ] = await Promise.all([
+      this.dexScreener.getLatestProfileAddresses(this.enabledChains),
+      this.dexScreener.getLatestBoostAddresses(this.enabledChains),
+      this.dexScreener.getTopBoostAddresses(this.enabledChains),
+      this.dexScreener.getLatestCommunityTakeoverAddresses(this.enabledChains),
+      this.dexScreener.getLatestAdAddresses(this.enabledChains),
+      this.moralis.getTrendingTokenAddresses(this.enabledChains),
+      this.birdeye.getVolumeTokenAddresses(this.enabledChains),
+    ]);
     const moralisSummary = this.moralis.getLastFetchSummary();
-    const birdeyeVolumeAddresses = await this.birdeye.getVolumeTokenAddresses(this.enabledChains);
     const dsAddresses = this.dedupeTokenProbes([
       ...dsProfileAddresses,
       ...dsBoostAddresses,
@@ -330,6 +443,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       ...this.manualProbeTokens,
     ]);
     const dsCandidates = await this.dexScreener.getPairsForTokens(dsAddresses);
+    await Promise.all(dsCandidates.map((candidate) => this.evmFlow.registerMatureCandidate(candidate)));
     const dsFiltered = filterDuplicates(dsCandidates, seenThisCycle);
 
     this.fileLogger.logRawPayload({
@@ -368,7 +482,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     for (const candidate of dsFiltered) {
       const tokenKey = `${candidate.pool.chain}:${candidate.token.tokenAddress}`;
-      const gate = applyStage0Gate(candidate, this.stage0Config);
+      const gate = this.applyDiscoveryGate(candidate);
       if (this.seenAcrossCycles.has(tokenKey)) {
         skipped++;
         this.logTrajectorySnapshot(candidate, runId, gate, 'seen_across_cycles');
@@ -379,7 +493,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       total++;
       if (!gate.pass) {
         rejected++;
-        this.logRejection(candidate, 'stage0', gate.reason!, runId);
+        this.logRejection(candidate, this.discoveryStageName(gate), gate.reason!, runId);
       } else if (await this.shouldRejectForTokenAge(candidate, runId)) {
         rejected++;
       } else {
@@ -400,6 +514,116 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private async processFactoryDiscovery(
+    runId: string,
+    seenThisCycle: Set<string>,
+  ): Promise<{
+    pending: number;
+    total: number;
+    passed: number;
+    rejected: number;
+    quarantined: number;
+    skipped: number;
+    waiting: number;
+    riskResults: ContractRiskResult[];
+  }> {
+    let pending = 0;
+    let total = 0;
+    let passed = 0;
+    let rejected = 0;
+    let quarantined = 0;
+    let skipped = 0;
+    let waiting = 0;
+    const riskResults: ContractRiskResult[] = [];
+
+    for (const chain of this.enabledChains) {
+      if (chain !== 'ethereum' && chain !== 'base') continue;
+      const factoryCandidates = await this.factoryPoolDiscovery.getPendingPools(chain);
+      pending += factoryCandidates.length;
+      const candidates = filterDuplicates(factoryCandidates, seenThisCycle);
+      this.fileLogger.logRawPayload({
+        run_id: runId,
+        ts: new Date().toISOString(),
+        chain,
+        source: 'onchain_factory_hot',
+        pending_pool_count: factoryCandidates.length,
+        deduped_count: candidates.length,
+      });
+
+      for (const candidate of candidates) {
+        const tokenKey = `${candidate.pool.chain}:${candidate.token.tokenAddress}`;
+        const gate = this.applyDiscoveryGate(candidate);
+        if (this.seenAcrossCycles.has(tokenKey)) {
+          skipped++;
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.logTrajectorySnapshot(candidate, runId, gate, 'seen_across_cycles');
+          continue;
+        }
+        this.logTrajectorySnapshot(candidate, runId, gate, 'candidate');
+        total++;
+        if (!gate.pass) {
+          rejected++;
+          this.logRejection(candidate, this.discoveryStageName(gate), gate.reason!, runId);
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.seenAcrossCycles.add(tokenKey);
+          continue;
+        }
+
+        const liq = await this.liquidityVerifier.verify(candidate.pool, candidate.token.decimals);
+        const preflightReason = this.factoryPreflightReason(liq);
+        if (preflightReason) {
+          waiting++;
+          this.fileLogger.logRawPayload({
+            run_id: runId,
+            ts: new Date().toISOString(),
+            chain: candidate.pool.chain,
+            source: 'onchain_factory_hot',
+            decision: 'waiting_for_executable_liquidity',
+            reason: preflightReason,
+            pool_address: candidate.pool.poolAddress,
+            token_address: candidate.token.tokenAddress,
+            liquidity_model: liq.liquidityModel,
+            onchain_tvl_usd: liq.onchainTvlUsd,
+            executable_depth_usd: liq.executableDepthUsd,
+          });
+          continue;
+        }
+
+        const [metadata, ageDays] = await Promise.all([
+          this.tokenMetadata.read(candidate.pool.chain, candidate.token.tokenAddress),
+          this.tokenAge.getTokenAgeDays(candidate.pool.chain, candidate.token.tokenAddress),
+        ]);
+        candidate.token.symbol = metadata.symbol || candidate.token.symbol;
+        candidate.token.name = metadata.name || candidate.token.name;
+
+        const enrichedGate = this.applyDiscoveryGate(candidate);
+        if (!enrichedGate.pass) {
+          rejected++;
+          this.logRejection(candidate, this.discoveryStageName(enrichedGate, 'after_metadata'), enrichedGate.reason!, runId);
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.seenAcrossCycles.add(tokenKey);
+          continue;
+        }
+        if (await this.shouldRejectForTokenAge(candidate, runId, ageDays)) {
+          rejected++;
+          this.factoryPoolDiscovery.markHandled(candidate);
+          this.seenAcrossCycles.add(tokenKey);
+          continue;
+        }
+
+        const processed = await this.processCandidate(candidate, runId, liq, ageDays);
+        riskResults.push(processed.riskResult);
+        if (processed.outcome === 'SAFE') passed++;
+        else if (processed.outcome === 'QUARANTINE') quarantined++;
+        else rejected++;
+        this.factoryPoolDiscovery.markHandled(candidate);
+        this.seenAcrossCycles.add(tokenKey);
+      }
+    }
+
+    return { pending, total, passed, rejected, quarantined, skipped, waiting, riskResults };
+  }
+
   /**
    * Run risk check and route to one of three paths:
    *   CONTRACT_SAFE    → persist (Token + Pool + Snapshot + RiskCheck) + new_pools.csv
@@ -411,6 +635,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     candidate: CollectorResult,
     runId: string,
     preverifiedLiquidity?: LiquidityCheckResult,
+    precomputedAgeDays?: number | null,
   ): Promise<CandidateProcessingResult> {
     const { pool, token } = candidate;
     let riskResult = await this.riskEngine.checkToken(
@@ -491,7 +716,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       // Survivor watchlist + scoring + paper entry: ONLY for CONTRACT_SAFE + token-age
       // gate + liquidity_verified. REJECT/UNKNOWN/unverified tokens never reach here.
       if (liqResult.liquidityVerified === true) {
-        const ageDays = await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
+        const ageDays = precomputedAgeDays ?? await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
         this.logCandidate(candidate, runId, liqResult, ageDays);
         const score = await this.scoreSurvivor(candidate, runId, liqResult, result.id, ageDays);
         await this.paper.recordEntry({
@@ -698,62 +923,45 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   ): Promise<boolean> {
     if (!this.robinhoodPaperEnabled || !evaluation) return false;
     if (candidate.pool.chain !== 'robinhood') return false;
-    if (riskResult.decision !== 'CONTRACT_UNKNOWN' || riskResult.rejectReasons.length > 0) {
-      this.logRobinhoodPaperGate(candidate, runId, 'risk_reject_reasons', {
-        decision: riskResult.decision,
+    const providerStatus = riskResult.providerStatus ?? riskResult.merged.providerStatus;
+    const admission = applyRobinhoodAdmissionStages({
+      riskDecision: riskResult.decision,
+      rejectReasons: riskResult.rejectReasons,
+      providerStatus,
+      liquidity: evaluation.liq,
+      finalScore: evaluation.score.finalScore,
+    }, this.robinhoodAdmissionStageConfig);
+    if (!admission.pass) {
+      this.logRobinhoodPaperGate(candidate, runId, admission.reason ?? 'stage_failed', {
+        failedStage: admission.stage,
+        riskDecision: riskResult.decision,
         rejectReasons: riskResult.rejectReasons,
+        providerStatus,
+        liquidityVerified: evaluation.liq.liquidityVerified,
+        executableDepthUsd: evaluation.liq.executableDepthUsd,
+        onchainTvlUsd: evaluation.liq.onchainTvlUsd,
+        finalScore: evaluation.score.finalScore,
+        primaryMinScore: this.robinhoodAdmissionStageConfig.primaryMinScore,
+        shadowMinScore: this.robinhoodAdmissionStageConfig.shadowMinScore,
       });
       return false;
     }
 
-    const providerStatus = riskResult.providerStatus ?? riskResult.merged.providerStatus;
-    if (providerStatus !== 'NO_RISK_PROVIDER_SUPPORT') {
-      this.logRobinhoodPaperGate(candidate, runId, 'provider_status', { providerStatus });
-      return false;
-    }
-    if (evaluation.liq.liquidityVerified !== true) {
-      this.logRobinhoodPaperGate(candidate, runId, 'liquidity_unverified', {
-        onchainTvlUsd: evaluation.liq.onchainTvlUsd,
-        executableDepthUsd: evaluation.liq.executableDepthUsd,
-      });
-      return false;
-    }
-    if ((evaluation.liq.executableDepthUsd ?? 0) < this.robinhoodMinDepthUsd) {
-      this.logRobinhoodPaperGate(candidate, runId, 'executable_depth_too_low', {
-        executableDepthUsd: evaluation.liq.executableDepthUsd,
-        minimumUsd: this.robinhoodMinDepthUsd,
-      });
-      return false;
-    }
-    if ((evaluation.liq.onchainTvlUsd ?? 0) < this.robinhoodMinOnchainTvlUsd) {
-      this.logRobinhoodPaperGate(candidate, runId, 'onchain_tvl_too_low', {
-        onchainTvlUsd: evaluation.liq.onchainTvlUsd,
-        minimumUsd: this.robinhoodMinOnchainTvlUsd,
-      });
-      this.logger.debug(
-        `Robinhood paper gate rejected ${candidate.token.tokenAddress}: ` +
-        `onchain TVL $${(evaluation.liq.onchainTvlUsd ?? 0).toFixed(2)} < ` +
-        `$${this.robinhoodMinOnchainTvlUsd.toFixed(2)}`,
-      );
-      return false;
-    }
-    if (evaluation.score.finalScore < this.robinhoodMinScore) {
-      this.logRobinhoodPaperGate(candidate, runId, 'score_too_low', {
-        finalScore: evaluation.score.finalScore,
-        minimumScore: this.robinhoodMinScore,
-      });
-      return false;
-    }
-    if (evaluation.score.band === 'reject_band') {
-      this.logRobinhoodPaperGate(candidate, runId, 'reject_band', {
-        finalScore: evaluation.score.finalScore,
-      });
-      return false;
-    }
+    const paperLane = admission.paperLane ?? 'SHADOW';
+    const isShadow = paperLane === 'SHADOW';
+    const strategyVersion = isShadow
+      ? 'robinhood_stages_v1_shadow'
+      : 'robinhood_stages_v1_primary';
+    const riskCohort = isShadow
+      ? 'ROBINHOOD_STAGE_SHADOW'
+      : 'ROBINHOOD_STATIC_SAFE';
+    const exitPolicy = isShadow ? 'SOFT_RISK_2X' : 'SAFE_LADDER';
 
     const staticSafety = await this.robinhoodExperimentalSafety.inspect(candidate.token.tokenAddress);
     if (!staticSafety.passed) {
       this.logRobinhoodPaperGate(candidate, runId, 'static_safety_failed', {
+        failedStage: 'R6_STATIC_SAFETY',
+        paperLane,
         reasons: staticSafety.reasons,
       });
       this.logger.warn(
@@ -765,12 +973,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
 
     const persisted = await this.persistCandidate(candidate, runId, riskResult, evaluation.liq);
     if (!persisted) {
-      this.logRobinhoodPaperGate(candidate, runId, 'persistence_failed');
+      this.logRobinhoodPaperGate(candidate, runId, 'persistence_failed', {
+        failedStage: 'R7_PERSISTENCE',
+        paperLane,
+      });
       return false;
     }
 
     if (persisted.isNewDiscovery) {
-      this.logNewPool(candidate, runId, 'ROBINHOOD_STATIC_SAFE_NO_PROVIDER');
+      this.logNewPool(candidate, runId, `ROBINHOOD_${paperLane}_NO_PROVIDER`);
     }
     this.logPoolSnapshot(candidate, runId);
     this.logLiquiditySnapshot(candidate, runId, evaluation.liq);
@@ -787,12 +998,33 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       poolId: persisted.poolId,
       runId,
       buyTax: null,
-      riskCohort: 'CONTRACT_SAFE',
+      riskCohort,
+      strategyVersion,
+      exitPolicy,
+      benchmarkEligible: !isShadow,
       experimentalSafety: staticSafety,
     });
 
-    this.logger.warn(
-      `Robinhood paper entry: ${candidate.token.tokenAddress} (${candidate.token.symbol ?? '?'}) ` +
+    this.fileLogger.logRawPayload({
+      run_id: runId,
+      ts: new Date().toISOString(),
+      source: 'robinhood_stage_gate',
+      stage_version: ROBINHOOD_STAGE_VERSION,
+      stage: 'R6_STATIC_SAFETY',
+      decision: 'admitted',
+      paper_lane: paperLane,
+      strategy_version: strategyVersion,
+      chain: candidate.pool.chain,
+      pool_address: candidate.pool.poolAddress,
+      token_address: candidate.token.tokenAddress,
+      symbol: candidate.token.symbol ?? '',
+      final_score: evaluation.score.finalScore,
+      executable_depth_usd: evaluation.liq.executableDepthUsd,
+      onchain_tvl_usd: evaluation.liq.onchainTvlUsd,
+    });
+
+    this.logger.log(
+      `Robinhood ${paperLane.toLowerCase()} paper entry: ${candidate.token.tokenAddress} (${candidate.token.symbol ?? '?'}) ` +
       `depth=$${evaluation.liq.executableDepthUsd?.toFixed(0) ?? '0'} ` +
       `score=${evaluation.score.finalScore.toFixed(2)}; no supported tax/sell simulation provider`,
     );
@@ -820,7 +1052,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     this.fileLogger.logRawPayload({
       run_id: runId,
       ts: new Date().toISOString(),
-      source: 'robinhood_paper_gate',
+      source: 'robinhood_stage_gate',
+      stage_version: ROBINHOOD_STAGE_VERSION,
       decision: 'not_admitted',
       reason,
       chain: candidate.pool.chain,
@@ -1303,7 +1536,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private logTrajectorySnapshot(
     candidate: CollectorResult,
     runId: string,
-    gate: Stage0Result,
+    gate: DiscoveryGateResult,
     processingStatus: 'candidate' | 'seen_across_cycles',
   ): void {
     const { token, pool } = candidate;
@@ -1342,6 +1575,30 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       stage0_lane: gate.lane ?? '',
       processing_status: processingStatus,
     });
+
+    if ('version' in gate) {
+      this.fileLogger.logRawPayload({
+        run_id: runId,
+        ts: now.toISOString(),
+        source: 'robinhood_stage_gate',
+        stage_version: gate.version,
+        stage: gate.stage,
+        decision: gate.pass ? 'passed' : 'rejected',
+        reason: gate.reason ?? '',
+        discovery_lane: gate.lane ?? '',
+        processing_status: processingStatus,
+        chain: pool.chain,
+        pool_address: pool.poolAddress,
+        token_address: token.tokenAddress,
+        symbol: token.symbol ?? '',
+        liquidity_usd: pool.liquidityUsd,
+        fdv_usd: pool.fdvUsd,
+        vol_5m_usd: pool.vol5m,
+        vol_1h_usd: pool.vol1h,
+        buys_1h: pool.buys1h,
+        tx_count_1h: pool.txCount1h,
+      });
+    }
   }
 
   private logRejection(
@@ -1509,11 +1766,15 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async shouldRejectForTokenAge(candidate: CollectorResult, runId: string): Promise<boolean> {
+  private async shouldRejectForTokenAge(
+    candidate: CollectorResult,
+    runId: string,
+    precomputedAgeDays?: number | null,
+  ): Promise<boolean> {
     if (!this.tokenAgeHardGateEnabled) return false;
 
     const { token, pool } = candidate;
-    const ageDays = await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
+    const ageDays = precomputedAgeDays ?? await this.tokenAge.getTokenAgeDays(pool.chain, token.tokenAddress);
     if (ageDays === null) return false; // unknown age ≠ old
     if (ageDays <= this.tokenMaxAgeDays) return false;
     this.logger.log(

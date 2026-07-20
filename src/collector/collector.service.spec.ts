@@ -22,6 +22,7 @@ import { PaperService } from '../paper/paper.service';
 import { DeployerReputationService } from '../deployer/deployer-reputation.service';
 import { FactoryPoolDiscoveryService } from '../onchain/factory-pool-discovery.service';
 import { TokenMetadataService } from '../onchain/token-metadata.service';
+import { EvmFlowService } from '../flow/evm-flow.service';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -140,6 +141,9 @@ describe('CollectorService', () => {
   };
   const tokenMetadataMock = {
     read: jest.fn().mockResolvedValue({ symbol: '', name: '' }),
+  };
+  const evmFlowMock = {
+    registerMatureCandidate: jest.fn().mockResolvedValue(undefined),
   };
   const dsMock = {
     getLatestProfileAddresses: jest.fn().mockResolvedValue([]),
@@ -282,14 +286,18 @@ describe('CollectorService', () => {
         { provide: DeployerReputationService, useValue: deployerReputationMock },
         { provide: FactoryPoolDiscoveryService, useValue: factoryPoolDiscoveryMock },
         { provide: TokenMetadataService, useValue: tokenMetadataMock },
+        { provide: EvmFlowService, useValue: evmFlowMock },
         {
           provide: ConfigService,
           useValue: {
             get: jest.fn((key: string) => {
               const cfg: Record<string, unknown> = {
                 'chain.enabledChains': ['ethereum'],
+                'evmFlow.enabled': false,
                 'collector.pollIntervalMs': 9_999_999, // effectively never fires in tests
                 'collector.newPoolMaxAgeHours': 24,
+                'collector.factoryDiscoveryHotAutostart': false,
+                'collector.factoryDiscoveryHotPollMs': 9_999_999,
                 'collector.tokenMaxAgeDays': 7,
                 'collector.blockedTokenSymbols': ['openhuman'],
                 'scoring.minLiquidityUsd': 5_000,
@@ -914,11 +922,49 @@ describe('CollectorService', () => {
 
     expect(robinhoodExperimentalSafetyMock.inspect).toHaveBeenCalledWith('0xdeadbeef');
     expect(paperMock.recordEntry).toHaveBeenCalledWith(expect.objectContaining({
-      riskCohort: 'CONTRACT_SAFE',
+      riskCohort: 'ROBINHOOD_STATIC_SAFE',
+      strategyVersion: 'robinhood_stages_v1_primary',
+      exitPolicy: 'SAFE_LADDER',
+      benchmarkEligible: true,
       buyTax: null,
     }));
     expect(paperMock.recordResearchEntry).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(tempDir, 'decisions', 'candidates.csv'))).toBe(true);
+  });
+
+  it('routes a Robinhood score between the shadow floor and primary floor into a full paper lifecycle', async () => {
+    (service as any).robinhoodPaperEnabled = true;
+    const risk: ContractRiskResult = {
+      decision: 'CONTRACT_UNKNOWN', rejectReasons: [], goplusQueried: false,
+      honeypotQueried: false, merged: { providerStatus: 'NO_RISK_PROVIDER_SUPPORT' },
+      providerStatus: 'NO_RISK_PROVIDER_SUPPORT', cacheHit: false,
+    };
+    const evaluation = {
+      liq: {
+        liquidityModel: 'V3', liquidityVerified: true, onchainTvlUsd: 3_000,
+        reportedVsOnchainPct: 0, executableDepthUsd: 500,
+        slip50: 0.01, slip100: 0.02, slip500: 0.08, slip1000: 0.1,
+        spotPriceUsd: 0.001, error: null,
+      },
+      ageDays: null,
+      score: {
+        finalScore: 42, liquidityScore: 45, depthScore: 45, ageScore: null,
+        tractionScore: 40, divergenceScore: null, deployerReputationScore: null,
+        componentsPresent: [], componentsMissing: [], scoreConfidence: 0.3, band: 'reject_band',
+      },
+    };
+
+    await expect((service as any).tryAdmitRobinhoodPaperCandidate(
+      buildResult({ chain: 'robinhood' }), risk, 'run-id', evaluation,
+    )).resolves.toBe(true);
+
+    expect(paperMock.recordEntry).toHaveBeenCalledWith(expect.objectContaining({
+      riskCohort: 'ROBINHOOD_STAGE_SHADOW',
+      strategyVersion: 'robinhood_stages_v1_shadow',
+      exitPolicy: 'SOFT_RISK_2X',
+      benchmarkEligible: false,
+    }));
+    expect(paperMock.recordResearchEntry).not.toHaveBeenCalled();
   });
 
   it('keeps a Robinhood token with dust on-chain TVL out of paper entries', async () => {
@@ -1140,6 +1186,66 @@ describe('CollectorService', () => {
     expect(liquidityMock.verify).toHaveBeenCalledWith(direct.pool, undefined);
     expect(riskMock.checkToken).not.toHaveBeenCalled();
     expect(factoryPoolDiscoveryMock.markHandled).not.toHaveBeenCalled();
+  });
+
+  it('hot factory watcher sends executable fresh pools through safety and paper without indexer feeds', async () => {
+    const direct = buildResult({
+      source: 'onchain_factory',
+      liquidityUsd: undefined,
+      fdvUsd: undefined,
+      vol1h: undefined,
+      txCount1h: undefined,
+      buys1h: undefined,
+    }, '0xfactory000000000000000000000000000000000004');
+    factoryPoolDiscoveryMock.getPendingPools.mockImplementation(async (chain: string) =>
+      chain === 'ethereum' ? [direct] : [],
+    );
+    liquidityMock.verify.mockResolvedValueOnce({
+      liquidityModel: 'V2',
+      liquidityVerified: true,
+      onchainTvlUsd: 12_000,
+      reportedVsOnchainPct: null,
+      executableDepthUsd: 500,
+      slip50: 0.01,
+      slip100: 0.02,
+      slip500: 0.08,
+      slip1000: 0.15,
+      spotPriceUsd: 0.001,
+      error: null,
+    });
+    tokenMetadataMock.read.mockResolvedValueOnce({ symbol: 'HOT', name: 'Hot Token' });
+    scoringMock.score.mockReturnValueOnce({
+      finalScore: 72,
+      liquidityScore: 70,
+      depthScore: 70,
+      ageScore: 80,
+      tractionScore: null,
+      divergenceScore: null,
+      deployerReputationScore: null,
+      componentsPresent: ['liquidity', 'depth', 'age'],
+      componentsMissing: ['traction', 'divergence', 'deployer_reputation'],
+      scoreConfidence: 0.3,
+      band: 'candidate',
+    });
+
+    await service.runFactoryDiscoveryCycle();
+
+    expect(gtMock.getNewPools).not.toHaveBeenCalled();
+    expect(dsMock.getPairsForTokens).not.toHaveBeenCalled();
+    expect(riskMock.checkToken).toHaveBeenCalledWith(
+      'ethereum',
+      direct.token.tokenAddress,
+      'HOT',
+      'Hot Token',
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    );
+    expect(prismaMock.pool.upsert).toHaveBeenCalled();
+    expect(paperMock.recordEntry).toHaveBeenCalledWith(expect.objectContaining({
+      tokenId: 'tok-cuid',
+      poolId: 'pool-cuid',
+      buyTax: undefined,
+    }));
+    expect(factoryPoolDiscoveryMock.markHandled).toHaveBeenCalledWith(direct);
   });
 
   it('persists V4 factory metadata so later paper re-reads do not need a genesis log scan', async () => {

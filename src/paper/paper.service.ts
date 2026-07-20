@@ -43,11 +43,18 @@ export class PaperService {
   async recordEntry(c: CandidateResult): Promise<void> {
     const { pool, token, liq, score, ageDays, tokenId, poolId, runId, buyTax } = c;
     const riskCohort = c.riskCohort ?? 'CONTRACT_SAFE';
+    const strategyVersion = c.strategyVersion ??
+      (pool.chain === 'ethereum' || pool.chain === 'base' ? 'legacy_static_shadow_v0' : 'legacy_static_v0');
+    const exitPolicy = c.exitPolicy ??
+      (strategyVersion === 'legacy_static_shadow_v0' ? 'LEGACY_SHADOW' : 'SAFE_LADDER');
+    const benchmarkEligible = c.benchmarkEligible ?? strategyVersion !== 'legacy_static_shadow_v0';
 
     // One paper position per token: re-discovery of the same token must not create a
     // duplicate (it would skew the aggregate edge/post-mortem stats).
     const existing = await this.prisma.paperPosition.findFirst({
-      where: { chain: pool.chain, tokenAddress: token.tokenAddress },
+      where: (c.signalId
+        ? { signalId: c.signalId }
+        : { chain: pool.chain, tokenAddress: token.tokenAddress, strategyVersion }) as any,
       select: { id: true },
     });
     if (existing) {
@@ -55,7 +62,7 @@ export class PaperService {
       return;
     }
 
-    if (this.shouldQueueForTakeConfirmation(pool.chain, riskCohort)) {
+    if (this.shouldQueueForTakeConfirmation(pool.chain, riskCohort, strategyVersion)) {
       await this.queueTakeConfirmation(c, riskCohort);
       return;
     }
@@ -63,10 +70,10 @@ export class PaperService {
     const sizeUsd      = this.config.get<number>('paper.positionSizeUsd') ?? 20;
     const delaySec     = this.config.get<number>('paper.detectionDelaySec') ?? 0;
     const sandwichPct  = this.config.get<number>('paper.sandwichPct') ?? 0.01;
-    const gasUsd       = this.config.get<number>('paper.gasUsd') ?? 1.5;
-    const maxEntrySlip = this.config.get<number>('paper.maxEntrySlipPct') ?? 0.5;
+    const gasUsd       = c.gasUsd ?? this.config.get<number>('paper.gasUsd') ?? 1.5;
+    const maxEntrySlip = c.maxEntrySlipPct ?? this.config.get<number>('paper.maxEntrySlipPct') ?? 0.5;
 
-    const firstSeenAt = new Date();
+    const firstSeenAt = c.observedAt ?? new Date();
     const openedAt = new Date(firstSeenAt.getTime() + delaySec * 1000);
 
     // Pessimistic entry slip for the position size (a $20 trade is charged the $50 probe).
@@ -84,15 +91,15 @@ export class PaperService {
       slip1000: liq.slip1000,
       ageDays,
       fdvUsd: pool.fdvUsd ?? null,
-      divergenceScore: score.divergenceScore,
-      finalScore: score.finalScore,
-      liquidityScore: score.liquidityScore,
-      depthScore: score.depthScore,
-      ageScore: score.ageScore,
-      tractionScore: score.tractionScore,
-      deployerReputationScore: score.deployerReputationScore,
-      scoreConfidence: score.scoreConfidence,
-      band: score.band,
+      divergenceScore: score?.divergenceScore ?? null,
+      finalScore: score?.finalScore ?? null,
+      liquidityScore: score?.liquidityScore ?? null,
+      depthScore: score?.depthScore ?? null,
+      ageScore: score?.ageScore ?? null,
+      tractionScore: score?.tractionScore ?? null,
+      deployerReputationScore: score?.deployerReputationScore ?? null,
+      scoreConfidence: score?.scoreConfidence ?? null,
+      band: score?.band ?? 'flow_signal',
       deployerDeploymentsCount: token.deployerDeploymentsCount ?? null,
       deployerRugLikeCount: token.deployerRugLikeCount ?? null,
       deployerRiskScore: token.deployerRiskScore ?? null,
@@ -100,6 +107,11 @@ export class PaperService {
       riskCohort,
       experimentalSafety: c.experimentalSafety ?? null,
       discoverySource: pool.source,
+      strategyVersion,
+      signalId: c.signalId ?? null,
+      exitPolicy,
+      benchmarkEligible,
+      flowSnapshot: c.flowSnapshot ?? null,
     };
 
     const status = fill.entered ? 'OPEN' : 'NOT_ENTERED';
@@ -116,6 +128,11 @@ export class PaperService {
           poolAddress: pool.poolAddress,
           symbol: token.symbol ?? null,
           liquidityModel: liq.liquidityModel,
+          strategyVersion,
+          signalId: c.signalId ?? null,
+          riskCohort,
+          exitPolicy,
+          benchmarkEligible,
           firstSeenAt,
           detectionDelaySec: delaySec,
           openedAt,
@@ -209,9 +226,9 @@ export class PaperService {
       onchain_liq_entry_usd: liq.onchainTvlUsd != null ? liq.onchainTvlUsd.toFixed(2) : '',
       entered: String(fill.entered),
       not_entered_reason: fill.reason ?? '',
-      final_score: score.finalScore.toFixed(2),
-      band: score.band,
-      score_confidence: score.scoreConfidence.toFixed(3),
+      final_score: score?.finalScore.toFixed(2) ?? '',
+      band: score?.band ?? 'flow_signal',
+      score_confidence: score?.scoreConfidence.toFixed(3) ?? '',
       deployer_address: token.deployerAddress ?? '',
       deployer_deployments_count: token.deployerDeploymentsCount != null ? String(token.deployerDeploymentsCount) : '',
       deployer_rug_count: token.deployerRugLikeCount != null ? String(token.deployerRugLikeCount) : '',
@@ -220,6 +237,13 @@ export class PaperService {
       lp_lock_fraction: '',
       discovery_source: pool.source,
       risk_cohort: riskCohort,
+      strategy_version: strategyVersion,
+      exit_policy: exitPolicy,
+      benchmark_eligible: String(benchmarkEligible),
+      trigger_unique_buyers: this.formatNumber(this.numberFeature(c.flowSnapshot?.uniqueBuyers)),
+      trigger_buy_quote_usd: this.formatNumber(this.numberFeature(c.flowSnapshot?.buyQuoteUsd)),
+      trigger_buy_sell_ratio: this.formatNumber(this.numberFeature(c.flowSnapshot?.buySellRatio)),
+      trigger_price_momentum: this.formatNumber(this.numberFeature(c.flowSnapshot?.priceMomentum)),
     });
 
     this.logger.log(
@@ -305,7 +329,8 @@ export class PaperService {
     return { confirmed, rejected, deferred };
   }
 
-  private shouldQueueForTakeConfirmation(chain: SupportedChain, riskCohort: string): boolean {
+  private shouldQueueForTakeConfirmation(chain: SupportedChain, riskCohort: string, strategyVersion: string): boolean {
+    if (strategyVersion !== 'legacy_static_shadow_v0' && strategyVersion !== 'legacy_static_v0') return false;
     const enabled = this.config.get<boolean>('paper.takeCohortEnabled') ?? false;
     const chains = this.config.get<string[]>('paper.takeCohortChains') ?? ['ethereum', 'base'];
     return enabled && riskCohort === 'CONTRACT_SAFE' && chains.includes(chain);
@@ -313,6 +338,7 @@ export class PaperService {
 
   private async queueTakeConfirmation(c: CandidateResult, riskCohort: string): Promise<void> {
     const { pool, token, liq, score, ageDays, tokenId, poolId, runId, buyTax } = c;
+    if (!score) return;
     const firstSeenAt = new Date();
     const delaySec = Math.max(0, this.config.get<number>('paper.takeConfirmationDelaySec') ?? 600);
     const confirmationDueAt = new Date(firstSeenAt.getTime() + delaySec * 1000);
@@ -337,7 +363,7 @@ export class PaperService {
           openedAt: firstSeenAt, sizeUsd: this.config.get<number>('paper.positionSizeUsd') ?? 20,
           entryPriceUsd: liq.spotPriceUsd ?? null, entryFeatures: features as Prisma.InputJsonValue,
           status: 'PENDING_CONFIRMATION', maxMultipleObserved: null, maxDrawdownObserved: null,
-        },
+        } as any,
       });
       await this.prisma.paperEvent.create({
         data: { positionId: created.id, ts: firstSeenAt, type: 'PENDING_CONFIRMATION', price: liq.spotPriceUsd ?? 0, note: `due ${confirmationDueAt.toISOString()}` },
@@ -456,7 +482,7 @@ export class PaperService {
       ts: new Date().toISOString(), run_id: position.runId ?? '', schema_version: CSV_SCHEMA_VERSION, chain: position.chain, token_address: position.tokenAddress, symbol: position.symbol ?? '', pool_address: position.poolAddress,
       liquidity_model: liq.liquidityModel, first_seen_at: position.firstSeenAt.toISOString(), detection_delay_sec: String(Math.round((openedAt.getTime() - position.firstSeenAt.getTime()) / 1000)), opened_at: openedAt.toISOString(),
       size_usd: (this.config.get<number>('paper.positionSizeUsd') ?? 20).toFixed(2), spot_price_usd: this.formatNumber(liq.spotPriceUsd), entry_price_effective_usd: this.formatNumber(fill.effectivePriceUsd), slippage_pct: this.formatNumber(fill.slipPct), sandwich_pct: sandwichPct.toFixed(6), gas_usd: gasUsd.toFixed(2), buy_tax_pct: buyTaxPct.toFixed(6), tokens_bought: this.formatNumber(fill.tokensBought), onchain_liq_entry_usd: this.formatNumber(liq.onchainTvlUsd), entered: 'true', not_entered_reason: '',
-      final_score: this.formatNumber(this.numberFeature(features.finalScore)), band: String(features.band ?? ''), score_confidence: this.formatNumber(this.numberFeature(features.scoreConfidence)), deployer_address: position.token?.deployerAddress ?? '', deployer_deployments_count: this.formatNumber(this.numberFeature(features.deployerDeploymentsCount)), deployer_rug_count: this.formatNumber(this.numberFeature(features.deployerRugLikeCount)), lp_locked: '', lp_lock_source: '', lp_lock_fraction: '', discovery_source: String(features.discoverySource ?? ''), risk_cohort: String(features.riskCohort ?? 'CONTRACT_SAFE'),
+      final_score: this.formatNumber(this.numberFeature(features.finalScore)), band: String(features.band ?? ''), score_confidence: this.formatNumber(this.numberFeature(features.scoreConfidence)), deployer_address: position.token?.deployerAddress ?? '', deployer_deployments_count: this.formatNumber(this.numberFeature(features.deployerDeploymentsCount)), deployer_rug_count: this.formatNumber(this.numberFeature(features.deployerRugLikeCount)), lp_locked: '', lp_lock_source: '', lp_lock_fraction: '', discovery_source: String(features.discoverySource ?? ''), risk_cohort: String(features.riskCohort ?? 'CONTRACT_SAFE'), strategy_version: String(features.strategyVersion ?? 'legacy_static_v0'), exit_policy: String(features.exitPolicy ?? 'SAFE_LADDER'), benchmark_eligible: String(features.benchmarkEligible ?? true), trigger_unique_buyers: '', trigger_buy_quote_usd: '', trigger_buy_sell_ratio: '', trigger_price_momentum: '',
     });
   }
 

@@ -13,8 +13,8 @@ const config: PaperSniperConfig = {
   momentumConfirmations: 2,
   ladder: [
     { multiple: 2, sellFraction: 0.8 },
-    { multiple: 10, sellFraction: 0.15 },
-    { multiple: 1000, sellFraction: 0.05 },
+    { multiple: 5, sellFraction: 0.15 },
+    { multiple: 100, sellFraction: 0.05 },
   ],
 };
 
@@ -75,6 +75,33 @@ describe('PaperSniperEngine', () => {
     const actions = engine.evaluate(position, 0.9, 61_000, 0.5);
 
     expect(actions[0].type).toBe('MOMENTUM_EXIT');
+  });
+
+  it('takes the actual profit when a position never reaches the first ladder rung', () => {
+    const engine = new PaperSniperEngine(config);
+    const { position } = engine.open({ token, creator, symbol: 'TEST' }, 1, 0);
+    const profitablePrice = position.entryEffectivePrice * 1.2 /
+      ((1 - config.protocolFeePct) * (1 - config.exitSlippagePct));
+
+    const actions = engine.evaluate(position, profitablePrice, config.timeExitMs + 1, 10);
+
+    expect(actions[0].type).toBe('TIME_EXIT');
+    expect(actions[0].realizedMultiple).toBeCloseTo(1.2);
+    expect(position.status).toBe('CLOSED');
+  });
+
+  it('keeps the post-2x runner open past the time limit', () => {
+    const engine = new PaperSniperEngine(config);
+    const { position } = engine.open({ token, creator, symbol: 'TEST' }, 1, 0);
+    const priceForTwoX = position.entryEffectivePrice * 2.1 /
+      ((1 - config.protocolFeePct) * (1 - config.exitSlippagePct));
+    engine.evaluate(position, priceForTwoX, 10_000, 10);
+
+    const actions = engine.evaluate(position, priceForTwoX, config.timeExitMs + 1, 10);
+
+    expect(actions).toHaveLength(0);
+    expect(position.remainingFraction).toBeCloseTo(0.2);
+    expect(position.status).toBe('OPEN');
   });
 
   it('values a trade-stop remainder at zero', () => {

@@ -1,10 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
-import { createPublicClient, defineChain, fallback, http, type PublicClient } from 'viem';
+import { createPublicClient, defineChain, fallback, http, webSocket, type PublicClient } from 'viem';
 import { mainnet, base } from 'viem/chains';
 import type { SupportedChain } from '../collector/collector.types';
-import { ONCHAIN_REDIS_CLIENT, VIEM_CLIENTS } from './onchain.constants';
+import { ONCHAIN_REDIS_CLIENT, VIEM_CLIENTS, VIEM_STREAM_CLIENTS } from './onchain.constants';
 import { TokenAgeService } from './token-age.service';
 import { PriceService } from './price.service';
 import { DexResolverService } from './dex-resolver.service';
@@ -15,6 +15,7 @@ import { LiquidityVerificationService } from './liquidity-verification.service';
 import { RobinhoodExperimentalSafetyService } from './robinhood-experimental-safety.service';
 import { FactoryPoolDiscoveryService } from './factory-pool-discovery.service';
 import { TokenMetadataService } from './token-metadata.service';
+import { GasModelService } from './gas-model.service';
 
 const robinhood = defineChain({
   id: 4663,
@@ -74,6 +75,26 @@ const robinhood = defineChain({
       },
       inject: [ConfigService],
     },
+    {
+      provide: VIEM_STREAM_CLIENTS,
+      useFactory: (config: ConfigService): Map<SupportedChain, PublicClient> => {
+        const ethWs = config.get<string>('chain.ethereumRpcWsUrl');
+        const baseWs = config.get<string>('chain.baseRpcWsUrl');
+        const clients = new Map<SupportedChain, PublicClient>();
+        clients.set('ethereum', createPublicClient({
+          chain: mainnet,
+          transport: ethWs ? webSocket(ethWs, { reconnect: true }) : http(config.get<string>('chain.ethereumRpcUrl')!),
+          pollingInterval: 2_000,
+        }) as unknown as PublicClient);
+        clients.set('base', createPublicClient({
+          chain: base,
+          transport: baseWs ? webSocket(baseWs, { reconnect: true }) : http(config.get<string>('chain.baseRpcUrl')!),
+          pollingInterval: 1_000,
+        }) as unknown as PublicClient);
+        return clients;
+      },
+      inject: [ConfigService],
+    },
 
     TokenAgeService,
     PriceService,
@@ -85,14 +106,19 @@ const robinhood = defineChain({
     FactoryPoolDiscoveryService,
     TokenMetadataService,
     LiquidityVerificationService,
+    GasModelService,
   ],
   exports: [
     TokenAgeService,
+    PriceService,
     LiquidityVerificationService,
     RobinhoodExperimentalSafetyService,
     FactoryPoolDiscoveryService,
     TokenMetadataService,
+    GasModelService,
+    DexResolverService,
     VIEM_CLIENTS,
+    VIEM_STREAM_CLIENTS,
   ],
 })
 export class OnchainModule {}

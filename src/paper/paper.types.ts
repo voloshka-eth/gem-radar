@@ -7,7 +7,7 @@ export interface CandidateResult {
   pool: CandidatePool;
   token: CandidateToken;
   liq: LiquidityCheckResult;
-  score: ScoreResult;
+  score?: ScoreResult;
   ageDays: number | null;
   tokenId: string;
   poolId: string;
@@ -16,7 +16,15 @@ export interface CandidateResult {
   // New Robinhood static-safe admissions use CONTRACT_SAFE and retain their
   // provider limitation in experimentalSafety. The explicit Robinhood value is
   // kept only so historical isolated rows remain readable.
-  riskCohort?: 'CONTRACT_SAFE' | 'ROBINHOOD_EXPERIMENTAL_NO_PROVIDER' | 'CONTRACT_MINTABLE_RESEARCH' | 'CONTRACT_UNKNOWN_RESEARCH';
+  riskCohort?: string;
+  strategyVersion?: string;
+  signalId?: string;
+  exitPolicy?: 'SAFE_LADDER' | 'SOFT_RISK_2X' | 'LEGACY_SHADOW';
+  benchmarkEligible?: boolean;
+  flowSnapshot?: Record<string, unknown>;
+  observedAt?: Date;
+  gasUsd?: number;
+  maxEntrySlipPct?: number;
   experimentalSafety?: {
     passed: boolean;
     reasons: string[];

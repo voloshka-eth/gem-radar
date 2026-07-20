@@ -132,7 +132,14 @@ export class V4LiquidityService {
     if (!poolManager || !quoter || !stateView) {
       throw new Error(`Incomplete V4 deployment config for ${pool.chain}`);
     }
-    const metadata = await this.getMetadata(client, pool.chain, poolId, poolManager, pool.v4Metadata);
+    const metadata = await this.getMetadata(
+      client,
+      pool.chain,
+      poolId,
+      poolManager,
+      pool.v4Metadata,
+      pool.creationBlockNumber,
+    );
     const quotePriceUsd = await this.priceService.getUsdPrice(pool.chain, pool.quoteAssetAddress);
     if (!quotePriceUsd) throw new Error(`DefiLlama price unavailable for ${pool.chain}:${pool.quoteAssetAddress}`);
 
@@ -223,6 +230,7 @@ export class V4LiquidityService {
     poolId: `0x${string}`,
     poolManager: string,
     discovered?: CandidatePool['v4Metadata'],
+    creationBlockNumber?: string,
   ): Promise<PoolMetadata> {
     const cacheKey = `${chain}:${poolId.toLowerCase()}`;
     const cached = this.metadataCache.get(cacheKey);
@@ -243,11 +251,15 @@ export class V4LiquidityService {
       return metadata;
     }
 
+    if (!creationBlockNumber) {
+      throw new Error(`V4 metadata unavailable without a creation block for pool ${poolId}`);
+    }
+    const fromBlock = BigInt(creationBlockNumber);
     const logs = await client.getLogs({
       address: poolManager as `0x${string}`,
       event: INITIALIZE_EVENT,
       args: { id: poolId },
-      fromBlock: 0n,
+      fromBlock,
       toBlock: 'latest',
     } as any) as Array<{ args?: Record<string, unknown> }>;
     const args = logs.at(-1)?.args;

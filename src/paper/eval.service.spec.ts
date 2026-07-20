@@ -18,6 +18,7 @@ function config(overrides: Record<string, unknown> = {}) {
     'paper.priceReadFailureRugThreshold': 3,
     'paper.rugLiquidityConfirmationCount': 1,
     'paper.robinhoodRugLiquidityConfirmationCount': 2,
+    'paper.partialProfitTimeExitMs': 0,
     ...overrides,
   };
   return { get: (key: string) => values[key] } as unknown as ConfigService;
@@ -136,6 +137,9 @@ function harness(
   const paper = {
     processPendingConfirmations: jest.fn().mockResolvedValue({ confirmed: 0, rejected: 0, deferred: 0 }),
   };
+  const gasModel = {
+    estimateUsd: jest.fn().mockResolvedValue(1.5),
+  };
 
   const service = new EvalService(
     config(configOverrides),
@@ -146,6 +150,7 @@ function harness(
     geckoTerminal as any,
     deployerReputation as any,
     paper as any,
+    gasModel as any,
   );
 
   return { service, prisma, fileLogger };
@@ -210,7 +215,7 @@ describe('EvalService price-read failures', () => {
     expect(prisma.paperPosition.update).not.toHaveBeenCalled();
   });
 
-  it('closes as RUG once no-price repeats at the threshold', async () => {
+  it('keeps the position open when repeated quote reads fail without rug evidence', async () => {
     const { service, prisma, fileLogger } = harness(
       openPosition({ priceReadFailureCount: 2 }),
       unreadableLiquidity(),
@@ -218,23 +223,17 @@ describe('EvalService price-read failures', () => {
 
     const result = await service.evaluateOpenPositions();
 
-    expect(result.closed).toBe(1);
-    expect(prisma.paperEvent.create).toHaveBeenCalledTimes(1);
+    expect(result.closed).toBe(0);
+    expect(prisma.paperEvent.create).not.toHaveBeenCalled();
     expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
-      status: 'CLOSED',
-      outcomeClass: 'RUG',
-      remainingFraction: 0,
+      remainingFraction: 1,
     });
     expect(prisma.paperPosition.update.mock.calls[0][0].data.entryFeatures).toMatchObject({
       priceReadFailureCount: 3,
       lastPriceReadError: 'no results found',
     });
-    expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
-      status: 'rug',
-      outcome_class: 'RUG',
-    });
-    expect(fileLogger.logPaperExit.mock.calls[0][0].note).toContain('price_unreadable_3x');
-    expect(result.rows[0].status).toBe('closed:RUG');
+    expect(fileLogger.logPaperExit).not.toHaveBeenCalled();
+    expect(result.rows[0].status).toBe('price_unreadable_3/3');
   });
 
   it('keeps a position open after one low-liquidity read even if price is unreadable', async () => {
@@ -300,10 +299,10 @@ describe('EvalService price-read failures', () => {
     expect(result.rows[0].status).toBe('alive');
   });
 
-  it('sells 80% at 2x and keeps the gem tail open', async () => {
+  it('sells 80% once executable proceeds reach 2x and keeps the gem tail open', async () => {
     const { service, prisma, fileLogger } = harness(
       openPosition(),
-      healthyLiquidityAtPrice(2),
+      healthyLiquidityAtPrice(2.2),
       {
         'paper.ladder': [
           { multiple: 2, sellFraction: 0.8 },
@@ -326,7 +325,10 @@ describe('EvalService price-read failures', () => {
   it('closes only when the final 1000x ladder rung is sold', async () => {
     const { service, prisma, fileLogger } = harness(
       openPosition(),
-      healthyLiquidityAtPrice(1000),
+      {
+        ...healthyLiquidityAtPrice(1_200),
+        slip50: 0, slip100: 0, slip500: 0, slip1000: 0,
+      },
       {
         'paper.ladder': [
           { multiple: 2, sellFraction: 0.8 },
@@ -347,6 +349,78 @@ describe('EvalService price-read failures', () => {
       executedRungs: '2,10,1000',
     });
     expect(result.rows[0].status).toBe('closed:WIN');
+  });
+
+  it('closes a SOFT_RISK position completely at executable net 2x', async () => {
+    const position = { ...openPosition(), exitPolicy: 'SOFT_RISK_2X' };
+    const { service, prisma, fileLogger } = harness(position as ReturnType<typeof openPosition>, healthyLiquidityAtPrice(2.2), {
+      'paper.ladder': [
+        { multiple: 2, sellFraction: 0.8 },
+        { multiple: 10, sellFraction: 0.15 },
+        { multiple: 1000, sellFraction: 0.05 },
+      ],
+    });
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(1);
+    expect(fileLogger.logPaperExit).toHaveBeenCalledTimes(1);
+    expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
+      status: 'CLOSED', remainingFraction: 0, executedRungs: '2', outcomeClass: 'WIN',
+    });
+  });
+
+  it('hard-stops when a full executable close is at or below 0.8x', async () => {
+    const { service, prisma, fileLogger } = harness(openPosition(), healthyLiquidityAtPrice(0.85), {
+      'paper.hardStopMultiple': 0.8,
+      'paper.ladder': [{ multiple: 2, sellFraction: 0.8 }],
+    });
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(1);
+    expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
+      status: 'CLOSED', remainingFraction: 0, outcomeClass: 'STOP_LOSS',
+    });
+    expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
+      event_type: 'INVALIDATE_SELL', outcome_class: 'STOP_LOSS',
+    });
+  });
+
+  it('takes a full partial-profit exit after the time limit when 2x was never reached', async () => {
+    const { service, prisma, fileLogger } = harness(
+      openPosition(),
+      healthyLiquidityAtPrice(1.2),
+      { 'paper.partialProfitTimeExitMs': 1, 'paper.ladder': [{ multiple: 2, sellFraction: 0.8 }] },
+    );
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(1);
+    expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
+      status: 'CLOSED', remainingFraction: 0, outcomeClass: 'PARTIAL_PROFIT_TIME',
+    });
+    expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
+      event_type: 'TIME_PROFIT_SELL', outcome_class: 'PARTIAL_PROFIT_TIME', fraction: '1.0000',
+    });
+  });
+
+  it('time-exits as a loss when a green spot mark is net-negative after costs', async () => {
+    const { service, prisma, fileLogger } = harness(
+      openPosition(),
+      healthyLiquidityAtPrice(1.01),
+      { 'paper.partialProfitTimeExitMs': 1, 'paper.ladder': [{ multiple: 2, sellFraction: 0.8 }] },
+    );
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(1);
+    expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
+      status: 'CLOSED', outcomeClass: 'TIME_LOSS', remainingFraction: 0,
+    });
+    expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
+      event_type: 'TIME_LOSS_SELL', outcome_class: 'TIME_LOSS', fraction: '1.0000',
+    });
   });
 });
 
