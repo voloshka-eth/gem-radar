@@ -5,6 +5,7 @@ import type { SupportedChain, CandidatePool } from '../collector/collector.types
 import { VIEM_CLIENTS, QUOTE_ASSET_DECIMALS, QUOTER_V2_CONFIG_KEY } from './onchain.constants';
 import { PriceService } from './price.service';
 import { bigintRatioToNumber, decimalToRawAmount, rawToDecimalNumber } from './bigint-math';
+import type { ExecutionQuoteDirection, ExecutionQuoteResult } from './onchain.types';
 
 const TOKEN_ADDR_ABI = [
   { name: 'token0', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
@@ -67,7 +68,7 @@ const QUOTER_V2_ABI = [{
   ],
 }] as const;
 
-const PROBE_SIZES_USD = [50, 100, 500, 1000] as const;
+const PROBE_SIZES_USD = [20, 50, 100, 500, 1000] as const;
 const MAX_SLIPPAGE_FOR_DEPTH = 0.10;
 const TWO_POW_96 = 2n ** 96n;
 const TWO_POW_192 = TWO_POW_96 * TWO_POW_96;
@@ -75,6 +76,9 @@ const TWO_POW_192 = TWO_POW_96 * TWO_POW_96;
 export interface V3LiquidityResult {
   onchainTvlUsd: number;
   spotPriceUsd: number;
+  slip20: number | null;
+  entrySlip20: number | null;
+  exitSlip20: number | null;
   slip50: number | null;
   slip100: number | null;
   slip500: number | null;
@@ -206,12 +210,20 @@ export class V3LiquidityService {
     const feeUint24 = feeBps; // V3 fee is already in pool units (e.g. 3000 = 0.3%)
     const slippages = await Promise.all(
       PROBE_SIZES_USD.map((sizeUsd) =>
-        this.quoteSlippage(client, quoterAddr, gemAddr, quoteAddr, feeUint24,
-                           sizeUsd, spotPriceUsd, gemDec, quoteDec, quotePriceUsd),
+        this.quoteExitSlippage(client, quoterAddr, gemAddr, quoteAddr, feeUint24,
+                               sizeUsd, spotPriceUsd, gemDec, quoteDec, quotePriceUsd),
       ),
     );
 
-    const [slip50, slip100, slip500, slip1000] = slippages.map((probe) => probe.slippage);
+    const [exitSlip20, slip50, slip100, slip500, slip1000] = slippages.map((probe) => probe.slippage);
+    const entryProbe20 = await this.quoteSlippage(
+      client, quoterAddr, gemAddr, quoteAddr, feeUint24,
+      PROBE_SIZES_USD[0], spotPriceUsd, gemDec, quoteDec, quotePriceUsd,
+    );
+    const entrySlip20 = entryProbe20.slippage;
+    const slip20 = entrySlip20 == null || exitSlip20 == null
+      ? entrySlip20 ?? exitSlip20
+      : Math.max(entrySlip20, exitSlip20);
 
     const failedProbes = slippages.filter((probe) => probe.failure != null);
     if (failedProbes.length > 0) {
@@ -231,7 +243,73 @@ export class V3LiquidityService {
       }
     }
 
-    return { onchainTvlUsd, spotPriceUsd, slip50, slip100, slip500, slip1000, executableDepthUsd };
+    return {
+      onchainTvlUsd, spotPriceUsd, slip20, entrySlip20, exitSlip20,
+      slip50, slip100, slip500, slip1000, executableDepthUsd,
+    };
+  }
+
+  async quoteTrade(
+    pool: CandidatePool,
+    gemDecimals: number,
+    feeBps: number,
+    sizeUsd: number,
+    direction: ExecutionQuoteDirection,
+  ): Promise<ExecutionQuoteResult> {
+    const observedAt = new Date();
+    const client = this.viemClients.get(pool.chain);
+    const quoterKey = QUOTER_V2_CONFIG_KEY[pool.chain];
+    const quoterAddr = this.config.get<string>(quoterKey);
+    if (!client || !quoterAddr || !(sizeUsd > 0)) {
+      return {
+        liquidityModel: 'V3', direction, sizeUsd, spotPriceUsd: null, slippagePct: null,
+        executable: false, observedAt, error: !client ? 'missing_rpc_client' : !quoterAddr ? 'missing_quoter' : 'invalid_trade_size',
+      };
+    }
+    try {
+      const poolAddr = pool.poolAddress as `0x${string}`;
+      const [token0, token1, slot0] = await Promise.all([
+        client.readContract({ address: poolAddr, abi: TOKEN_ADDR_ABI, functionName: 'token0' }),
+        client.readContract({ address: poolAddr, abi: TOKEN_ADDR_ABI, functionName: 'token1' }),
+        client.readContract({ address: poolAddr, abi: SLOT0_ABI, functionName: 'slot0' }),
+      ]) as [string, string, readonly [bigint, number, number, number, number, number, boolean]];
+      const sqrtPriceX96 = slot0[0];
+      if (sqrtPriceX96 === 0n) throw new Error('pool_uninitialized');
+      const quoteAddr = pool.quoteAssetAddress.toLowerCase();
+      const gemAddr = token0.toLowerCase() === quoteAddr ? token1 : token0;
+      const onchainQuoteAddr = token0.toLowerCase() === quoteAddr ? token0 : token1;
+      const quoteDecimals = QUOTE_ASSET_DECIMALS[pool.quoteAsset] ?? 18;
+      const quotePriceUsd = await this.priceService.getUsdPrice(pool.chain, pool.quoteAssetAddress);
+      if (!(quotePriceUsd && quotePriceUsd > 0)) throw new Error('quote_asset_price_unavailable');
+      const priceRaw = bigintRatioToNumber(sqrtPriceX96 * sqrtPriceX96, TWO_POW_192);
+      const gemIsToken0 = token0.toLowerCase() !== quoteAddr;
+      const priceGemInQuote = gemIsToken0
+        ? priceRaw * (10 ** gemDecimals) / (10 ** quoteDecimals)
+        : (10 ** gemDecimals) / (priceRaw * 10 ** quoteDecimals);
+      const spotPriceUsd = priceGemInQuote * quotePriceUsd;
+      if (!(spotPriceUsd > 0 && Number.isFinite(spotPriceUsd))) throw new Error('invalid_spot_price');
+      const probe = direction === 'BUY'
+        ? await this.quoteSlippage(
+            client, quoterAddr, gemAddr, onchainQuoteAddr, feeBps, sizeUsd,
+            spotPriceUsd, gemDecimals, quoteDecimals, quotePriceUsd,
+          )
+        : await this.quoteExitSlippage(
+            client, quoterAddr, gemAddr, onchainQuoteAddr, feeBps, sizeUsd,
+            spotPriceUsd, gemDecimals, quoteDecimals, quotePriceUsd,
+          );
+      return {
+        liquidityModel: 'V3', direction, sizeUsd, spotPriceUsd,
+        slippagePct: probe.slippage,
+        executable: probe.slippage != null && probe.slippage < 1,
+        observedAt,
+        ...(probe.failure ? { error: probe.failure } : {}),
+      };
+    } catch (error) {
+      return {
+        liquidityModel: 'V3', direction, sizeUsd, spotPriceUsd: null, slippagePct: null,
+        executable: false, observedAt, error: (error as Error).message,
+      };
+    }
   }
 
   /**
@@ -284,6 +362,40 @@ export class V3LiquidityService {
       // Convert received gem tokens to USD at spot price, compare to what we spent.
       const actualGemRaw = result[0];
       const actualOutUsd = rawToDecimalNumber(actualGemRaw, gemDec) * spotPriceUsd;
+      return { sizeUsd, slippage: 1 - actualOutUsd / sizeUsd, failure: null };
+    } catch (err) {
+      return { sizeUsd, slippage: null, failure: this.quoteFailureReason(err) };
+    }
+  }
+
+  private async quoteExitSlippage(
+    client: PublicClient,
+    quoterAddr: string,
+    gemAddr: string,
+    quoteAddr: string,
+    fee: number,
+    sizeUsd: number,
+    spotPriceUsd: number,
+    gemDec: number,
+    quoteDec: number,
+    quotePriceUsd: number,
+  ): Promise<QuoteProbe & { sizeUsd: number }> {
+    try {
+      const amountInRaw = decimalToRawAmount(sizeUsd / spotPriceUsd, gemDec);
+      if (amountInRaw < 1n) return { sizeUsd, slippage: null, failure: 'gem_amount_too_small' };
+      const result = await client.readContract({
+        address: quoterAddr as `0x${string}`,
+        abi: QUOTER_V2_ABI,
+        functionName: 'quoteExactInputSingle',
+        args: [{
+          tokenIn: gemAddr as `0x${string}`,
+          tokenOut: quoteAddr as `0x${string}`,
+          amountIn: amountInRaw,
+          fee,
+          sqrtPriceLimitX96: 0n,
+        }],
+      }) as readonly [bigint, bigint, number, bigint];
+      const actualOutUsd = rawToDecimalNumber(result[0], quoteDec) * quotePriceUsd;
       return { sizeUsd, slippage: 1 - actualOutUsd / sizeUsd, failure: null };
     } catch (err) {
       return { sizeUsd, slippage: null, failure: this.quoteFailureReason(err) };

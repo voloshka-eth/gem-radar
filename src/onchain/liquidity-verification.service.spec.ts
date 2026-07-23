@@ -9,6 +9,9 @@ describe('LiquidityVerificationService physicality guard', () => {
 
   const quoterBackedRead = {
     spotPriceUsd: 0.00002,
+    slip20: 0.01,
+    entrySlip20: 0.009,
+    exitSlip20: 0.01,
     slip50: 0.0125,
     slip100: 0.015,
     slip500: 0.0345,

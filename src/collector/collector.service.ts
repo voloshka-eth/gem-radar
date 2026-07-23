@@ -166,6 +166,12 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       minOnchainTvlUsd: this.robinhoodMinOnchainTvlUsd,
       primaryMinScore: this.robinhoodMinScore,
       shadowMinScore: this.config.get<number>('collector.robinhoodShadowMinScore') ?? 30,
+      primaryMinFdvToOnchainTvlRatio:
+        this.config.get<number>('collector.robinhoodPrimaryMinFdvToOnchainTvlRatio') ?? 0.5,
+      primaryMaxEntrySlippagePct:
+        this.config.get<number>('collector.robinhoodPrimaryMaxEntrySlippagePct') ?? 0.03,
+      primaryMinRoundTripMultiple:
+        this.config.get<number>('collector.robinhoodPrimaryMinRoundTripMultiple') ?? 0.80,
     };
     this.deployerGateEnabled =
       this.config.get<boolean>('collector.deployerGateEnabled') ?? true;
@@ -930,6 +936,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       providerStatus,
       liquidity: evaluation.liq,
       finalScore: evaluation.score.finalScore,
+      reportedFdvUsd: candidate.pool.fdvUsd ?? null,
     }, this.robinhoodAdmissionStageConfig);
     if (!admission.pass) {
       this.logRobinhoodPaperGate(candidate, runId, admission.reason ?? 'stage_failed', {
@@ -941,6 +948,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
         executableDepthUsd: evaluation.liq.executableDepthUsd,
         onchainTvlUsd: evaluation.liq.onchainTvlUsd,
         finalScore: evaluation.score.finalScore,
+        reportedFdvUsd: candidate.pool.fdvUsd ?? null,
+        qualityFlags: admission.qualityFlags ?? [],
         primaryMinScore: this.robinhoodAdmissionStageConfig.primaryMinScore,
         shadowMinScore: this.robinhoodAdmissionStageConfig.shadowMinScore,
       });
@@ -950,8 +959,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     const paperLane = admission.paperLane ?? 'SHADOW';
     const isShadow = paperLane === 'SHADOW';
     const strategyVersion = isShadow
-      ? 'robinhood_stages_v1_shadow'
-      : 'robinhood_stages_v1_primary';
+      ? 'robinhood_stages_v2_shadow'
+      : 'robinhood_stages_v2_primary';
     const riskCohort = isShadow
       ? 'ROBINHOOD_STAGE_SHADOW'
       : 'ROBINHOOD_STATIC_SAFE';
@@ -1021,6 +1030,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
       final_score: evaluation.score.finalScore,
       executable_depth_usd: evaluation.liq.executableDepthUsd,
       onchain_tvl_usd: evaluation.liq.onchainTvlUsd,
+      reported_fdv_usd: candidate.pool.fdvUsd ?? null,
+      quality_flags: admission.qualityFlags ?? [],
     });
 
     this.logger.log(

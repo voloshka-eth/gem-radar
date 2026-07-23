@@ -76,8 +76,10 @@ export class PaperService {
     const firstSeenAt = c.observedAt ?? new Date();
     const openedAt = new Date(firstSeenAt.getTime() + delaySec * 1000);
 
-    // Pessimistic entry slip for the position size (a $20 trade is charged the $50 probe).
+    // V2 uses its exact directional $20 probe; control cohorts keep the historical $50 bucket.
+    const useExact20 = strategyVersion.endsWith('_v2') || strategyVersion.startsWith('robinhood_stages_v2_');
     const entrySlip = slipForSize(sizeUsd, {
+      slip20: useExact20 ? liq.entrySlip20 ?? liq.slip20 ?? null : null,
       slip50: liq.slip50, slip100: liq.slip100, slip500: liq.slip500, slip1000: liq.slip1000,
     });
     const buyTaxPct = taxFraction(buyTax);
@@ -498,6 +500,7 @@ export class PaperService {
     const firstSeenAt = new Date();
     const openedAt = new Date(firstSeenAt.getTime() + delaySec * 1000);
     const entrySlip = slipForSize(sizeUsd, {
+      slip20: null,
       slip50: liq.slip50, slip100: liq.slip100, slip500: liq.slip500, slip1000: liq.slip1000,
     });
     const buyTaxPct = taxFraction(buyTax);

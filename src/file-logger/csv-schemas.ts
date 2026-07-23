@@ -2,7 +2,7 @@
 // Adding a field: extend the interface, add an entry to the headers array,
 // bump CSV_SCHEMA_VERSION.  Never reorder existing columns — append only.
 
-export const CSV_SCHEMA_VERSION = '1.7.0'; // paper cohort attribution
+export const CSV_SCHEMA_VERSION = '1.9.0'; // Solana multi-venue paired experiment attribution
 
 export interface CsvHeader {
   id: string;   // matches the key in the row object
@@ -308,6 +308,22 @@ export interface PaperEntryRow {
   trigger_buy_quote_usd: string;
   trigger_buy_sell_ratio: string;
   trigger_price_momentum: string;
+  experiment_id?: string;
+  experiment_arm?: string;
+  execution_scenario?: string;
+  execution_leg?: string;
+  config_hash?: string;
+  target_execution_at?: string;
+  executed_at?: string;
+  confirmation_status?: string;
+  venue?: string;
+  discovery_slot?: string;
+  discovery_signature?: string;
+  source_program?: string;
+  quote_model?: string;
+  flow_snapshot?: string;
+  data_health?: string;
+  signal_latency_ms?: string;
 }
 
 export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
@@ -351,6 +367,22 @@ export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
   { id: 'trigger_buy_quote_usd', title: 'trigger_buy_quote_usd' },
   { id: 'trigger_buy_sell_ratio', title: 'trigger_buy_sell_ratio' },
   { id: 'trigger_price_momentum', title: 'trigger_price_momentum' },
+  { id: 'experiment_id', title: 'experiment_id' },
+  { id: 'experiment_arm', title: 'experiment_arm' },
+  { id: 'execution_scenario', title: 'execution_scenario' },
+  { id: 'execution_leg', title: 'execution_leg' },
+  { id: 'config_hash', title: 'config_hash' },
+  { id: 'target_execution_at', title: 'target_execution_at' },
+  { id: 'executed_at', title: 'executed_at' },
+  { id: 'confirmation_status', title: 'confirmation_status' },
+  { id: 'venue', title: 'venue' },
+  { id: 'discovery_slot', title: 'discovery_slot' },
+  { id: 'discovery_signature', title: 'discovery_signature' },
+  { id: 'source_program', title: 'source_program' },
+  { id: 'quote_model', title: 'quote_model' },
+  { id: 'flow_snapshot', title: 'flow_snapshot' },
+  { id: 'data_health', title: 'data_health' },
+  { id: 'signal_latency_ms', title: 'signal_latency_ms' },
 ];
 
 export interface ResearchPaperEntryRow {
@@ -597,6 +629,21 @@ export interface PaperExitRow {
   strategy_version: string;
   risk_cohort: string;
   exit_policy: string;
+  experiment_id?: string;
+  experiment_arm?: string;
+  execution_scenario?: string;
+  execution_leg?: string;
+  config_hash?: string;
+  target_execution_at?: string;
+  executed_at?: string;
+  venue?: string;
+  discovery_slot?: string;
+  discovery_signature?: string;
+  source_program?: string;
+  quote_model?: string;
+  flow_snapshot?: string;
+  data_health?: string;
+  signal_latency_ms?: string;
 }
 
 export const PAPER_EXIT_HEADERS: CsvHeader[] = [
@@ -624,6 +671,21 @@ export const PAPER_EXIT_HEADERS: CsvHeader[] = [
   { id: 'strategy_version', title: 'strategy_version' },
   { id: 'risk_cohort', title: 'risk_cohort' },
   { id: 'exit_policy', title: 'exit_policy' },
+  { id: 'experiment_id', title: 'experiment_id' },
+  { id: 'experiment_arm', title: 'experiment_arm' },
+  { id: 'execution_scenario', title: 'execution_scenario' },
+  { id: 'execution_leg', title: 'execution_leg' },
+  { id: 'config_hash', title: 'config_hash' },
+  { id: 'target_execution_at', title: 'target_execution_at' },
+  { id: 'executed_at', title: 'executed_at' },
+  { id: 'venue', title: 'venue' },
+  { id: 'discovery_slot', title: 'discovery_slot' },
+  { id: 'discovery_signature', title: 'discovery_signature' },
+  { id: 'source_program', title: 'source_program' },
+  { id: 'quote_model', title: 'quote_model' },
+  { id: 'flow_snapshot', title: 'flow_snapshot' },
+  { id: 'data_health', title: 'data_health' },
+  { id: 'signal_latency_ms', title: 'signal_latency_ms' },
 ];
 
 // ─── raw/contract_risk_checks.csv ─────────────────────────────────────────────

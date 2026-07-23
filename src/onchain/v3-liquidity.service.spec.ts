@@ -40,7 +40,9 @@ describe('V3LiquidityService', () => {
     expect(result.executableDepthUsd).toBe(50);
     expect(result.slip50).toBe(0);
     expect(result.slip100).toBeNull();
-    expect(logger).toHaveBeenCalledWith(expect.stringContaining('unexecutable probes $100, $500, $1000 (reverted:TF)'));
+    expect(result.entrySlip20).toBeNull();
+    expect(result.exitSlip20).toBeNull();
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('unexecutable probes $20, $100, $500, $1000 (reverted:TF)'));
     logger.mockRestore();
   });
 });

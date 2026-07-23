@@ -33,10 +33,11 @@ export const chainConfig = registerAs('chain', () => ({
   baseRpcWsUrl:           process.env.BASE_RPC_WS_URL || undefined,
   robinhoodRpcUrl:        process.env.ROBINHOOD_RPC_URL         ?? 'https://rpc.mainnet.chain.robinhood.com',
   robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK || undefined,
+  robinhoodRpcWsUrl:       process.env.ROBINHOOD_RPC_WS_URL || undefined,
   // Robinhood's public RPC currently rejects historical eth_getCode. Keep token
   // age unknown rather than issuing one failing archive call per fresh token.
   robinhoodHistoricalCodeEnabled: process.env.ROBINHOOD_HISTORICAL_CODE_ENABLED === 'true',
-  enabledChains: (process.env.COLLECTOR_CHAINS ?? 'ethereum,base,robinhood')
+  enabledChains: (process.env.COLLECTOR_CHAINS ?? 'ethereum,robinhood')
     .split(',')
     .map((chain) => chain.trim())
     .filter(Boolean),
@@ -44,6 +45,10 @@ export const chainConfig = registerAs('chain', () => ({
 
 export const evmFlowConfig = registerAs('evmFlow', () => ({
   enabled: process.env.EVM_FLOW_ENABLED !== 'false',
+  chains: (process.env.EVM_FLOW_CHAINS ?? 'ethereum,robinhood')
+    .split(',')
+    .map((chain) => chain.trim())
+    .filter(Boolean),
   factoryPollMs: parseInt(process.env.EVM_FLOW_FACTORY_POLL_MS ?? '3000', 10),
   healthLogMs: parseInt(process.env.EVM_FLOW_HEALTH_LOG_MS ?? '30000', 10),
   freshWatchMs: parseInt(process.env.EVM_FLOW_FRESH_WATCH_MS ?? '300000', 10),
@@ -54,8 +59,68 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
   maxEntrySlipPct: parseFloat(process.env.EVM_FLOW_MAX_ENTRY_SLIP_PCT ?? '0.10'),
   httpPollMsEthereum: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_ETHEREUM ?? '12000', 10),
   httpPollMsBase: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_BASE ?? '4000', 10),
+  httpPollMsRobinhood: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_ROBINHOOD ?? '4000', 10),
   matureBackfillBlocksEthereum: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_ETHEREUM ?? '25', 10),
   matureBackfillBlocksBase: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_BASE ?? '150', 10),
+  matureBackfillBlocksRobinhood: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_ROBINHOOD ?? '150', 10),
+  registrationMaxBackfillBlocksEthereum: parseInt(process.env.EVM_FLOW_REGISTRATION_MAX_BACKFILL_BLOCKS_ETHEREUM ?? '32', 10),
+  registrationMaxBackfillBlocksBase: parseInt(process.env.EVM_FLOW_REGISTRATION_MAX_BACKFILL_BLOCKS_BASE ?? '300', 10),
+  registrationMaxBackfillBlocksRobinhood: parseInt(process.env.EVM_FLOW_REGISTRATION_MAX_BACKFILL_BLOCKS_ROBINHOOD ?? '300', 10),
+  maxLatestSwapAgeMs: parseInt(process.env.EVM_FLOW_MAX_LATEST_SWAP_AGE_MS ?? '15000', 10),
+  initialAddressBatchSize: parseInt(process.env.EVM_FLOW_INITIAL_ADDRESS_BATCH_SIZE ?? '32', 10),
+  minBlockCoverage: parseFloat(process.env.EVM_FLOW_MIN_BLOCK_COVERAGE ?? '0.995'),
+  robinhoodExperimentMaxTickAgeMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_MAX_TICK_AGE_MS ?? '10000', 10),
+  robinhoodExperimentMaxLegLatenessMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_MAX_LEG_LATENESS_MS ?? '3000', 10),
+}));
+
+export const solanaLaunchConfig = registerAs('solanaLaunch', () => ({
+  enabled: process.env.SOLANA_LAUNCH_ENABLED !== 'false',
+  multiVenueEnabled: process.env.SOLANA_MULTI_VENUE_ENABLED !== 'false',
+  rpcUrl: process.env.SOLANA_RPC_URL ?? 'https://api.mainnet-beta.solana.com',
+  wsUrl: process.env.SOLANA_RPC_WS_URL || undefined,
+  launchApiUrl: process.env.RAYDIUM_LAUNCH_API_URL ?? 'https://launch-mint-v1.raydium.io',
+  tradeApiUrl: process.env.RAYDIUM_TRADE_API_URL ?? 'https://transaction-v1.raydium.io',
+  pollIntervalMs: parseInt(process.env.SOLANA_LAUNCH_POLL_INTERVAL_MS ?? '10000', 10),
+  healthLogMs: parseInt(process.env.SOLANA_LAUNCH_HEALTH_LOG_MS ?? '30000', 10),
+  discoveryAgeMs: parseInt(process.env.SOLANA_LAUNCH_DISCOVERY_AGE_MS ?? '300000', 10),
+  bootstrapLookbackMs: parseInt(process.env.SOLANA_LAUNCH_BOOTSTRAP_LOOKBACK_MS ?? '86400000', 10),
+  bootstrapWatchMs: parseInt(process.env.SOLANA_LAUNCH_BOOTSTRAP_WATCH_MS ?? '1800000', 10),
+  watchMs: parseInt(process.env.SOLANA_LAUNCH_WATCH_MS ?? '7200000', 10),
+  positionSizeUsd: parseFloat(process.env.SOLANA_LAUNCH_POSITION_SIZE_USD ?? '20'),
+  maxEntrySlippagePct: parseFloat(process.env.SOLANA_LAUNCH_MAX_ENTRY_SLIP_PCT ?? '0.03'),
+  minRoundTripMultiple: parseFloat(process.env.SOLANA_LAUNCH_MIN_ROUND_TRIP_MULTIPLE ?? '0.80'),
+  routeProbeFinishingRate: parseFloat(process.env.SOLANA_LAUNCH_ROUTE_PROBE_FINISHING_RATE ?? '0.95'),
+  mintRefreshIntervalMs: parseInt(process.env.SOLANA_LAUNCH_MINT_REFRESH_INTERVAL_MS ?? '30000', 10),
+  mintRefreshBatchSize: parseInt(process.env.SOLANA_LAUNCH_MINT_REFRESH_BATCH_SIZE ?? '50', 10),
+  routeReadyProbeIntervalMs: parseInt(process.env.SOLANA_ROUTE_READY_PROBE_INTERVAL_MS ?? '15000', 10),
+  routeFallbackProbeIntervalMs: parseInt(process.env.SOLANA_ROUTE_FALLBACK_PROBE_INTERVAL_MS ?? '60000', 10),
+  maxRouteProbesPerPoll: parseInt(process.env.SOLANA_MAX_ROUTE_PROBES_PER_POLL ?? '10', 10),
+  gasUsd: parseFloat(process.env.SOLANA_PAPER_GAS_USD ?? '0.01'),
+  hardStopMultiple: parseFloat(process.env.SOLANA_PAPER_HARD_STOP_MULTIPLE ?? '0.80'),
+  timeExitMs: parseInt(process.env.SOLANA_PAPER_TIME_EXIT_MS ?? '28800000', 10),
+  requestTimeoutMs: parseInt(process.env.SOLANA_REQUEST_TIMEOUT_MS ?? '10000', 10),
+  streamBackfillMs: parseInt(process.env.SOLANA_STREAM_BACKFILL_MS ?? '15000', 10),
+  lifecyclePollMs: parseInt(process.env.SOLANA_LIFECYCLE_POLL_MS ?? '5000', 10),
+  maxTransactionsPerCycle: parseInt(process.env.SOLANA_MAX_TRANSACTIONS_PER_CYCLE ?? '40', 10),
+  rpcMinRequestIntervalMs: parseInt(process.env.SOLANA_RPC_MIN_REQUEST_INTERVAL_MS ?? '250', 10),
+  rateLimitBackoffMs: parseInt(process.env.SOLANA_RATE_LIMIT_BACKOFF_MS ?? '10000', 10),
+  maxQueuedTransactions: parseInt(process.env.SOLANA_MAX_QUEUED_TRANSACTIONS ?? '1000', 10),
+  watchBackfillBatchSize: parseInt(process.env.SOLANA_WATCH_BACKFILL_BATCH_SIZE ?? '5', 10),
+  maxShadowSignals: parseInt(process.env.SOLANA_MAX_SHADOW_SIGNALS ?? '8', 10),
+  maxActivePoolSubscriptions: parseInt(process.env.SOLANA_MAX_ACTIVE_POOL_SUBSCRIPTIONS ?? '8', 10),
+  openArmEvalIntervalMs: parseInt(process.env.SOLANA_OPEN_ARM_EVAL_INTERVAL_MS ?? '30000', 10),
+  pendingWatchTimeoutMs: parseInt(process.env.SOLANA_PENDING_WATCH_TIMEOUT_MS ?? '120000', 10),
+  streamFreshnessMs: parseInt(process.env.SOLANA_STREAM_FRESHNESS_MS ?? '90000', 10),
+  streamFreshnessSlots: parseInt(process.env.SOLANA_STREAM_FRESHNESS_SLOTS ?? '225', 10),
+  streamWatchdogMs: parseInt(process.env.SOLANA_STREAM_WATCHDOG_MS ?? '10000', 10),
+  streamReconnectBaseMs: parseInt(process.env.SOLANA_STREAM_RECONNECT_BASE_MS ?? '5000', 10),
+  streamReconnectMaxMs: parseInt(process.env.SOLANA_STREAM_RECONNECT_MAX_MS ?? '120000', 10),
+  confirmationSweepMs: parseInt(process.env.SOLANA_CONFIRMATION_SWEEP_MS ?? '10000', 10),
+  executionTimelinessMs: parseInt(process.env.SOLANA_EXECUTION_TIMELINESS_MS ?? '60000', 10),
+  blockedCreators: (process.env.SOLANA_BLOCKED_CREATORS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
 }));
 
 export const apiConfig = registerAs('api', () => ({
@@ -137,6 +202,9 @@ export const collectorConfig = registerAs('collector', () => ({
   robinhoodStageMatureMinVol1hUsd: parseFloat(process.env.ROBINHOOD_STAGE_MATURE_MIN_VOL_1H_USD ?? '1000'),
   robinhoodStageMatureMinTx1h: parseInt(process.env.ROBINHOOD_STAGE_MATURE_MIN_TX_1H ?? '20', 10),
   robinhoodStageMatureMinBuys1h: parseInt(process.env.ROBINHOOD_STAGE_MATURE_MIN_BUYS_1H ?? '10', 10),
+  robinhoodPrimaryMinFdvToOnchainTvlRatio: parseFloat(process.env.ROBINHOOD_PRIMARY_MIN_FDV_TO_TVL_RATIO ?? '0.5'),
+  robinhoodPrimaryMaxEntrySlippagePct: parseFloat(process.env.ROBINHOOD_PRIMARY_MAX_ENTRY_SLIPPAGE_PCT ?? '0.03'),
+  robinhoodPrimaryMinRoundTripMultiple: parseFloat(process.env.ROBINHOOD_PRIMARY_MIN_ROUND_TRIP_MULTIPLE ?? '0.80'),
   deployerGateEnabled: process.env.DEPLOYER_GATE_ENABLED !== 'false',
   deployerGateMinDeployments: parseInt(process.env.DEPLOYER_GATE_MIN_DEPLOYMENTS ?? '1', 10),
   deployerGateMinRugLike: parseInt(process.env.DEPLOYER_GATE_MIN_RUG_LIKE ?? '1', 10),
@@ -237,7 +305,7 @@ export const paperConfig = registerAs('paper', () => ({
   // Optional survival experiment. The primary paper lane enters at discovery t0;
   // delaying the buy changes the opportunity set and must never be the default.
   takeCohortEnabled: process.env.PAPER_TAKE_COHORT_ENABLED === 'true',
-  takeCohortChains: (process.env.PAPER_TAKE_COHORT_CHAINS ?? 'ethereum,base')
+  takeCohortChains: (process.env.PAPER_TAKE_COHORT_CHAINS ?? 'ethereum')
     .split(',').map((chain) => chain.trim()).filter(Boolean),
   takeConfirmationDelaySec: parseInt(process.env.PAPER_TAKE_CONFIRMATION_DELAY_SEC ?? '600', 10),
   takeMinPriceMultiple: parseFloat(process.env.PAPER_TAKE_MIN_PRICE_MULTIPLE ?? '1.00'),
@@ -400,6 +468,7 @@ export default [
   redisConfig,
   chainConfig,
   evmFlowConfig,
+  solanaLaunchConfig,
   apiConfig,
   collectorConfig,
   scoringConfig,

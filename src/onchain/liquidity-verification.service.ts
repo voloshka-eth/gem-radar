@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { CandidatePool } from '../collector/collector.types';
-import type { LiquidityCheckResult } from './onchain.types';
+import type { ExecutionQuoteDirection, ExecutionQuoteResult, LiquidityCheckResult } from './onchain.types';
 import { DexResolverService } from './dex-resolver.service';
 import { V2LiquidityService } from './v2-liquidity.service';
 import { V3LiquidityService } from './v3-liquidity.service';
@@ -12,6 +12,9 @@ const UNSUPPORTED_RESULT = (model: string, error: string): LiquidityCheckResult 
   onchainTvlUsd:        null,
   reportedVsOnchainPct: null,
   executableDepthUsd:   null,
+  slip20: null,
+  entrySlip20: null,
+  exitSlip20: null,
   slip50: null, slip100: null, slip500: null, slip1000: null,
   spotPriceUsd: null,
   error,
@@ -24,6 +27,9 @@ const IMPLAUSIBLE_RESULT = (
   reportedVsOnchainPct: number | null,
   r: {
     spotPriceUsd: number;
+    slip20?: number | null;
+    entrySlip20?: number | null;
+    exitSlip20?: number | null;
     slip50: number | null; slip100: number | null;
     slip500: number | null; slip1000: number | null;
     executableDepthUsd: number;
@@ -34,6 +40,9 @@ const IMPLAUSIBLE_RESULT = (
   onchainTvlUsd,
   reportedVsOnchainPct,
   executableDepthUsd:   r.executableDepthUsd,
+  slip20:               r.slip20 ?? null,
+  entrySlip20:          r.entrySlip20 ?? null,
+  exitSlip20:           r.exitSlip20 ?? null,
   slip50:               r.slip50,
   slip100:              r.slip100,
   slip500:              r.slip500,
@@ -45,6 +54,7 @@ const IMPLAUSIBLE_RESULT = (
 @Injectable()
 export class LiquidityVerificationService {
   private readonly logger = new Logger(LiquidityVerificationService.name);
+  private readonly modelCache = new Map<string, Awaited<ReturnType<DexResolverService['resolveModel']>>>();
 
   constructor(
     private readonly resolver: DexResolverService,
@@ -54,9 +64,7 @@ export class LiquidityVerificationService {
   ) {}
 
   async verify(pool: CandidatePool, gemDecimalsHint?: number): Promise<LiquidityCheckResult> {
-    const { model, feeBps, probeError } = await this.resolver.resolveModel(
-      pool.chain, pool.poolAddress, pool.dex,
-    );
+    const { model, feeBps, probeError } = await this.resolveModel(pool);
 
     if (model !== 'V2' && model !== 'V3' && model !== 'V4') {
       this.logger.debug(`${pool.chain}:${pool.poolAddress} → ${model}`);
@@ -96,6 +104,50 @@ export class LiquidityVerificationService {
     }
   }
 
+  async quoteTrade(
+    pool: CandidatePool,
+    sizeUsd: number,
+    direction: ExecutionQuoteDirection,
+    gemDecimalsHint?: number,
+  ): Promise<ExecutionQuoteResult> {
+    const { model, feeBps, probeError } = await this.resolveModel(pool);
+    if (model !== 'V2' && model !== 'V3' && model !== 'V4') {
+      return {
+        liquidityModel: model,
+        direction,
+        sizeUsd,
+        spotPriceUsd: null,
+        slippagePct: null,
+        executable: false,
+        observedAt: new Date(),
+        error: probeError ?? `unsupported_liquidity_model:${model}`,
+      };
+    }
+    let gemDecimals = gemDecimalsHint ?? 18;
+    if (gemDecimalsHint == null) {
+      const gemAddress = this.resolveGemAddress(pool, model);
+      gemDecimals = model === 'V2'
+        ? await this.v2.readDecimals(pool.chain, gemAddress)
+        : model === 'V3'
+          ? await this.v3.readDecimals(pool.chain, gemAddress)
+          : await this.v4.readDecimals(pool.chain, gemAddress);
+    }
+    if (model === 'V2') return this.v2.quoteTrade(pool, gemDecimals, feeBps ?? 30, sizeUsd, direction);
+    if (model === 'V3') return this.v3.quoteTrade(pool, gemDecimals, feeBps ?? 3000, sizeUsd, direction);
+    return this.v4.quoteTrade(pool, gemDecimals, sizeUsd, direction);
+  }
+
+  private async resolveModel(pool: CandidatePool): Promise<Awaited<ReturnType<DexResolverService['resolveModel']>>> {
+    const key = `${pool.chain}:${pool.poolAddress.toLowerCase()}`;
+    const cached = this.modelCache.get(key);
+    if (cached) return cached;
+    const resolved = await this.resolver.resolveModel(pool.chain, pool.poolAddress, pool.dex);
+    if (resolved.model === 'V2' || resolved.model === 'V3' || resolved.model === 'V4') {
+      this.modelCache.set(key, resolved);
+    }
+    return resolved;
+  }
+
   private resolveGemAddress(pool: CandidatePool, model: 'V2' | 'V3' | 'V4'): string {
     const nativeCurrency = '0x0000000000000000000000000000000000000000';
     const token0Address = model === 'V4' && pool.v4Metadata
@@ -130,6 +182,9 @@ export class LiquidityVerificationService {
     reportedUsd: number | undefined,
     r: {
       spotPriceUsd: number;
+      slip20?: number | null;
+      entrySlip20?: number | null;
+      exitSlip20?: number | null;
       slip50: number | null; slip100: number | null;
       slip500: number | null; slip1000: number | null;
       executableDepthUsd: number;
@@ -148,6 +203,7 @@ export class LiquidityVerificationService {
     // the rules below it is treated as a broken read → implausible_read,
     // liquidityVerified=false. An honest false beats a fabricated true.
     const physFail = this.assessPhysicality(model, onchainTvlUsd, reportedUsd, [
+      { size: 20,   slip: r.exitSlip20 ?? r.slip20 ?? null },
       { size: 50,   slip: r.slip50 },
       { size: 100,  slip: r.slip100 },
       { size: 500,  slip: r.slip500 },
@@ -180,6 +236,9 @@ export class LiquidityVerificationService {
       onchainTvlUsd,
       reportedVsOnchainPct,
       executableDepthUsd:   r.executableDepthUsd,
+      slip20:               r.slip20 ?? null,
+      entrySlip20:          r.entrySlip20 ?? null,
+      exitSlip20:           r.exitSlip20 ?? null,
       slip50:               r.slip50,
       slip100:              r.slip100,
       slip500:              r.slip500,
@@ -190,11 +249,15 @@ export class LiquidityVerificationService {
 
   private buildV4Result(r: {
     spotPriceUsd: number;
+    slip20?: number | null;
+    entrySlip20?: number | null;
+    exitSlip20?: number | null;
     slip50: number | null; slip100: number | null;
     slip500: number | null; slip1000: number | null;
     executableDepthUsd: number;
   }): LiquidityCheckResult {
     const physFail = this.assessPhysicality('V4', null, undefined, [
+      { size: 20, slip: r.exitSlip20 ?? r.slip20 ?? null },
       { size: 50, slip: r.slip50 },
       { size: 100, slip: r.slip100 },
       { size: 500, slip: r.slip500 },
@@ -205,6 +268,9 @@ export class LiquidityVerificationService {
         liquidityModel: 'V4', liquidityVerified: false,
         onchainTvlUsd: null, reportedVsOnchainPct: null,
         executableDepthUsd: r.executableDepthUsd,
+        slip20: r.slip20 ?? null,
+        entrySlip20: r.entrySlip20 ?? null,
+        exitSlip20: r.exitSlip20 ?? null,
         slip50: r.slip50, slip100: r.slip100, slip500: r.slip500, slip1000: r.slip1000,
         spotPriceUsd: null,
         error: `implausible_read: ${physFail}`,
@@ -215,6 +281,9 @@ export class LiquidityVerificationService {
       // PoolManager is a singleton; there is no per-pool token balance to price as TVL.
       onchainTvlUsd: null, reportedVsOnchainPct: null,
       executableDepthUsd: r.executableDepthUsd,
+      slip20: r.slip20 ?? null,
+      entrySlip20: r.entrySlip20 ?? null,
+      exitSlip20: r.exitSlip20 ?? null,
       slip50: r.slip50, slip100: r.slip100, slip500: r.slip500, slip1000: r.slip1000,
       spotPriceUsd: r.spotPriceUsd,
     };

@@ -154,6 +154,8 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
           OR: [
             { strategyVersion: { startsWith: 'fresh_' } },
             { strategyVersion: { startsWith: 'mature_' } },
+            { strategyVersion: { startsWith: 'evm_flow_' } },
+            { strategyVersion: { startsWith: 'robinhood_flow_' } },
           ],
         } : {}),
       },
@@ -172,6 +174,8 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
           OR: [
             { strategyVersion: { startsWith: 'fresh_' } },
             { strategyVersion: { startsWith: 'mature_' } },
+            { strategyVersion: { startsWith: 'evm_flow_' } },
+            { strategyVersion: { startsWith: 'robinhood_flow_' } },
           ],
         } : {}),
       },
@@ -351,6 +355,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       let remainingFraction = num(pos.remainingFraction) ?? 1;
       let realizedValueUsd  = num(pos.realizedValueUsd) ?? 0;
       const exitPolicy = (pos as any).exitPolicy ?? 'SAFE_LADDER';
+      const useExact20 = typeof pos.strategyVersion === 'string' && pos.strategyVersion.endsWith('_v2');
       const positionLadder: LadderRung[] = exitPolicy === 'SOFT_RISK_2X'
         ? [{ multiple: 2, sellFraction: 1 }]
         : ladder;
@@ -359,7 +364,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         for (const rung of positionLadder.filter((item) => !executed.includes(item.multiple))) {
           const tokensToSell = tokensBought * rung.sellFraction;
           const usdValue = tokensToSell * (priceNow ?? 0);
-          const exitSlip = slipForSize(usdValue, ladderFrom(liq));
+          const exitSlip = slipForSize(usdValue, ladderFrom(liq, useExact20));
           const fill = modelExit(tokensToSell, priceNow ?? 0, exitSlip, { sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow) });
           const executableRungMultiple = sizeUsd > 0 && rung.sellFraction > 0
             ? fill.netUsd / (sizeUsd * rung.sellFraction)
@@ -375,27 +380,42 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       }
       const ladderComplete = remainingFraction <= 1e-6;
       const openedAtMs = (pos.openedAt ?? pos.firstSeenAt).getTime();
-      const timeExitDue =
-        partialProfitTimeExitMs > 0 &&
-        Date.now() - openedAtMs >= partialProfitTimeExitMs &&
-        status === 'alive' &&
-        currentMultiple != null;
 
-      const flowReversal = await this.flowReversalState(pos, nextEntryFeatures, entryEff, priceNow, drawdown);
+      const fullExitTokens = tokensBought * remainingFraction;
+      const fullExitValue = fullExitTokens * (priceNow ?? 0);
+      const fullExitSlip = slipForSize(fullExitValue, ladderFrom(liq, useExact20));
+      const fullExitFill = modelExit(fullExitTokens, priceNow ?? 0, fullExitSlip, {
+        sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow),
+      });
+      const executableIfClosed = sizeUsd > 0 ? (realizedValueUsd + fullExitFill.netUsd) / sizeUsd : 0;
+      const previousExecutablePeak = Math.max(1, this.numberFeature(nextEntryFeatures.protectedExecutablePeak) ?? 1);
+      const executablePeak = Math.max(previousExecutablePeak, executableIfClosed);
+      const executableDrawdown = executablePeak > 0
+        ? Math.max(0, (executablePeak - executableIfClosed) / executablePeak)
+        : 0;
+      const protectedPolicy = exitPolicy === 'PROTECTED_LADDER_V2';
+      const flowReversal = await this.flowReversalState(
+        pos,
+        nextEntryFeatures,
+        entryEff,
+        priceNow,
+        protectedPolicy ? executableDrawdown : drawdown,
+      );
       nextEntryFeatures = {
         ...nextEntryFeatures,
         flowReversalCount: flowReversal.count,
         flowReversalWindow: flowReversal.window,
         flowBuySellRatio30s: flowReversal.ratio,
+        flowCreatorSellUsd30s: flowReversal.creatorSellUsd,
+        flowCreatorExit30s: flowReversal.creatorExit,
+        protectedExecutablePeak: executablePeak,
+        protectedExecutableDrawdown: executableDrawdown,
       };
-
-      const fullExitTokens = tokensBought * remainingFraction;
-      const fullExitValue = fullExitTokens * (priceNow ?? 0);
-      const fullExitSlip = slipForSize(fullExitValue, ladderFrom(liq));
-      const fullExitFill = modelExit(fullExitTokens, priceNow ?? 0, fullExitSlip, {
-        sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow),
-      });
-      const executableIfClosed = sizeUsd > 0 ? (realizedValueUsd + fullExitFill.netUsd) / sizeUsd : 0;
+      const positionAgeMs = Date.now() - openedAtMs;
+      const protectedGreenExit = protectedPolicy && positionAgeMs >= 30 * 60_000 && executableIfClosed > 1;
+      const timeExitDue = status === 'alive' && currentMultiple != null && (protectedPolicy
+        ? protectedGreenExit || positionAgeMs >= 60 * 60_000
+        : partialProfitTimeExitMs > 0 && positionAgeMs >= partialProfitTimeExitMs);
       const hardStop = status === 'alive' && currentMultiple != null && executableIfClosed <= hardStopMultiple;
 
       // Last-tick rug signals — persisted on the position (COLLECTION ONLY; the LAST
@@ -432,7 +452,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       } else if (timeExitDue && !invalidate) {
         const tokensToSell = tokensBought * remainingFraction;
         const usdValue = tokensToSell * (priceNow ?? 0);
-        const exitSlip = slipForSize(usdValue, ladderFrom(liq));
+        const exitSlip = slipForSize(usdValue, ladderFrom(liq, useExact20));
         const fill = modelExit(tokensToSell, priceNow ?? 0, exitSlip, {
           sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow),
         });
@@ -445,7 +465,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
           await this.writeExit(
             runId, pos, realizedMultiple >= 1 ? 'TIME_PROFIT_SELL' : 'TIME_LOSS_SELL', status, priceNow, currentMultiple, remainingFraction,
             tokensToSell, fill.netUsd, exitSlip, realizedMultiple,
-            `time exit after ${Math.round(partialProfitTimeExitMs / 60_000)}m`,
+            `time exit after ${Math.round(positionAgeMs / 60_000)}m${protectedGreenExit ? ' protected-green' : ''}`,
             closeOutcomeClass,
           );
           remainingFraction = 0;
@@ -470,16 +490,21 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         const tokensToSell = tokensBought * remainingFraction;
         // On a rug, priceNow≈0 and depth is gone → modeled proceeds ≈ 0 (pessimistic).
         const usdValue = tokensToSell * (priceNow ?? 0);
-        const exitSlip = liqNow == null ? 1 : slipForSize(usdValue, ladderFrom(liq));
+        const exitSlip = liqNow == null ? 1 : slipForSize(usdValue, ladderFrom(liq, useExact20));
         const fill = modelExit(tokensToSell, priceNow ?? 0, exitSlip, { sandwichPct, gasUsd, sellTaxPct: taxFraction(sellTaxNow) });
         realizedValueUsd += fill.netUsd;
         const reason = hardStop
           ? 'hard_stop'
+          : flowReversal.creatorExit
+            ? 'creator_exit'
           : flowReversal.confirmed
             ? 'flow_reversal'
             : drawdown > maxDrawdownInvalidate && !isInvalidating(status) ? 'drawdown' : status;
         const realizedMultiple = realizedValueUsd / sizeUsd;
-        const closeOutcomeClass = outcomeClass(reason as PositionStatus | 'drawdown' | 'hard_stop' | 'flow_reversal', realizedMultiple);
+        const closeOutcomeClass = outcomeClass(
+          reason as PositionStatus | 'drawdown' | 'hard_stop' | 'flow_reversal' | 'creator_exit',
+          realizedMultiple,
+        );
         const invalidationReason = liquidityGoneConfirmed && status === 'rug'
             ? `liquidity_gone_${liquidityGoneReadCount}x`
           : reason;
@@ -735,48 +760,75 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async flowReversalState(
-    pos: { chain: string; poolAddress: string; strategyVersion?: string },
+    pos: { chain: string; poolAddress: string; strategyVersion?: string; exitPolicy?: string },
     features: Record<string, unknown>,
     entryPrice: number | null,
     priceNow: number | null,
     drawdown: number,
-  ): Promise<{ confirmed: boolean; count: number; window: number; ratio: number | null }> {
+  ): Promise<{
+    confirmed: boolean;
+    creatorExit: boolean;
+    creatorSellUsd: number;
+    count: number;
+    window: number;
+    ratio: number | null;
+  }> {
     const window = Math.floor(Date.now() / 30_000);
     const previousWindow = this.readCounter(features.flowReversalWindow);
     const previousCount = this.readCounter(features.flowReversalCount);
-    if (!pos.strategyVersion || !/^(fresh|mature)_/.test(pos.strategyVersion)) {
-      return { confirmed: false, count: previousCount, window, ratio: null };
+    const protectedPolicy = pos.exitPolicy === 'PROTECTED_LADDER_V2';
+    if (!pos.strategyVersion || !/^(fresh|mature|evm_flow|robinhood_flow)_/.test(pos.strategyVersion)) {
+      return { confirmed: false, creatorExit: false, creatorSellUsd: 0, count: previousCount, window, ratio: null };
     }
     if (previousWindow === window) {
+      const creatorExit = features.flowCreatorExit30s === true;
       return {
-        confirmed: previousCount >= 2,
+        confirmed: creatorExit || previousCount >= 2,
+        creatorExit,
+        creatorSellUsd: this.numberFeature(features.flowCreatorSellUsd30s) ?? 0,
         count: previousCount,
         window,
         ratio: this.numberFeature(features.flowBuySellRatio30s),
       };
     }
     const swapDelegate = (this.prisma as any).evmSwapObservation;
-    if (!swapDelegate) return { confirmed: false, count: previousCount, window, ratio: null };
+    if (!swapDelegate) {
+      return { confirmed: false, creatorExit: false, creatorSellUsd: 0, count: previousCount, window, ratio: null };
+    }
     const swaps = await swapDelegate.findMany({
       where: {
         chain: pos.chain,
         poolAddress: pos.poolAddress,
         ts: { gte: new Date(window * 30_000) },
       },
-      select: { kind: true, quoteAmountUsd: true },
+      select: { kind: true, quoteAmountUsd: true, trader: true },
     }).catch(() => []);
     let buys = 0;
     let sells = 0;
+    let creatorSellUsd = 0;
+    const flowSnapshot = features.flowSnapshot && typeof features.flowSnapshot === 'object'
+      ? features.flowSnapshot as Record<string, unknown>
+      : {};
+    const creatorAddress = typeof flowSnapshot.creatorAddress === 'string'
+      ? flowSnapshot.creatorAddress.toLowerCase()
+      : null;
     for (const swap of swaps) {
       const value = Number(swap.quoteAmountUsd);
       if (swap.kind === 'BUY') buys += value;
-      else if (swap.kind === 'SELL') sells += value;
+      else if (swap.kind === 'SELL') {
+        sells += value;
+        if (creatorAddress && String(swap.trader).toLowerCase() === creatorAddress) creatorSellUsd += value;
+      }
     }
     const ratio = sells > 0 ? buys / sells : buys > 0 ? 999 : null;
-    const weak = sells > 0 && ratio != null && ratio < 0.5 && entryPrice != null &&
-      priceNow != null && priceNow < entryPrice && drawdown >= 0.20;
+    const weak = protectedPolicy
+      ? sells > 0 && ratio != null && ratio < 0.75 && drawdown >= 0.15
+      : sells > 0 && ratio != null && ratio < 0.5 && entryPrice != null &&
+        priceNow != null && priceNow < entryPrice && drawdown >= 0.20;
     const count = nextConsecutiveWindowCount(previousWindow, previousCount, window, weak);
-    return { confirmed: count >= 2, count, window, ratio };
+    const creatorExit = protectedPolicy && creatorSellUsd >= Math.max(20, buys * 0.05);
+    features.flowCreatorExit30s = creatorExit;
+    return { confirmed: creatorExit || count >= 2, creatorExit, creatorSellUsd, count, window, ratio };
   }
 
   private async writeExit(
@@ -825,8 +877,9 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
 }
 
 // Build a SlipLadder from a fresh liquidity read.
-function ladderFrom(liq: LiquidityCheckResult | null) {
+function ladderFrom(liq: LiquidityCheckResult | null, useExact20 = false) {
   return {
+    slip20: useExact20 ? liq?.exitSlip20 ?? liq?.slip20 ?? null : null,
     slip50: liq?.slip50 ?? null, slip100: liq?.slip100 ?? null,
     slip500: liq?.slip500 ?? null, slip1000: liq?.slip1000 ?? null,
   };

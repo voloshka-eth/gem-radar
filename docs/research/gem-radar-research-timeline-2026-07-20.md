@@ -223,6 +223,8 @@ paper entry -> ladder / creator exit / stop / time exit
 
 Legacy benchmark показав, що static score не виконує головної задачі. Ми змінили предмет оптимізації: не “безпечний token score”, а ранній незалежний buy flow.
 
+Коміт `05293a1` зафіксував flow engine, Robinhood stages, versioned paper interfaces, benchmark scripts і research documentation як одне нове покоління системи.
+
 **ETH/Base Flow Strategy v1.**
 
 - direct factory discovery;
@@ -461,7 +463,7 @@ Walk-forward and holdout evaluation
 
 ## 15. Джерела реконструкції
 
-- Git history від `af3e0e2` до `824accc` та поточний working tree.
+- Git history від `af3e0e2` до `05293a1`.
 - `logs/decisions/paper_entries.csv` і `paper_exits.csv`.
 - `npm run benchmark:csv`, виконаний 2026-07-20.
 - `npm run benchmark:flow`, виконаний 2026-07-20.

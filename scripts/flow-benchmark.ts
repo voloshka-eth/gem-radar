@@ -8,9 +8,12 @@ type Metric = {
   x2: number;
   closed: number;
   pnlSum: number;
+  cappedPnlSum: number;
+  positivePnl: number[];
   rugs: number;
   latencySumSec: number;
   latencyN: number;
+  latenciesSec: number[];
 };
 
 const prisma = new PrismaClient();
@@ -18,7 +21,8 @@ const prisma = new PrismaClient();
 function emptyMetric(): Metric {
   return {
     samples: new Set(), signals: 0, eligible: 0, x2: 0, closed: 0,
-    pnlSum: 0, rugs: 0, latencySumSec: 0, latencyN: 0,
+    pnlSum: 0, cappedPnlSum: 0, positivePnl: [], rugs: 0,
+    latencySumSec: 0, latencyN: 0, latenciesSec: [],
   };
 }
 
@@ -46,13 +50,26 @@ function quoteOnlyInvalidation(position: AnyRow | null): boolean {
     position.lastSellSimOk !== false;
 }
 
-function fullHourOrTerminal(watch: AnyRow, position: AnyRow | null, now: number): boolean {
-  return now - watch.discoveredAt.getTime() >= 3_600_000 || terminal(position);
+function liquidityBand(position: AnyRow | null): string {
+  const liquidity = Number(position?.onchainLiqEntryUsd);
+  if (!Number.isFinite(liquidity)) return 'unknown';
+  if (liquidity < 10_000) return '<10k';
+  if (liquidity <= 50_000) return '10k-50k';
+  if (liquidity <= 250_000) return '50k-250k';
+  return '>=250k';
 }
 
-function reached2xWithinHour(watch: AnyRow, position: AnyRow | null): boolean {
-  return watch.outcome1h === 'EXECUTABLE_2X' ||
-    String(position?.executedRungs ?? '').split(',').includes('2');
+function fullHourOrTerminal(signal: AnyRow, position: AnyRow | null, now: number): boolean {
+  const start = signal.firstEligibleAt ?? signal.observedAt;
+  return now - start.getTime() >= 3_600_000 || terminal(position);
+}
+
+function reached2xWithinHour(signal: AnyRow, position: AnyRow | null): boolean {
+  const startMs = (signal.firstEligibleAt ?? signal.observedAt).getTime();
+  return (position?.events ?? []).some((event: AnyRow) =>
+    event.type === 'LADDER_SELL' && String(event.note ?? '').includes('ladder 2x') &&
+    event.ts.getTime() - startMs <= 3_600_000,
+  );
 }
 
 function addMetric(
@@ -66,17 +83,23 @@ function addMetric(
   const position = signal.paperPosition ?? null;
   metric.samples.add(marketKey(watch));
   metric.signals++;
-  const latencySec = Math.max(0, (signal.observedAt.getTime() - watch.discoveredAt.getTime()) / 1_000);
+  const eligibleAt = signal.firstEligibleAt ?? signal.observedAt;
+  const latencySec = Math.max(0, (eligibleAt.getTime() - watch.discoveredAt.getTime()) / 1_000);
   metric.latencySumSec += latencySec;
   metric.latencyN++;
-  if (fullHourOrTerminal(watch, position, now) &&
+  metric.latenciesSec.push(latencySec);
+  if (fullHourOrTerminal(signal, position, now) &&
       signal.status !== 'REORG_INVALIDATED' &&
       !quoteOnlyInvalidation(position)) {
     metric.eligible++;
-    if (reached2xWithinHour(watch, position)) metric.x2++;
+    if (reached2xWithinHour(signal, position)) metric.x2++;
     if (position?.realizedMultiple != null) {
       metric.closed++;
-      metric.pnlSum += Number(position.realizedMultiple) - 1;
+      const multiple = Number(position.realizedMultiple);
+      const pnl = multiple - 1;
+      metric.pnlSum += pnl;
+      metric.cappedPnlSum += Math.min(multiple, 10) - 1;
+      if (pnl > 0) metric.positivePnl.push(pnl);
     }
     if (rugLike(position)) metric.rugs++;
   }
@@ -86,19 +109,34 @@ function addMetric(
 function renderMetric(label: string, metric: Metric): string {
   const precision = metric.eligible ? 100 * metric.x2 / metric.eligible : null;
   const expectancy = metric.closed ? metric.pnlSum / metric.closed : null;
+  const cappedExpectancy = metric.closed ? metric.cappedPnlSum / metric.closed : null;
+  const positiveTotal = metric.positivePnl.reduce((sum, value) => sum + value, 0);
+  const maxPnlShare = positiveTotal > 0 ? Math.max(...metric.positivePnl, 0) / positiveTotal : null;
   const rugRate = metric.eligible ? 100 * metric.rugs / metric.eligible : null;
   const latency = metric.latencyN ? metric.latencySumSec / metric.latencyN : null;
+  const sortedLatency = [...metric.latenciesSec].sort((a, b) => a - b);
+  const latencyP95 = sortedLatency.length
+    ? sortedLatency[Math.min(sortedLatency.length - 1, Math.floor(sortedLatency.length * 0.95))]
+    : null;
   return `${label}: marketSamples=${metric.samples.size} signals=${metric.signals} eligible1h=${metric.eligible} ` +
     `precision2x=${precision == null ? '?' : precision.toFixed(1) + '%'} ` +
     `expectancy=${expectancy == null ? '?' : expectancy.toFixed(4)} ` +
+    `expectancyCap10x=${cappedExpectancy == null ? '?' : cappedExpectancy.toFixed(4)} ` +
+    `maxPnlShare=${maxPnlShare == null ? '?' : (maxPnlShare * 100).toFixed(1) + '%'} ` +
     `rugRate=${rugRate == null ? '?' : rugRate.toFixed(1) + '%'} ` +
-    `latencyAvg=${latency == null ? '?' : latency.toFixed(1) + 's'}`;
+    `latencyAvg=${latency == null ? '?' : latency.toFixed(1) + 's'} ` +
+    `latencyP95=${latencyP95 == null ? '?' : latencyP95.toFixed(1) + 's'}`;
 }
 
 async function main(): Promise<void> {
   const now = Date.now();
   const watches: AnyRow[] = await (prisma as any).evmPoolWatch.findMany({
-    include: { signals: { include: { paperPosition: true }, orderBy: { observedAt: 'asc' } } },
+    include: {
+      signals: {
+        include: { paperPosition: { include: { events: true } } },
+        orderBy: { observedAt: 'asc' },
+      },
+    },
     orderBy: { discoveredAt: 'asc' },
   });
   const valid = watches.filter((watch) => watch.status !== 'REORG_INVALIDATED');
@@ -108,17 +146,18 @@ async function main(): Promise<void> {
 
   for (const watch of valid) {
     for (const signal of watch.signals) {
-      if (signal.status === 'LATE_SHADOW' || signal.status === 'REORG_INVALIDATED') continue;
+      if (['LATE_SHADOW', 'DEGRADED_SHADOW', 'REORG_INVALIDATED'].includes(signal.status)) continue;
       const cohort = signal.paperPosition?.riskCohort ?? (signal.status === 'HARD_REJECT' ? 'HARD_REJECT' : 'NO_POSITION');
       addMetric(metrics, `chain=${watch.chain}`, watch, signal, now);
       addMetric(metrics, `amm=${watch.chain}/${watch.liquidityModel ?? 'unknown'}`, watch, signal, now);
       addMetric(metrics, `strategy=${watch.chain}/${signal.strategyVersion}`, watch, signal, now);
       addMetric(metrics, `cohort=${watch.chain}/${signal.strategyVersion}/${cohort}`, watch, signal, now);
+      addMetric(metrics, `liquidity=${watch.chain}/${signal.strategyVersion}/${liquidityBand(signal.paperPosition)}`, watch, signal, now);
     }
   }
 
   const lines = [
-    `ETH/BASE FLOW BENCHMARK ${new Date().toISOString()}`,
+    `EVM FLOW BENCHMARK ${new Date().toISOString()}`,
     'Canonical DB only. Legacy static entries and late/reorg-invalidated signals are excluded.',
     'Precision denominator: full 1h observation or an earlier terminal paper outcome.',
     `Data-quality exclusions: quote-only false RUG signals=${quoteOnlyInvalidations.length}.`,
@@ -129,11 +168,11 @@ async function main(): Promise<void> {
     'RECALL / FALSE NEGATIVES',
   ];
 
-  for (const chain of ['base', 'ethereum']) {
+  for (const chain of ['base', 'ethereum', 'robinhood']) {
     const chainWatches = valid.filter((watch) => watch.chain === chain && watch.outcome1h != null);
     const winners = chainWatches.filter((watch) => watch.outcome1h === 'EXECUTABLE_2X');
     const triggered = winners.filter((watch) => watch.signals.some((signal: AnyRow) =>
-      !['LATE_SHADOW', 'REORG_INVALIDATED'].includes(signal.status),
+      !['LATE_SHADOW', 'DEGRADED_SHADOW', 'REORG_INVALIDATED'].includes(signal.status),
     ));
     const falseNegatives = winners.length - triggered.length;
     lines.push(`${chain}: recall=${winners.length ? (100 * triggered.length / winners.length).toFixed(1) + '%' : '?'} ` +
@@ -141,7 +180,7 @@ async function main(): Promise<void> {
   }
 
   lines.push('', 'PROVISIONAL EARLY 2X (NOT YET PRECISION-ELIGIBLE)');
-  for (const chain of ['base', 'ethereum']) {
+  for (const chain of ['base', 'ethereum', 'robinhood']) {
     const pendingEarlyWinners = valid.filter((watch) =>
       watch.chain === chain &&
       watch.outcome1h == null &&
@@ -149,7 +188,7 @@ async function main(): Promise<void> {
       Number(watch.timeTo2xSec) <= 3_600,
     );
     const captured = pendingEarlyWinners.filter((watch) => watch.signals.some((signal: AnyRow) =>
-      !['LATE_SHADOW', 'REORG_INVALIDATED'].includes(signal.status),
+      !['LATE_SHADOW', 'DEGRADED_SHADOW', 'REORG_INVALIDATED'].includes(signal.status),
     ));
     lines.push(`${chain}: early2x=${pendingEarlyWinners.length} captured=${captured.length} ` +
       `provisionalFalseNegatives=${pendingEarlyWinners.length - captured.length}`);
@@ -158,7 +197,8 @@ async function main(): Promise<void> {
   lines.push('', 'PAIRED STRATEGY COMPARISON');
   const pairs = new Map<string, { both: number; aWins: number; bWins: number; ties: number }>();
   for (const watch of valid) {
-    const signals = watch.signals.filter((signal: AnyRow) => !['LATE_SHADOW', 'REORG_INVALIDATED'].includes(signal.status));
+    const signals = watch.signals.filter((signal: AnyRow) =>
+      !['LATE_SHADOW', 'DEGRADED_SHADOW', 'REORG_INVALIDATED'].includes(signal.status));
     for (let i = 0; i < signals.length; i++) {
       for (let j = i + 1; j < signals.length; j++) {
         const [a, b] = [signals[i], signals[j]].sort((left, right) => left.strategyVersion.localeCompare(right.strategyVersion));
@@ -181,11 +221,29 @@ async function main(): Promise<void> {
     lines.push(`${key}: pools=${pair.both} firstWins=${pair.aWins} secondWins=${pair.bWins} tiesOrOpen=${pair.ties}`);
   }
 
-  lines.push('', 'FROZEN V1 SAMPLE GATE');
-  for (const chain of ['base', 'ethereum']) {
+  lines.push('', 'RPC DATA HEALTH (LAST 24H)');
+  const healthRows: AnyRow[] = await (prisma as any).evmRpcHealthSample.findMany({
+    where: { ts: { gte: new Date(now - 86_400_000) } },
+    orderBy: { ts: 'asc' },
+  }).catch(() => []);
+  for (const chain of ['base', 'ethereum', 'robinhood']) {
+    const rows = healthRows.filter((row) => row.chain === chain);
+    const lags = rows.map((row) => Number(row.lagBlocks)).sort((a, b) => a - b);
+    const p95Lag = lags.length ? lags[Math.min(lags.length - 1, Math.floor(lags.length * 0.95))] : null;
+    const coverage = rows.length
+      ? rows.reduce((sum, row) => sum + Number(row.coverageRatio), 0) / rows.length
+      : null;
+    const eligible = rows.length ? rows.filter((row) => row.signalEligible).length / rows.length : null;
+    lines.push(`${chain}: samples=${rows.length} p95Lag=${p95Lag ?? '?'} ` +
+      `coverageAvg=${coverage == null ? '?' : (coverage * 100).toFixed(2) + '%'} ` +
+      `signalEligible=${eligible == null ? '?' : (eligible * 100).toFixed(1) + '%'}`);
+  }
+
+  lines.push('', 'FROZEN V1/V2 SAMPLE GATE');
+  for (const chain of ['base', 'ethereum', 'robinhood']) {
     const uniqueTriggered = new Set(valid
       .filter((watch) => watch.chain === chain && watch.signals.some((signal: AnyRow) =>
-        !['LATE_SHADOW', 'REORG_INVALIDATED'].includes(signal.status),
+        !['LATE_SHADOW', 'DEGRADED_SHADOW', 'REORG_INVALIDATED'].includes(signal.status),
       ))
       .map(marketKey));
     lines.push(`${chain}: ${uniqueTriggered.size}/100 unique triggered pools; thresholds remain frozen`);

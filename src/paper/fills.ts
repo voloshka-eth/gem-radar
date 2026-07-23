@@ -11,6 +11,7 @@
  */
 
 export interface SlipLadder {
+  slip20?: number | null;
   slip50: number | null;
   slip100: number | null;
   slip500: number | null;
@@ -24,7 +25,8 @@ export interface SlipLadder {
  */
 export function slipForSize(sizeUsd: number, ladder: SlipLadder): number | null {
   const pts: ReadonlyArray<readonly [number, number | null]> = [
-    [50, ladder.slip50], [100, ladder.slip100], [500, ladder.slip500], [1000, ladder.slip1000],
+    [20, ladder.slip20 ?? null], [50, ladder.slip50], [100, ladder.slip100],
+    [500, ladder.slip500], [1000, ladder.slip1000],
   ];
   for (const [cap, s] of pts) {
     if (sizeUsd <= cap && s != null) return s;
@@ -70,6 +72,7 @@ export function modelEntry(spotPriceUsd: number, slipPct: number | null, p: Entr
 
   if (!(spotPriceUsd > 0))          return reject('no_price');
   if (slipPct == null)              return reject('no_depth_data');
+  if (!Number.isFinite(slipPct) || slipPct < 0) return reject('invalid_depth_data');
   if (slipPct > p.maxEntrySlipPct)  return reject(`entry_slip_${(slipPct * 100).toFixed(0)}pct_over_max`);
 
   const usableUsd = p.sizeUsd - p.gasUsd;

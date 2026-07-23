@@ -26,6 +26,9 @@ const ADMISSION: RobinhoodAdmissionStageConfig = {
   minOnchainTvlUsd: 200,
   primaryMinScore: 50,
   shadowMinScore: 30,
+  primaryMinFdvToOnchainTvlRatio: 1,
+  primaryMaxEntrySlippagePct: 0.03,
+  primaryMinRoundTripMultiple: 0.8,
 };
 
 function candidate(overrides: Partial<CandidatePool> = {}): CollectorResult {
@@ -51,6 +54,7 @@ function liquidity(overrides: Partial<LiquidityCheckResult> = {}): LiquidityChec
   return {
     liquidityModel: 'V3', liquidityVerified: true, onchainTvlUsd: 2_000,
     reportedVsOnchainPct: 0, executableDepthUsd: 100, slip50: 0.02,
+    entrySlip20: 0.01, exitSlip20: 0.01,
     slip100: 0.04, slip500: null, slip1000: null, spotPriceUsd: 0.001,
     ...overrides,
   };
@@ -101,6 +105,16 @@ describe('Robinhood admission stages', () => {
   it('routes score 30-49.99 to full-lifecycle shadow paper', () => {
     expect(applyRobinhoodAdmissionStages({ ...base, finalScore: 30 }, ADMISSION))
       .toMatchObject({ pass: true, paperLane: 'SHADOW' });
+  });
+
+  it('routes physically inconsistent FDV/TVL and quote data to shadow instead of primary', () => {
+    expect(applyRobinhoodAdmissionStages({ ...base, reportedFdvUsd: 1_000 }, ADMISSION))
+      .toMatchObject({ pass: true, paperLane: 'SHADOW', qualityFlags: ['fdv_below_onchain_tvl'] });
+    expect(applyRobinhoodAdmissionStages({
+      ...base,
+      reportedFdvUsd: 10_000,
+      liquidity: liquidity({ entrySlip20: -0.01 }),
+    }, ADMISSION)).toMatchObject({ pass: true, paperLane: 'SHADOW', qualityFlags: ['invalid_round_trip_quote'] });
   });
 
   it('rejects scores below the shadow floor', () => {

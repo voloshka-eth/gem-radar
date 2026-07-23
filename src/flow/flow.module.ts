@@ -4,11 +4,11 @@ import { OnchainModule } from '../onchain/onchain.module';
 import { PaperModule } from '../paper/paper.module';
 import { RiskEngineModule } from '../risk-engine/risk-engine.module';
 import { EvmFlowService } from './evm-flow.service';
+import { RobinhoodEntryExperimentService } from './robinhood-entry-experiment.service';
 
 @Module({
   imports: [OnchainModule, RiskEngineModule, PaperModule, DeployerModule],
-  providers: [EvmFlowService],
-  exports: [EvmFlowService],
+  providers: [EvmFlowService, RobinhoodEntryExperimentService],
+  exports: [EvmFlowService, RobinhoodEntryExperimentService],
 })
 export class FlowModule {}
-

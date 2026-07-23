@@ -70,7 +70,7 @@ export function isInvalidating(status: PositionStatus): boolean {
  * Pure: depends only on how it closed + the realized multiple.
  */
 export function outcomeClass(
-  closedByStatus: PositionStatus | 'ladder_complete' | 'drawdown' | 'time_profit' | 'time_loss' | 'hard_stop' | 'flow_reversal',
+  closedByStatus: PositionStatus | 'ladder_complete' | 'drawdown' | 'time_profit' | 'time_loss' | 'hard_stop' | 'flow_reversal' | 'creator_exit',
   realizedMultiple: number,
 ): string {
   // Preserve realized economics when a token dies after a ladder rung. The
@@ -85,6 +85,7 @@ export function outcomeClass(
   if (closedByStatus === 'time_profit') return realizedMultiple >= 1 ? 'PARTIAL_PROFIT_TIME' : 'LOSS';
   if (closedByStatus === 'time_loss') return realizedMultiple >= 1 ? 'PARTIAL_PROFIT_TIME' : 'TIME_LOSS';
   if (closedByStatus === 'flow_reversal') return realizedMultiple >= 1 ? 'PARTIAL_PROFIT_FLOW_EXIT' : 'FLOW_EXIT_LOSS';
+  if (closedByStatus === 'creator_exit') return realizedMultiple >= 1 ? 'PARTIAL_PROFIT_CREATOR_EXIT' : 'CREATOR_EXIT_LOSS';
   if (closedByStatus === 'hard_stop') return realizedMultiple >= 1 ? 'PARTIAL_PROFIT_STOP' : 'STOP_LOSS';
   if (closedByStatus === 'drawdown') return realizedMultiple >= 1 ? 'WIN' : 'LOSS';
   // ladder_complete or other graceful close

@@ -159,6 +159,21 @@ describe('PaperService', () => {
     expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps the v1 control on the historical $50 slip bucket and uses exact $20 only for v2', async () => {
+    const config = { get: jest.fn(() => undefined) } as unknown as ConfigService;
+    const service = new PaperService(config, prismaMock as any, fileLoggerMock as any, gemScreenMock as any, liquidityVerifierMock as any);
+    const base = buildCandidate();
+    base.liq = { ...base.liq, slip20: 0.01, entrySlip20: 0.01, slip50: 0.1 };
+
+    await service.recordEntry({ ...base, strategyVersion: 'fresh_early_v1', signalId: 'control' });
+    await service.recordEntry({ ...base, strategyVersion: 'evm_flow_precision_v2', signalId: 'v2' });
+    await service.recordEntry({ ...base, strategyVersion: 'robinhood_stages_v2_primary', signalId: 'rh-v2' });
+
+    expect(prismaMock.paperPosition.create.mock.calls[0][0].data.modeledSlippagePct).toBe(0.1);
+    expect(prismaMock.paperPosition.create.mock.calls[1][0].data.modeledSlippagePct).toBe(0.01);
+    expect(prismaMock.paperPosition.create.mock.calls[2][0].data.modeledSlippagePct).toBe(0.01);
+  });
+
   it('queues Base/Ethereum candidates instead of treating discovery as a buy', async () => {
     const config = {
       get: jest.fn((key: string) => key === 'paper.takeCohortEnabled' ? true : undefined),

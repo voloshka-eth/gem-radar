@@ -52,6 +52,10 @@ const robinhood = defineChain({
     {
       provide: VIEM_CLIENTS,
       useFactory: (config: ConfigService): Map<SupportedChain, PublicClient> => {
+        const activeChains = new Set([
+          ...(config.get<string[]>('chain.enabledChains') ?? []),
+          ...(config.get<string[]>('evmFlow.chains') ?? []),
+        ]);
         const ethPrimary   = config.get<string>('chain.ethereumRpcUrl')!;
         const ethFallback  = config.get<string>('chain.ethereumRpcUrlFallback');
         const basePrimary  = config.get<string>('chain.baseRpcUrl')!;
@@ -68,9 +72,15 @@ const robinhood = defineChain({
             : http(primary, { retryCount: 3, retryDelay: 200 });
 
         const clients = new Map<SupportedChain, PublicClient>();
-        clients.set('ethereum', createPublicClient({ chain: mainnet, transport: makeTransport(ethPrimary, ethFallback) }) as unknown as PublicClient);
-        clients.set('base',     createPublicClient({ chain: base,    transport: makeTransport(basePrimary, baseFallback) }) as unknown as PublicClient);
-        clients.set('robinhood', createPublicClient({ chain: robinhood, transport: makeTransport(robinhoodPrimary, robinhoodFallback) }) as unknown as PublicClient);
+        if (activeChains.has('ethereum')) {
+          clients.set('ethereum', createPublicClient({ chain: mainnet, transport: makeTransport(ethPrimary, ethFallback) }) as unknown as PublicClient);
+        }
+        if (activeChains.has('base')) {
+          clients.set('base', createPublicClient({ chain: base, transport: makeTransport(basePrimary, baseFallback) }) as unknown as PublicClient);
+        }
+        if (activeChains.has('robinhood')) {
+          clients.set('robinhood', createPublicClient({ chain: robinhood, transport: makeTransport(robinhoodPrimary, robinhoodFallback) }) as unknown as PublicClient);
+        }
         return clients;
       },
       inject: [ConfigService],
@@ -78,17 +88,29 @@ const robinhood = defineChain({
     {
       provide: VIEM_STREAM_CLIENTS,
       useFactory: (config: ConfigService): Map<SupportedChain, PublicClient> => {
+        const activeChains = new Set([
+          ...(config.get<string[]>('chain.enabledChains') ?? []),
+          ...(config.get<string[]>('evmFlow.chains') ?? []),
+        ]);
         const ethWs = config.get<string>('chain.ethereumRpcWsUrl');
         const baseWs = config.get<string>('chain.baseRpcWsUrl');
+        const robinhoodWs = config.get<string>('chain.robinhoodRpcWsUrl');
         const clients = new Map<SupportedChain, PublicClient>();
-        clients.set('ethereum', createPublicClient({
+        if (activeChains.has('ethereum')) clients.set('ethereum', createPublicClient({
           chain: mainnet,
           transport: ethWs ? webSocket(ethWs, { reconnect: true }) : http(config.get<string>('chain.ethereumRpcUrl')!),
           pollingInterval: 2_000,
         }) as unknown as PublicClient);
-        clients.set('base', createPublicClient({
+        if (activeChains.has('base')) clients.set('base', createPublicClient({
           chain: base,
           transport: baseWs ? webSocket(baseWs, { reconnect: true }) : http(config.get<string>('chain.baseRpcUrl')!),
+          pollingInterval: 1_000,
+        }) as unknown as PublicClient);
+        if (activeChains.has('robinhood')) clients.set('robinhood', createPublicClient({
+          chain: robinhood,
+          transport: robinhoodWs
+            ? webSocket(robinhoodWs, { reconnect: true })
+            : http(config.get<string>('chain.robinhoodRpcUrl')!),
           pollingInterval: 1_000,
         }) as unknown as PublicClient);
         return clients;

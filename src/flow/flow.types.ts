@@ -32,15 +32,19 @@ export interface FlowSnapshot {
   buySellRatio: number;
   largestBuyerShare: number;
   buyerSellerOverlap: number;
+  creatorSellQuoteUsd: number;
   priceMomentum: number | null;
   firstPriceUsd: number | null;
   lastPriceUsd: number | null;
   distinctBlocks: number;
   creatorSold: boolean;
+  creatorAddress: string | null;
+  latestSwapAtMs: number | null;
 }
 
 export interface FlowStrategyDefinition {
   version: string;
+  chains: readonly SupportedChain[];
   watchType: FlowWatchType;
   windowMs: number;
   minUniqueBuyers: number;
@@ -48,7 +52,15 @@ export interface FlowStrategyDefinition {
   minBuySellRatio: number;
   maxLargestBuyerShare: number;
   minPriceMomentum: number;
+  maxPriceMomentum?: number;
   minDistinctBlocks: number;
+  minNetBuyQuoteUsd?: number;
+  maxBuyerSellerOverlap?: number;
+  rejectCreatorSell?: boolean;
+  minOnchainTvlUsd?: number;
+  maxOnchainTvlUsd?: number;
+  maxEntrySlipPct?: number;
+  minRoundTripMultiple?: number;
 }
 
 export interface FlowStrategyDecision {
@@ -67,4 +79,3 @@ export interface PersistedCandidate {
     };
   };
 }
-

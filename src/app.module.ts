@@ -9,6 +9,7 @@ import { ReportModule } from './report/report.module';
 import { PaperModule } from './paper/paper.module';
 import { GemModule } from './gem/gem.module';
 import { DeployerModule } from './deployer/deployer.module';
+import { SolanaModule } from './solana/solana.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { DeployerModule } from './deployer/deployer.module';
     PaperModule,
     GemModule,
     DeployerModule,
+    SolanaModule,
   ],
 })
 export class AppModule {}

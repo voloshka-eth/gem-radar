@@ -17,16 +17,16 @@ model Token {
   decimals        Int?
   firstSeenAt     DateTime @map("first_seen_at")
   deployerAddress String?  @map("deployer_address")
-  source          String   // dexscreener | geckoterminal | onchain
+  source          String // dexscreener | geckoterminal | onchain
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  pools               Pool[]
-  poolSnapshots       PoolSnapshot[]
-  contractRiskChecks  ContractRiskCheck[] @relation("TokenRiskChecks")
-  holderSnapshots     HolderSnapshot[]
-  scoringHistory  ScoringHistory[]
-  paperPositions  PaperPosition[]
+  pools              Pool[]
+  poolSnapshots      PoolSnapshot[]
+  contractRiskChecks ContractRiskCheck[] @relation("TokenRiskChecks")
+  holderSnapshots    HolderSnapshot[]
+  scoringHistory     ScoringHistory[]
+  paperPositions     PaperPosition[]
 
   @@unique([chain, tokenAddress])
   @@index([chain])
@@ -35,20 +35,20 @@ model Token {
 
 // ─── Pools ─────────────────────────────────────────────────────────────────────
 model Pool {
-  id           String   @id @default(cuid())
-  chain        String
-  poolAddress  String   @map("pool_address")
-  dex          String
-  tokenId      String   @map("token_id")
-  token0       String   @map("token0")
-  token1       String   @map("token1")
-  quoteAsset   String   @map("quote_asset") // WETH | USDC | USDT | DAI
-  feeTier      String?  @map("fee_tier")
-  v4Metadata   Json?    @map("v4_metadata") // immutable PoolKey captured from Initialize
-  firstSeenAt  DateTime @map("first_seen_at")
-  createdAt    DateTime @default(now()) @map("created_at")
+  id          String   @id @default(cuid())
+  chain       String
+  poolAddress String   @map("pool_address")
+  dex         String
+  tokenId     String   @map("token_id")
+  token0      String   @map("token0")
+  token1      String   @map("token1")
+  quoteAsset  String   @map("quote_asset") // WETH | USDC | USDT | DAI
+  feeTier     String?  @map("fee_tier")
+  v4Metadata  Json?    @map("v4_metadata") // immutable PoolKey captured from Initialize
+  firstSeenAt DateTime @map("first_seen_at")
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  token          Token          @relation(fields: [tokenId], references: [id])
+  token          Token           @relation(fields: [tokenId], references: [id])
   poolSnapshots  PoolSnapshot[]
   paperPositions PaperPosition[]
 
@@ -86,7 +86,7 @@ model PoolSnapshot {
   slip500              Decimal? @map("slip_500") @db.Decimal(10, 6)
   slip1000             Decimal? @map("slip_1000") @db.Decimal(10, 6)
   // M3A on-chain liquidity fields
-  liquidityModel       String?  @map("liquidity_model")   // V2 | V3 | UNSUPPORTED_*
+  liquidityModel       String?  @map("liquidity_model") // V2 | V3 | UNSUPPORTED_*
   liquidityVerified    Boolean? @map("liquidity_verified")
   reportedVsOnchainPct Decimal? @map("reported_vs_onchain_pct") @db.Decimal(10, 4)
   spotPriceUsd         Decimal? @map("spot_price_usd") @db.Decimal(30, 18)
@@ -214,15 +214,15 @@ model ScoringHistory {
   poolAddress       String?  @map("pool_address")
   ts                DateTime
   liquidityModel    String   @map("liquidity_model") // V2 | V3
-  liquidityScore    Decimal? @map("liquidity_score")    @db.Decimal(5, 2)
-  depthScore        Decimal? @map("depth_score")        @db.Decimal(5, 2)
-  ageScore          Decimal? @map("age_score")          @db.Decimal(5, 2)
-  tractionScore     Decimal? @map("traction_score")     @db.Decimal(5, 2)
-  divergenceScore   Decimal? @map("divergence_score")   @db.Decimal(5, 2)
-  finalScore        Decimal  @map("final_score")        @db.Decimal(5, 2)
-  band              String   // reject_band | watchlist | candidate | high_band (UNVALIDATED)
-  scoreConfidence   Decimal  @map("score_confidence")   @db.Decimal(4, 3)
-  componentsPresent String   @map("components_present")  // comma-joined component keys
+  liquidityScore    Decimal? @map("liquidity_score") @db.Decimal(5, 2)
+  depthScore        Decimal? @map("depth_score") @db.Decimal(5, 2)
+  ageScore          Decimal? @map("age_score") @db.Decimal(5, 2)
+  tractionScore     Decimal? @map("traction_score") @db.Decimal(5, 2)
+  divergenceScore   Decimal? @map("divergence_score") @db.Decimal(5, 2)
+  finalScore        Decimal  @map("final_score") @db.Decimal(5, 2)
+  band              String // reject_band | watchlist | candidate | high_band (UNVALIDATED)
+  scoreConfidence   Decimal  @map("score_confidence") @db.Decimal(4, 3)
+  componentsPresent String   @map("components_present") // comma-joined component keys
   componentsMissing String   @map("components_missing")
   createdAt         DateTime @default(now()) @map("created_at")
 
@@ -238,65 +238,65 @@ model ScoringHistory {
 // One row per candidate (CONTRACT_SAFE + liquidity_verified=true). Entry is modeled
 // once at discovery with pessimistic fills; eval re-reads on-chain state on demand.
 model PaperPosition {
-  id                 String    @id @default(cuid())
-  runId              String?   @map("run_id")
-  chain              String
-  tokenId            String    @map("token_id")
-  poolId             String    @map("pool_id")
-  tokenAddress       String    @map("token_address")
-  poolAddress        String    @map("pool_address")
-  symbol             String?
-  liquidityModel     String    @map("liquidity_model")
-  strategyVersion   String    @default("legacy_static_v0") @map("strategy_version")
-  signalId          String?   @unique @map("signal_id")
-  riskCohort        String    @default("CONTRACT_SAFE") @map("risk_cohort")
-  exitPolicy        String    @default("SAFE_LADDER") @map("exit_policy")
-  benchmarkEligible Boolean   @default(true) @map("benchmark_eligible")
+  id                       String    @id @default(cuid())
+  runId                    String?   @map("run_id")
+  chain                    String
+  tokenId                  String    @map("token_id")
+  poolId                   String    @map("pool_id")
+  tokenAddress             String    @map("token_address")
+  poolAddress              String    @map("pool_address")
+  symbol                   String?
+  liquidityModel           String    @map("liquidity_model")
+  strategyVersion          String    @default("legacy_static_v0") @map("strategy_version")
+  signalId                 String?   @unique @map("signal_id")
+  riskCohort               String    @default("CONTRACT_SAFE") @map("risk_cohort")
+  exitPolicy               String    @default("SAFE_LADDER") @map("exit_policy")
+  benchmarkEligible        Boolean   @default(true) @map("benchmark_eligible")
   // Entry timing (no look-ahead: entry uses a snapshot with ts ≤ openedAt).
-  firstSeenAt        DateTime  @map("first_seen_at")
-  detectionDelaySec  Int       @map("detection_delay_sec")
-  openedAt           DateTime  @map("opened_at")
-  sizeUsd            Decimal   @map("size_usd") @db.Decimal(12, 4)
+  firstSeenAt              DateTime  @map("first_seen_at")
+  detectionDelaySec        Int       @map("detection_delay_sec")
+  openedAt                 DateTime  @map("opened_at")
+  sizeUsd                  Decimal   @map("size_usd") @db.Decimal(12, 4)
   // Entry economics (pessimistic fill).
-  entryPriceUsd          Decimal? @map("entry_price_usd") @db.Decimal(80, 36)            // spot at entry
-  entryPriceEffectiveUsd Decimal? @map("entry_price_effective_usd") @db.Decimal(80, 36)  // after all costs
-  modeledSlippagePct Decimal?  @map("modeled_slippage_pct") @db.Decimal(10, 6)
-  modeledSandwichPct Decimal?  @map("modeled_sandwich_pct") @db.Decimal(10, 6)
-  modeledGasUsd      Decimal?  @map("modeled_gas_usd") @db.Decimal(12, 4)
-  modeledBuyTaxPct   Decimal?  @map("modeled_buy_tax_pct") @db.Decimal(10, 6)
-  tokensBought       Decimal?  @map("tokens_bought") @db.Decimal(80, 18)
-  onchainLiqEntryUsd Decimal?  @map("onchain_liq_entry_usd") @db.Decimal(20, 4)
-  entryFeatures      Json?     @map("entry_features")  // t0 snapshot features for post-mortem
+  entryPriceUsd            Decimal?  @map("entry_price_usd") @db.Decimal(80, 36) // spot at entry
+  entryPriceEffectiveUsd   Decimal?  @map("entry_price_effective_usd") @db.Decimal(80, 36) // after all costs
+  modeledSlippagePct       Decimal?  @map("modeled_slippage_pct") @db.Decimal(10, 6)
+  modeledSandwichPct       Decimal?  @map("modeled_sandwich_pct") @db.Decimal(10, 6)
+  modeledGasUsd            Decimal?  @map("modeled_gas_usd") @db.Decimal(12, 4)
+  modeledBuyTaxPct         Decimal?  @map("modeled_buy_tax_pct") @db.Decimal(10, 6)
+  tokensBought             Decimal?  @map("tokens_bought") @db.Decimal(80, 18)
+  onchainLiqEntryUsd       Decimal?  @map("onchain_liq_entry_usd") @db.Decimal(20, 4)
+  entryFeatures            Json?     @map("entry_features") // t0 snapshot features for post-mortem
   // Lifecycle.
-  status             String    @default("OPEN") // PENDING_CONFIRMATION | OPEN | CLOSED | INVALIDATED | NOT_ENTERED
-  notEnteredReason   String?   @map("not_entered_reason")
-  executedRungs      String    @default("") @map("executed_rungs") // comma-joined rung multiples sold
-  remainingFraction  Decimal   @default(1) @map("remaining_fraction") @db.Decimal(8, 6)
-  realizedValueUsd   Decimal   @default(0) @map("realized_value_usd") @db.Decimal(20, 4)
+  status                   String    @default("OPEN") // PENDING_CONFIRMATION | OPEN | CLOSED | INVALIDATED | NOT_ENTERED
+  notEnteredReason         String?   @map("not_entered_reason")
+  executedRungs            String    @default("") @map("executed_rungs") // comma-joined rung multiples sold
+  remainingFraction        Decimal   @default(1) @map("remaining_fraction") @db.Decimal(8, 6)
+  realizedValueUsd         Decimal   @default(0) @map("realized_value_usd") @db.Decimal(20, 4)
   // Eval state (refreshed on demand).
-  lastEvalAt          DateTime? @map("last_eval_at")
-  priceNowUsd         Decimal?  @map("price_now_usd") @db.Decimal(80, 36)
-  onchainLiqNowUsd    Decimal?  @map("onchain_liq_now_usd") @db.Decimal(20, 4)
-  currentMultiple     Decimal?  @map("current_multiple") @db.Decimal(16, 4)
-  maxMultipleObserved Decimal?  @map("max_multiple_observed") @db.Decimal(16, 4)
-  maxDrawdownObserved Decimal?  @map("max_drawdown_observed") @db.Decimal(10, 4)
+  lastEvalAt               DateTime? @map("last_eval_at")
+  priceNowUsd              Decimal?  @map("price_now_usd") @db.Decimal(80, 36)
+  onchainLiqNowUsd         Decimal?  @map("onchain_liq_now_usd") @db.Decimal(20, 4)
+  currentMultiple          Decimal?  @map("current_multiple") @db.Decimal(16, 4)
+  maxMultipleObserved      Decimal?  @map("max_multiple_observed") @db.Decimal(16, 4)
+  maxDrawdownObserved      Decimal?  @map("max_drawdown_observed") @db.Decimal(10, 4)
   // Last-tick post-t0 rug signals (COLLECTION ONLY — not wired into exits). Captured
   // each eval run; the LAST value before close feeds the post-mortem comparison.
-  lastUniqueBuyers         Int?     @map("last_unique_buyers")
-  lastUniqueSellers        Int?     @map("last_unique_sellers")
-  lastSellersToBuyersRatio Decimal? @map("last_sellers_to_buyers_ratio") @db.Decimal(12, 4)
-  lastSellSimOk            Boolean? @map("last_sell_sim_ok")
-  lastSellTaxNow           Decimal? @map("last_sell_tax_now") @db.Decimal(10, 6)
+  lastUniqueBuyers         Int?      @map("last_unique_buyers")
+  lastUniqueSellers        Int?      @map("last_unique_sellers")
+  lastSellersToBuyersRatio Decimal?  @map("last_sellers_to_buyers_ratio") @db.Decimal(12, 4)
+  lastSellSimOk            Boolean?  @map("last_sell_sim_ok")
+  lastSellTaxNow           Decimal?  @map("last_sell_tax_now") @db.Decimal(10, 6)
   // Close.
-  closedAt           DateTime? @map("closed_at")
-  realizedMultiple   Decimal?  @map("realized_multiple") @db.Decimal(16, 4) // total realized value / size
-  outcomeClass       String?   @map("outcome_class")
+  closedAt                 DateTime? @map("closed_at")
+  realizedMultiple         Decimal?  @map("realized_multiple") @db.Decimal(16, 4) // total realized value / size
+  outcomeClass             String?   @map("outcome_class")
   // WIN | LOSS | RUG | UNSELLABLE | LIQ_PULL | STILL_ACTIVE | NOT_ENTERED
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
 
-  token  Token        @relation(fields: [tokenId], references: [id])
-  pool   Pool         @relation(fields: [poolId], references: [id])
+  token  Token           @relation(fields: [tokenId], references: [id])
+  pool   Pool            @relation(fields: [poolId], references: [id])
   events PaperEvent[]
   signal StrategySignal? @relation(fields: [signalId], references: [id])
 
@@ -310,42 +310,46 @@ model PaperPosition {
 // Canonical ETH/Base flow research state. Raw swaps are retained so strategy
 // thresholds can be replayed without relying on third-party aggregate fields.
 model EvmPoolWatch {
-  id                       String   @id @default(cuid())
-  chain                    String
-  tokenAddress             String   @map("token_address")
-  poolAddress              String   @map("pool_address")
-  dex                      String
-  liquidityModel           String?  @map("liquidity_model")
-  watchType                String   @map("watch_type") // FRESH | MATURE
-  source                   String
-  status                   String   @default("WATCHING")
-  discoveredAt             DateTime @map("discovered_at")
-  expiresAt                DateTime @map("expires_at")
-  outcomeDueAt             DateTime @map("outcome_due_at")
-  creationBlock            String?  @map("creation_block")
-  creationTxHash           String?  @map("creation_tx_hash")
-  creationLogIndex         Int?     @map("creation_log_index")
-  creatorAddress           String?  @map("creator_address")
-  lastProcessedBlock       String?  @map("last_processed_block")
-  lastProcessedBlockHash   String?  @map("last_processed_block_hash")
-  candidateJson            Json     @map("candidate_json")
-  latestFlowSnapshot       Json?    @map("latest_flow_snapshot")
-  firstPriceUsd            Decimal? @map("first_price_usd") @db.Decimal(80, 36)
-  spotMaxMultiple          Decimal? @map("spot_max_multiple") @db.Decimal(20, 6)
-  executableNetMaxMultiple Decimal? @map("executable_net_max_multiple") @db.Decimal(20, 6)
-  benchmarkTokensBought    Decimal? @map("benchmark_tokens_bought") @db.Decimal(80, 18)
+  id                         String   @id @default(cuid())
+  chain                      String
+  tokenAddress               String   @map("token_address")
+  poolAddress                String   @map("pool_address")
+  dex                        String
+  liquidityModel             String?  @map("liquidity_model")
+  watchType                  String   @map("watch_type") // FRESH | MATURE
+  source                     String
+  status                     String   @default("WATCHING")
+  discoveredAt               DateTime @map("discovered_at")
+  expiresAt                  DateTime @map("expires_at")
+  outcomeDueAt               DateTime @map("outcome_due_at")
+  creationBlock              String?  @map("creation_block")
+  creationTxHash             String?  @map("creation_tx_hash")
+  creationLogIndex           Int?     @map("creation_log_index")
+  creatorAddress             String?  @map("creator_address")
+  lastProcessedBlock         String?  @map("last_processed_block")
+  lastProcessedBlockHash     String?  @map("last_processed_block_hash")
+  candidateJson              Json     @map("candidate_json")
+  latestFlowSnapshot         Json?    @map("latest_flow_snapshot")
+  latestDataHealth           Json?    @map("latest_data_health")
+  firstPriceUsd              Decimal? @map("first_price_usd") @db.Decimal(80, 36)
+  spotMaxMultiple            Decimal? @map("spot_max_multiple") @db.Decimal(20, 6)
+  executableNetMaxMultiple   Decimal? @map("executable_net_max_multiple") @db.Decimal(20, 6)
+  benchmarkTokensBought      Decimal? @map("benchmark_tokens_bought") @db.Decimal(80, 18)
   benchmarkEntryEffectiveUsd Decimal? @map("benchmark_entry_effective_usd") @db.Decimal(80, 36)
-  benchmarkEntryGasUsd     Decimal? @map("benchmark_entry_gas_usd") @db.Decimal(12, 4)
-  timeTo2xSec              Int?     @map("time_to_2x_sec")
-  maxDrawdown              Decimal? @map("max_drawdown") @db.Decimal(10, 6)
-  outcome1h                String?  @map("outcome_1h")
-  outcome6h                String?  @map("outcome_6h")
-  outcome24h               String?  @map("outcome_24h")
-  createdAt                DateTime @default(now()) @map("created_at")
-  updatedAt                DateTime @updatedAt @map("updated_at")
+  benchmarkEntryGasUsd       Decimal? @map("benchmark_entry_gas_usd") @db.Decimal(12, 4)
+  timeTo2xSec                Int?     @map("time_to_2x_sec")
+  maxDrawdown                Decimal? @map("max_drawdown") @db.Decimal(10, 6)
+  outcome15m                 String?  @map("outcome_15m")
+  outcome1h                  String?  @map("outcome_1h")
+  outcome6h                  String?  @map("outcome_6h")
+  outcome24h                 String?  @map("outcome_24h")
+  createdAt                  DateTime @default(now()) @map("created_at")
+  updatedAt                  DateTime @updatedAt @map("updated_at")
 
-  swaps   EvmSwapObservation[]
-  signals StrategySignal[]
+  swaps                EvmSwapObservation[]
+  signals              StrategySignal[]
+  backfills            EvmFlowBackfillRange[]
+  robinhoodExperiments RobinhoodEntryExperiment[]
 
   @@unique([chain, poolAddress, watchType])
   @@index([chain, status, expiresAt])
@@ -364,7 +368,7 @@ model EvmSwapObservation {
   logIndex       Int      @map("log_index")
   ts             DateTime
   trader         String
-  kind           String   // BUY | SELL
+  kind           String // BUY | SELL
   quoteAmountUsd Decimal  @map("quote_amount_usd") @db.Decimal(30, 8)
   tokenAmount    Decimal? @map("token_amount") @db.Decimal(80, 18)
   priceUsd       Decimal? @map("price_usd") @db.Decimal(80, 36)
@@ -378,24 +382,31 @@ model EvmSwapObservation {
 }
 
 model StrategySignal {
-  id                 String   @id @default(cuid())
-  watchId            String   @map("watch_id")
-  strategyVersion    String   @map("strategy_version")
-  chain              String
-  tokenAddress       String   @map("token_address")
-  poolAddress        String   @map("pool_address")
-  observedAt         DateTime @map("observed_at")
-  observedBlock      String   @map("observed_block")
-  expiresAt          DateTime @map("expires_at")
-  executablePriceUsd Decimal? @map("executable_price_usd") @db.Decimal(80, 36)
-  flowSnapshot       Json     @map("flow_snapshot")
-  riskSnapshot       Json?    @map("risk_snapshot")
-  status             String   @default("OBSERVED") // OBSERVED | ENTERED | HARD_REJECT | REORG_INVALIDATED
-  idempotencyKey     String   @unique @map("idempotency_key")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  id                              String    @id @default(cuid())
+  watchId                         String    @map("watch_id")
+  strategyVersion                 String    @map("strategy_version")
+  chain                           String
+  tokenAddress                    String    @map("token_address")
+  poolAddress                     String    @map("pool_address")
+  observedAt                      DateTime  @map("observed_at")
+  firstEligibleAt                 DateTime? @map("first_eligible_at")
+  firstEligibleBlock              String?   @map("first_eligible_block")
+  firstEligibleFlowSnapshot       Json?     @map("first_eligible_flow_snapshot")
+  firstEligibleDataHealthSnapshot Json?     @map("first_eligible_data_health_snapshot")
+  latestSwapAt                    DateTime? @map("latest_swap_at")
+  observedBlock                   String    @map("observed_block")
+  expiresAt                       DateTime  @map("expires_at")
+  executablePriceUsd              Decimal?  @map("executable_price_usd") @db.Decimal(80, 36)
+  flowSnapshot                    Json      @map("flow_snapshot")
+  riskSnapshot                    Json?     @map("risk_snapshot")
+  dataHealthSnapshot              Json?     @map("data_health_snapshot")
+  entryQuoteSnapshot              Json?     @map("entry_quote_snapshot")
+  status                          String    @default("OBSERVED") // OBSERVED | ENTERED | HARD_REJECT | REORG_INVALIDATED
+  idempotencyKey                  String    @unique @map("idempotency_key")
+  createdAt                       DateTime  @default(now()) @map("created_at")
+  updatedAt                       DateTime  @updatedAt @map("updated_at")
 
-  watch         EvmPoolWatch  @relation(fields: [watchId], references: [id], onDelete: Cascade)
+  watch         EvmPoolWatch   @relation(fields: [watchId], references: [id], onDelete: Cascade)
   paperPosition PaperPosition?
 
   @@unique([watchId, strategyVersion])
@@ -403,25 +414,425 @@ model StrategySignal {
   @@map("strategy_signals")
 }
 
+// Pre-registered Robinhood entry experiment. One row is one independent market
+// sample; its arms are counterfactual executions of the same frozen signal.
+model RobinhoodEntryExperiment {
+  id                             String    @id @default(cuid())
+  watchId                        String    @unique @map("watch_id")
+  chain                          String    @default("robinhood")
+  tokenAddress                   String    @map("token_address")
+  poolAddress                    String    @map("pool_address")
+  symbol                         String?
+  liquidityModel                 String    @map("liquidity_model")
+  status                         String    @default("CONFIRMING") // CONFIRMING | CONFIRMED | EXPIRED | RESOLVED | INVALIDATED
+  invalidReason                  String?   @map("invalid_reason")
+  configVersion                  String    @map("config_version")
+  configHash                     String    @map("config_hash")
+  configJson                     Json      @map("config_json")
+  t0At                           DateTime  @map("t0_at")
+  horizonAt                      DateTime  @map("horizon_at")
+  t0Block                        String    @map("t0_block")
+  t0SpotPriceUsd                 Decimal   @map("t0_spot_price_usd") @db.Decimal(80, 36)
+  t0DepthUsd                     Decimal   @map("t0_depth_usd") @db.Decimal(20, 4)
+  t0RoundTripMultiple            Decimal   @map("t0_round_trip_multiple") @db.Decimal(16, 6)
+  riskSnapshot                   Json      @map("risk_snapshot")
+  dataHealthSnapshot             Json      @map("data_health_snapshot")
+  v2ShadowDecision               String?   @map("v2_shadow_decision")
+  v2ShadowSnapshot               Json?     @map("v2_shadow_snapshot")
+  confirmationStatus             String    @default("PENDING") @map("confirmation_status") // PENDING | CONFIRMED | EXPIRED | REJECTED
+  confirmationAt                 DateTime? @map("confirmation_at")
+  confirmationBlock              String?   @map("confirmation_block")
+  confirmationSnapshot           Json?     @map("confirmation_snapshot")
+  classifierReferenceStatus      String    @default("PENDING") @map("classifier_reference_status") // PENDING | TRACKING | UNAVAILABLE | RESOLVED
+  classifierReferenceTargetAt    DateTime? @map("classifier_reference_target_at")
+  classifierReferenceAt          DateTime? @map("classifier_reference_at")
+  classifierReferenceTokens      Decimal?  @map("classifier_reference_tokens") @db.Decimal(80, 18)
+  classifierReferenceCostUsd     Decimal?  @map("classifier_reference_cost_usd") @db.Decimal(20, 6)
+  classifierReferenceMaxMultiple Decimal?  @map("classifier_reference_max_multiple") @db.Decimal(20, 6)
+  classifierReached2x            Boolean?  @map("classifier_reached_2x")
+  classifierResolvedAt           DateTime? @map("classifier_resolved_at")
+  resolvedAt                     DateTime? @map("resolved_at")
+  resolutionReason               String?   @map("resolution_reason")
+  createdAt                      DateTime  @default(now()) @map("created_at")
+  updatedAt                      DateTime  @updatedAt @map("updated_at")
+
+  watch EvmPoolWatch             @relation(fields: [watchId], references: [id], onDelete: Cascade)
+  arms  RobinhoodExperimentArm[]
+
+  @@index([status, t0At])
+  @@index([tokenAddress, poolAddress])
+  @@map("robinhood_entry_experiments")
+}
+
+model RobinhoodExperimentArm {
+  id                  String    @id @default(cuid())
+  experimentId        String    @map("experiment_id")
+  armCode             String    @map("arm_code")
+  scenarioCode        String    @map("scenario_code")
+  latencyMs           Int       @map("latency_ms")
+  gasMultiplier       Decimal   @default(1) @map("gas_multiplier") @db.Decimal(8, 4)
+  confirmatory        Boolean
+  exploratory         Boolean
+  primaryScenario     Boolean   @default(false) @map("primary_scenario")
+  stressScenario      Boolean   @default(false) @map("stress_scenario")
+  immediateUsd        Decimal   @map("immediate_usd") @db.Decimal(12, 4)
+  addUsd              Decimal   @map("add_usd") @db.Decimal(12, 4)
+  status              String    @default("PENDING_ENTRY") // PENDING_ENTRY | WAITING_CONFIRMATION | OPEN | CLOSED | NO_TRADE | INVALIDATED
+  committedUsd        Decimal   @default(0) @map("committed_usd") @db.Decimal(20, 6)
+  tokensBought        Decimal   @default(0) @map("tokens_bought") @db.Decimal(80, 18)
+  remainingTokens     Decimal   @default(0) @map("remaining_tokens") @db.Decimal(80, 18)
+  realizedValueUsd    Decimal   @default(0) @map("realized_value_usd") @db.Decimal(20, 6)
+  gasSpentUsd         Decimal   @default(0) @map("gas_spent_usd") @db.Decimal(20, 6)
+  blendedCostBasisUsd Decimal?  @map("blended_cost_basis_usd") @db.Decimal(80, 36)
+  currentMultiple     Decimal?  @map("current_multiple") @db.Decimal(20, 6)
+  peakMultiple        Decimal?  @map("peak_multiple") @db.Decimal(20, 6)
+  maxDrawdown         Decimal?  @map("max_drawdown") @db.Decimal(10, 6)
+  realizedMultiple    Decimal?  @map("realized_multiple") @db.Decimal(20, 6)
+  executedRungs       String    @default("") @map("executed_rungs")
+  capitalSeconds      Decimal   @default(0) @map("capital_seconds") @db.Decimal(30, 6)
+  openedAt            DateTime? @map("opened_at")
+  closedAt            DateTime? @map("closed_at")
+  outcomeClass        String?   @map("outcome_class")
+  stateJson           Json?     @map("state_json")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  experiment RobinhoodEntryExperiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  legs       RobinhoodExperimentLeg[]
+
+  @@unique([experimentId, armCode, scenarioCode])
+  @@index([status, updatedAt])
+  @@index([armCode, scenarioCode, closedAt])
+  @@map("robinhood_experiment_arms")
+}
+
+model RobinhoodExperimentLeg {
+  id                String    @id @default(cuid())
+  armId             String    @map("arm_id")
+  sequence          Int
+  legType           String    @map("leg_type") // IMMEDIATE_BUY | PROBE_BUY | CONFIRM_ADD | LADDER_SELL | STOP_SELL | EXPIRY_SELL | TIME_SELL
+  status            String // PENDING | FILLED | FAILED | SKIPPED
+  intendedAt        DateTime  @map("intended_at")
+  targetAt          DateTime  @map("target_at")
+  executedAt        DateTime? @map("executed_at")
+  blockNumber       String?   @map("block_number")
+  notionalUsd       Decimal   @map("notional_usd") @db.Decimal(20, 6)
+  tokenAmount       Decimal?  @map("token_amount") @db.Decimal(80, 18)
+  spotPriceUsd      Decimal?  @map("spot_price_usd") @db.Decimal(80, 36)
+  effectivePriceUsd Decimal?  @map("effective_price_usd") @db.Decimal(80, 36)
+  slippagePct       Decimal?  @map("slippage_pct") @db.Decimal(10, 6)
+  gasUsd            Decimal   @default(0) @map("gas_usd") @db.Decimal(20, 6)
+  taxPct            Decimal?  @map("tax_pct") @db.Decimal(10, 6)
+  netUsd            Decimal?  @map("net_usd") @db.Decimal(20, 6)
+  failureReason     String?   @map("failure_reason")
+  quoteSnapshot     Json?     @map("quote_snapshot")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  arm RobinhoodExperimentArm @relation(fields: [armId], references: [id], onDelete: Cascade)
+
+  @@unique([armId, sequence])
+  @@index([status, targetAt])
+  @@index([armId, executedAt])
+  @@map("robinhood_experiment_legs")
+}
+
+model EvmFlowBackfillRange {
+  id             String    @id @default(cuid())
+  watchId        String    @map("watch_id")
+  chain          String
+  liquidityModel String    @map("liquidity_model")
+  fromBlock      String    @map("from_block")
+  toBlock        String    @map("to_block")
+  status         String    @default("PENDING") // PENDING | RESOLVED
+  attempts       Int       @default(1)
+  lastError      String?   @map("last_error")
+  idempotencyKey String    @unique @map("idempotency_key")
+  resolvedAt     DateTime? @map("resolved_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  watch EvmPoolWatch @relation(fields: [watchId], references: [id], onDelete: Cascade)
+
+  @@index([chain, status, updatedAt])
+  @@map("evm_flow_backfill_ranges")
+}
+
+model EvmRpcHealthSample {
+  id               String   @id @default(cuid())
+  chain            String
+  ts               DateTime @default(now())
+  headBlock        String?  @map("head_block")
+  cursorBlock      String?  @map("cursor_block")
+  lagBlocks        Int      @map("lag_blocks")
+  totalShards      Int      @map("total_shards")
+  failedShards     Int      @map("failed_shards")
+  unresolvedRanges Int      @map("unresolved_ranges")
+  coverageRatio    Decimal  @map("coverage_ratio") @db.Decimal(8, 6)
+  signalEligible   Boolean  @map("signal_eligible")
+  streamMode       String   @map("stream_mode")
+  rpcFailures      Int      @map("rpc_failures")
+
+  @@index([chain, ts])
+  @@map("evm_rpc_health_samples")
+}
+
+// Solana is intentionally isolated from the EVM collector. One row follows a
+// Raydium LaunchLab mint from discovery through a complete paper lifecycle.
+model SolanaLaunchPosition {
+  id                     String    @id @default(cuid())
+  strategyVersion        String    @default("solana_raydium_graduation_v1") @map("strategy_version")
+  mintAddress            String    @map("mint_address")
+  poolAddress            String    @map("pool_address")
+  quoteMint              String    @map("quote_mint")
+  creatorAddress         String?   @map("creator_address")
+  symbol                 String?
+  name                   String?
+  decimals               Int
+  launchedAt             DateTime  @map("launched_at")
+  watchExpiresAt         DateTime  @map("watch_expires_at")
+  discoveryCohort        String    @default("FORWARD_PRIMARY") @map("discovery_cohort")
+  benchmarkEligible      Boolean   @default(true) @map("benchmark_eligible")
+  status                 String    @default("WATCHING") // WATCHING | OPEN | CLOSED | REJECTED | EXPIRED
+  resolutionReason       String?   @map("resolution_reason")
+  latestLaunchSnapshot   Json?     @map("latest_launch_snapshot")
+  lastRouteProbeAt       DateTime? @map("last_route_probe_at")
+  routeProbeAttempts     Int       @default(0) @map("route_probe_attempts")
+  safetySnapshot         Json?     @map("safety_snapshot")
+  entryQuoteSnapshot     Json?     @map("entry_quote_snapshot")
+  openedAt               DateTime? @map("opened_at")
+  sizeUsd                Decimal   @default(20) @map("size_usd") @db.Decimal(12, 4)
+  committedUsd           Decimal   @default(0) @map("committed_usd") @db.Decimal(20, 6)
+  entryPriceEffectiveUsd Decimal?  @map("entry_price_effective_usd") @db.Decimal(80, 36)
+  tokensBoughtRaw        String?   @map("tokens_bought_raw")
+  remainingTokensRaw     String?   @map("remaining_tokens_raw")
+  realizedValueUsd       Decimal   @default(0) @map("realized_value_usd") @db.Decimal(20, 6)
+  currentMultiple        Decimal?  @map("current_multiple") @db.Decimal(20, 6)
+  maxMultipleObserved    Decimal?  @map("max_multiple_observed") @db.Decimal(20, 6)
+  executedRungs          String    @default("") @map("executed_rungs")
+  closedAt               DateTime? @map("closed_at")
+  realizedMultiple       Decimal?  @map("realized_multiple") @db.Decimal(20, 6)
+  outcomeClass           String?   @map("outcome_class")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  events SolanaPaperEvent[]
+
+  @@unique([strategyVersion, mintAddress])
+  @@index([status, launchedAt])
+  @@map("solana_launch_positions")
+}
+
+model SolanaPaperEvent {
+  id             String   @id @default(cuid())
+  positionId     String   @map("position_id")
+  eventType      String   @map("event_type")
+  ts             DateTime
+  tokenAmountRaw String?  @map("token_amount_raw")
+  grossUsd       Decimal? @map("gross_usd") @db.Decimal(20, 6)
+  netUsd         Decimal? @map("net_usd") @db.Decimal(20, 6)
+  multiple       Decimal? @db.Decimal(20, 6)
+  quoteSnapshot  Json?    @map("quote_snapshot")
+  note           String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  position SolanaLaunchPosition @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@index([positionId, ts])
+  @@map("solana_paper_events")
+}
+
+// Multi-venue Solana v2 data is canonical in Postgres. The v1 LaunchLab models
+// above remain immutable so control results are never rewritten by this experiment.
+model SolanaProgramCursor {
+  id                    String   @id @default(cuid())
+  venue                 String
+  programId             String   @unique @map("program_id")
+  lastSeenSlot          BigInt?  @map("last_seen_slot")
+  lastFinalizedSlot     BigInt?  @map("last_finalized_slot")
+  lastBackfillSignature String?  @map("last_backfill_signature")
+  streamConnected       Boolean  @default(false) @map("stream_connected")
+  unresolvedGap         Boolean  @default(false) @map("unresolved_gap")
+  rpcFailures           Int      @default(0) @map("rpc_failures")
+  healthSnapshot        Json?    @map("health_snapshot")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@index([venue, updatedAt])
+  @@map("solana_program_cursors")
+}
+
+model SolanaLaunchWatch {
+  id                        String   @id @default(cuid())
+  venue                     String
+  programId                 String   @map("program_id")
+  mintAddress               String   @map("mint_address")
+  poolAddress               String   @map("pool_address")
+  quoteMint                 String   @map("quote_mint")
+  creatorAddress            String?  @map("creator_address")
+  symbol                    String?
+  name                      String?
+  decimals                  Int?
+  launchedAt                DateTime @map("launched_at")
+  discoverySlot             BigInt   @map("discovery_slot")
+  discoverySignature        String   @map("discovery_signature")
+  discoveryInstructionIndex Int      @map("discovery_instruction_index")
+  latestSlot                BigInt   @map("latest_slot")
+  latestEventAt             DateTime @map("latest_event_at")
+  lastObservedSignature     String?  @map("last_observed_signature")
+  unresolvedGap             Boolean  @default(false) @map("unresolved_gap")
+  discoveryCohort           String   @map("discovery_cohort")
+  benchmarkEligible         Boolean  @default(false) @map("benchmark_eligible")
+  status                    String   @default("WATCHING")
+  finalized                 Boolean  @default(false)
+  invalidatedAt             DateTime? @map("invalidated_at")
+  resolutionReason          String?  @map("resolution_reason")
+  healthSnapshot            Json?    @map("health_snapshot")
+  riskSnapshot              Json?    @map("risk_snapshot")
+  quoteSnapshot             Json?    @map("quote_snapshot")
+  createdAt                 DateTime @default(now()) @map("created_at")
+  updatedAt                 DateTime @updatedAt @map("updated_at")
+
+  observations SolanaSwapObservation[]
+  signals      SolanaExperimentSignal[]
+
+  @@unique([programId, discoverySignature, discoveryInstructionIndex])
+  @@index([venue, mintAddress])
+  @@index([status, latestEventAt])
+  @@map("solana_launch_watches")
+}
+
+model SolanaSwapObservation {
+  id               String   @id @default(cuid())
+  watchId          String   @map("watch_id")
+  venue            String
+  programId        String   @map("program_id")
+  signature        String
+  instructionIndex Int      @map("instruction_index")
+  slot             BigInt
+  ts               DateTime
+  wallet           String
+  direction        String
+  baseAmountRaw    String?  @map("base_amount_raw")
+  quoteAmountRaw   String?  @map("quote_amount_raw")
+  quoteUsd         Decimal? @map("quote_usd") @db.Decimal(20, 6)
+  priceUsd         Decimal? @map("price_usd") @db.Decimal(80, 36)
+  creatorTrade     Boolean  @default(false) @map("creator_trade")
+  rawSnapshot      Json?    @map("raw_snapshot")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  watch SolanaLaunchWatch @relation(fields: [watchId], references: [id], onDelete: Cascade)
+
+  @@unique([programId, signature, instructionIndex])
+  @@index([watchId, ts])
+  @@map("solana_swap_observations")
+}
+
+model SolanaExperimentSignal {
+  id                     String    @id @default(cuid())
+  watchId                String    @map("watch_id")
+  strategyVersion        String    @default("solana_multi_launch_flow_v2") @map("strategy_version")
+  configHash             String    @map("config_hash")
+  t0                     DateTime
+  t0Slot                 BigInt    @map("t0_slot")
+  confirmationDueAt      DateTime  @map("confirmation_due_at")
+  horizonAt              DateTime  @map("horizon_at")
+  riskCohort             String    @map("risk_cohort")
+  benchmarkEligible      Boolean   @default(false) @map("benchmark_eligible")
+  status                 String    @default("ACTIVE")
+  confirmedAt            DateTime? @map("confirmed_at")
+  confirmationSnapshot   Json?     @map("confirmation_snapshot")
+  confirmationReject     Json?     @map("confirmation_reject")
+  executionSnapshot      Json      @map("execution_snapshot")
+  flowSnapshot           Json?     @map("flow_snapshot")
+  healthSnapshot         Json      @map("health_snapshot")
+  firstEligibleAt        DateTime  @map("first_eligible_at")
+  resolvedAt             DateTime? @map("resolved_at")
+  resolutionReason       String?   @map("resolution_reason")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  watch SolanaLaunchWatch @relation(fields: [watchId], references: [id], onDelete: Cascade)
+  arms  SolanaPaperArm[]
+
+  @@unique([watchId, strategyVersion, configHash])
+  @@index([status, confirmationDueAt])
+  @@map("solana_experiment_signals")
+}
+
+model SolanaPaperArm {
+  id                     String    @id @default(cuid())
+  signalId               String    @map("signal_id")
+  armCode                String    @map("arm_code")
+  status                 String    @default("PENDING")
+  budgetUsd              Decimal   @default(20) @map("budget_usd") @db.Decimal(12, 4)
+  committedUsd           Decimal   @default(0) @map("committed_usd") @db.Decimal(20, 6)
+  tokensBoughtRaw        String    @default("0") @map("tokens_bought_raw")
+  remainingTokensRaw     String    @default("0") @map("remaining_tokens_raw")
+  blendedEntryPriceUsd   Decimal?  @map("blended_entry_price_usd") @db.Decimal(80, 36)
+  realizedValueUsd       Decimal   @default(0) @map("realized_value_usd") @db.Decimal(20, 6)
+  currentMultiple        Decimal?  @map("current_multiple") @db.Decimal(20, 6)
+  maxMultipleObserved    Decimal?  @map("max_multiple_observed") @db.Decimal(20, 6)
+  executedRungs          String    @default("") @map("executed_rungs")
+  openedAt               DateTime? @map("opened_at")
+  closedAt               DateTime? @map("closed_at")
+  realizedMultiple       Decimal?  @map("realized_multiple") @db.Decimal(20, 6)
+  outcomeClass           String?   @map("outcome_class")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  signal SolanaExperimentSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  legs   SolanaExecutionLeg[]
+
+  @@unique([signalId, armCode])
+  @@index([status, openedAt])
+  @@map("solana_paper_arms")
+}
+
+model SolanaExecutionLeg {
+  id                String    @id @default(cuid())
+  armId             String    @map("arm_id")
+  legType           String    @map("leg_type")
+  status            String
+  idempotencyKey    String    @unique @map("idempotency_key")
+  targetExecutionAt DateTime  @map("target_execution_at")
+  executedAt        DateTime? @map("executed_at")
+  inputUsd          Decimal?  @map("input_usd") @db.Decimal(20, 6)
+  outputUsd         Decimal?  @map("output_usd") @db.Decimal(20, 6)
+  tokenAmountRaw    String?   @map("token_amount_raw")
+  effectivePriceUsd Decimal?  @map("effective_price_usd") @db.Decimal(80, 36)
+  slippagePct       Decimal?  @map("slippage_pct") @db.Decimal(10, 6)
+  gasUsd            Decimal?  @map("gas_usd") @db.Decimal(12, 6)
+  quoteSlot         BigInt?   @map("quote_slot")
+  quoteModel        String?   @map("quote_model")
+  quoteSnapshot     Json?     @map("quote_snapshot")
+  failureReason     String?   @map("failure_reason")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  arm SolanaPaperArm @relation(fields: [armId], references: [id], onDelete: Cascade)
+
+  @@index([armId, targetExecutionAt])
+  @@map("solana_execution_legs")
+}
+
 // ─── Shadow gem-tracker (OBSERVATION ONLY — never wired into entry/exit) ─────────
 // A survivor that passed the gem-screen hard gate (lp_locked_or_burned + FDV headroom).
 model GemCandidate {
-  id                 String   @id @default(cuid())
-  chain              String
-  tokenAddress       String   @map("token_address")
-  poolAddress        String   @map("pool_address")
-  symbol             String?
-  liquidityModel     String   @map("liquidity_model")
-  deployerAddress    String?  @map("deployer_address")
-  t0Ts               DateTime @map("t0_ts")            // real discovery time (t0 baseline)
-  entryFdvUsd        Decimal? @map("entry_fdv_usd") @db.Decimal(30, 4)
-  entryPriceUsd      Decimal? @map("entry_price_usd") @db.Decimal(40, 18)
-  entryLiquidityUsd  Decimal? @map("entry_liquidity_usd") @db.Decimal(20, 4)
+  id                String   @id @default(cuid())
+  chain             String
+  tokenAddress      String   @map("token_address")
+  poolAddress       String   @map("pool_address")
+  symbol            String?
+  liquidityModel    String   @map("liquidity_model")
+  deployerAddress   String?  @map("deployer_address")
+  t0Ts              DateTime @map("t0_ts") // real discovery time (t0 baseline)
+  entryFdvUsd       Decimal? @map("entry_fdv_usd") @db.Decimal(30, 4)
+  entryPriceUsd     Decimal? @map("entry_price_usd") @db.Decimal(40, 18)
+  entryLiquidityUsd Decimal? @map("entry_liquidity_usd") @db.Decimal(20, 4)
   // LP lock/burn evidence (the hard gate).
-  lpLockedOrBurned   Boolean  @map("lp_locked_or_burned")
-  lpLockedFraction   Decimal? @map("lp_locked_fraction") @db.Decimal(8, 6)
-  lpLockSource       String?  @map("lp_lock_source")    // burn | locker:<name> | mixed | undetermined
-  screenedAt         DateTime @default(now()) @map("screened_at")
+  lpLockedOrBurned  Boolean  @map("lp_locked_or_burned")
+  lpLockedFraction  Decimal? @map("lp_locked_fraction") @db.Decimal(8, 6)
+  lpLockSource      String?  @map("lp_lock_source") // burn | locker:<name> | mixed | undetermined
+  screenedAt        DateTime @default(now()) @map("screened_at")
 
   ticks GemShadowTick[]
 
@@ -432,25 +843,25 @@ model GemCandidate {
 
 // One forward observation of a gem_candidate at a horizon bucket. Keyed token+pool+horizon.
 model GemShadowTick {
-  id              String   @id @default(cuid())
-  candidateId     String   @map("candidate_id")
-  chain           String
-  tokenAddress    String   @map("token_address")
-  poolAddress     String   @map("pool_address")
-  horizon         String   // 15m | 1h | 6h | 24h | 72h
-  dueAt           DateTime @map("due_at")
-  capturedAt      DateTime @map("captured_at")
-  elapsedMin      Int      @map("elapsed_min")
-  status          String   // captured | missed (started tracking after this horizon passed)
-  priceUsd        Decimal? @map("price_usd") @db.Decimal(40, 18)
-  fdvUsd          Decimal? @map("fdv_usd") @db.Decimal(30, 4)
-  onchainLiqUsd   Decimal? @map("onchain_liq_usd") @db.Decimal(20, 4)
-  multipleVsT0    Decimal? @map("multiple_vs_t0") @db.Decimal(20, 6) // by FDV
-  uniqueBuyers    Int?     @map("unique_buyers")
-  uniqueSellers   Int?     @map("unique_sellers")
-  sellSimOk       Boolean? @map("sell_sim_ok")
-  rugFlag         Boolean  @map("rug_flag")
-  createdAt       DateTime @default(now()) @map("created_at")
+  id            String   @id @default(cuid())
+  candidateId   String   @map("candidate_id")
+  chain         String
+  tokenAddress  String   @map("token_address")
+  poolAddress   String   @map("pool_address")
+  horizon       String // 15m | 1h | 6h | 24h | 72h
+  dueAt         DateTime @map("due_at")
+  capturedAt    DateTime @map("captured_at")
+  elapsedMin    Int      @map("elapsed_min")
+  status        String // captured | missed (started tracking after this horizon passed)
+  priceUsd      Decimal? @map("price_usd") @db.Decimal(40, 18)
+  fdvUsd        Decimal? @map("fdv_usd") @db.Decimal(30, 4)
+  onchainLiqUsd Decimal? @map("onchain_liq_usd") @db.Decimal(20, 4)
+  multipleVsT0  Decimal? @map("multiple_vs_t0") @db.Decimal(20, 6) // by FDV
+  uniqueBuyers  Int?     @map("unique_buyers")
+  uniqueSellers Int?     @map("unique_sellers")
+  sellSimOk     Boolean? @map("sell_sim_ok")
+  rugFlag       Boolean  @map("rug_flag")
+  createdAt     DateTime @default(now()) @map("created_at")
 
   candidate GemCandidate @relation(fields: [candidateId], references: [id])
 
@@ -467,7 +878,7 @@ model RawCollectorPayload {
   id        String   @id @default(cuid())
   runId     String   @map("run_id")
   chain     String
-  source    String   // geckoterminal | dexscreener
+  source    String // geckoterminal | dexscreener
   ts        DateTime
   payload   Json
   createdAt DateTime @default(now()) @map("created_at")
@@ -482,12 +893,12 @@ model PaperEvent {
   id         String   @id @default(cuid())
   positionId String   @map("position_id")
   ts         DateTime
-  type       String   // BUY | LADDER_SELL | INVALIDATE_SELL | NOT_ENTERED
+  type       String // BUY | LADDER_SELL | INVALIDATE_SELL | NOT_ENTERED
   price      Decimal  @db.Decimal(80, 36)
   multiple   Decimal? @db.Decimal(16, 4)
-  fraction   Decimal? @db.Decimal(8, 6)   // fraction of original position transacted
+  fraction   Decimal? @db.Decimal(8, 6) // fraction of original position transacted
   tokens     Decimal? @db.Decimal(80, 18)
-  usd        Decimal? @db.Decimal(20, 4)  // net USD (proceeds for sells, cost for buys)
+  usd        Decimal? @db.Decimal(20, 4) // net USD (proceeds for sells, cost for buys)
   slipPct    Decimal? @map("slip_pct") @db.Decimal(10, 6)
   note       String?
   createdAt  DateTime @default(now()) @map("created_at")

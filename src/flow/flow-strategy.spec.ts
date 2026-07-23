@@ -31,7 +31,7 @@ describe('flow strategy', () => {
     expect(snapshot.sellQuoteUsd).toBe(20);
     expect(snapshot.uniqueBuyers).toBe(2);
     expect(snapshot.largestBuyerShare).toBeCloseTo(0.6);
-    expect(snapshot.buyerSellerOverlap).toBe(1);
+    expect(snapshot.buyerSellerOverlap).toBe(0.5);
     expect(snapshot.priceMomentum).toBeCloseTo(1.2);
     expect(snapshot.distinctBlocks).toBe(2);
   });
@@ -63,5 +63,25 @@ describe('flow strategy', () => {
     ], NOW, NOW - 60_000, '0xcreator');
     expect(decision.triggered).toBe(true);
     expect(decision.snapshot.creatorSold).toBe(true);
+    expect(decision.snapshot.creatorSellQuoteUsd).toBe(1);
+  });
+
+  it('applies the frozen ETH/Base precision-v2 flow rules', () => {
+    const strategy = FLOW_STRATEGIES.find((item) =>
+      item.version === 'evm_flow_precision_v2' && item.watchType === 'FRESH')!;
+    const passing = [
+      trade('BUY', '0xa', 150, 1, 110_000, '1'),
+      trade('BUY', '0xb', 150, 1.01, 80_000, '1'),
+      trade('BUY', '0xc', 150, 1.02, 50_000, '2'),
+      trade('BUY', '0xd', 150, 1.04, 10_000, '2'),
+      trade('SELL', '0xe', 100, 1.03, 5_000, '2'),
+    ];
+    expect(evaluateFlowStrategy(strategy, passing, NOW, NOW - 180_000).triggered).toBe(true);
+
+    const creatorSell = [...passing, trade('SELL', '0xcreator', 30, 1.03, 1_000, '2')];
+    expect(evaluateFlowStrategy(strategy, creatorSell, NOW, NOW - 180_000, '0xcreator')).toMatchObject({
+      triggered: false,
+      reasons: expect.arrayContaining(['creator_sell']),
+    });
   });
 });

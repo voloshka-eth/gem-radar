@@ -7,6 +7,13 @@ export function blockIsAfterHead(blockNumber: string, head: bigint): boolean {
   catch { return false; }
 }
 
+export function clampRegistrationStartBlock(requested: bigint, head: bigint, maxBackfill: bigint): bigint {
+  const safeBackfill = maxBackfill > 0n ? maxBackfill : 1n;
+  const floor = head > safeBackfill ? head - safeBackfill : 0n;
+  const notFuture = requested > head ? head : requested;
+  return notFuture < floor ? floor : notFuture;
+}
+
 export function chunkValues<T>(values: readonly T[], size: number): T[][] {
   if (!Number.isInteger(size) || size <= 0) throw new Error('chunk size must be positive');
   const output: T[][] = [];
@@ -22,4 +29,8 @@ export function nextConsecutiveWindowCount(
 ): number {
   if (!conditionMet) return 0;
   return previousWindow === currentWindow - 1 ? previousCount + 1 : 1;
+}
+
+export function signalStatusConsumesTrigger(status: string): boolean {
+  return ['ENTERED', 'HARD_REJECT', 'NOT_ENTERED', 'SHADOW_DIAGNOSTIC'].includes(status);
 }

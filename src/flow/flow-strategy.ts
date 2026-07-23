@@ -8,29 +8,63 @@ import type {
 
 export const FLOW_STRATEGIES: readonly FlowStrategyDefinition[] = [
   {
-    version: 'fresh_early_v1', watchType: 'FRESH', windowMs: 60_000,
+    version: 'fresh_early_v1', chains: ['ethereum', 'base'], watchType: 'FRESH', windowMs: 60_000,
     minUniqueBuyers: 2, minBuyQuoteUsd: 100, minBuySellRatio: 1.5,
     maxLargestBuyerShare: 0.75, minPriceMomentum: 1, minDistinctBlocks: 1,
   },
   {
-    version: 'fresh_confirmed_v1', watchType: 'FRESH', windowMs: 120_000,
+    version: 'fresh_confirmed_v1', chains: ['ethereum', 'base'], watchType: 'FRESH', windowMs: 120_000,
     minUniqueBuyers: 4, minBuyQuoteUsd: 500, minBuySellRatio: 2,
     maxLargestBuyerShare: 0.60, minPriceMomentum: 1.03, minDistinctBlocks: 2,
   },
   {
-    version: 'mature_early_v1', watchType: 'MATURE', windowMs: 300_000,
+    version: 'mature_early_v1', chains: ['ethereum', 'base'], watchType: 'MATURE', windowMs: 300_000,
     minUniqueBuyers: 5, minBuyQuoteUsd: 1_000, minBuySellRatio: 1.5,
     maxLargestBuyerShare: 1, minPriceMomentum: 1.03, minDistinctBlocks: 1,
   },
   {
-    version: 'mature_confirmed_v1', watchType: 'MATURE', windowMs: 300_000,
+    version: 'mature_confirmed_v1', chains: ['ethereum', 'base'], watchType: 'MATURE', windowMs: 300_000,
     minUniqueBuyers: 10, minBuyQuoteUsd: 5_000, minBuySellRatio: 2,
     maxLargestBuyerShare: 0.40, minPriceMomentum: 1.08, minDistinctBlocks: 1,
   },
+  {
+    version: 'evm_flow_precision_v2', chains: ['ethereum', 'base'], watchType: 'FRESH', windowMs: 120_000,
+    minUniqueBuyers: 4, minBuyQuoteUsd: 500, minBuySellRatio: 2,
+    maxLargestBuyerShare: 0.60, minPriceMomentum: 1.03, maxPriceMomentum: 1.50,
+    minDistinctBlocks: 2, minNetBuyQuoteUsd: 250, maxBuyerSellerOverlap: 0.25,
+    rejectCreatorSell: true, minOnchainTvlUsd: 10_000, maxOnchainTvlUsd: 50_000,
+    maxEntrySlipPct: 0.03, minRoundTripMultiple: 0.80,
+  },
+  {
+    version: 'evm_flow_precision_v2', chains: ['ethereum', 'base'], watchType: 'MATURE', windowMs: 300_000,
+    minUniqueBuyers: 10, minBuyQuoteUsd: 5_000, minBuySellRatio: 2,
+    maxLargestBuyerShare: 0.40, minPriceMomentum: 1.08, maxPriceMomentum: 1.50,
+    minDistinctBlocks: 3, minNetBuyQuoteUsd: 2_500, maxBuyerSellerOverlap: 0.20,
+    rejectCreatorSell: true, minOnchainTvlUsd: 10_000, maxOnchainTvlUsd: 50_000,
+    maxEntrySlipPct: 0.03, minRoundTripMultiple: 0.80,
+  },
+  {
+    version: 'robinhood_flow_precision_v2', chains: ['robinhood'], watchType: 'FRESH', windowMs: 60_000,
+    minUniqueBuyers: 3, minBuyQuoteUsd: 250, minBuySellRatio: 1.5,
+    maxLargestBuyerShare: 0.60, minPriceMomentum: 1, maxPriceMomentum: 1.50,
+    minDistinctBlocks: 2, minNetBuyQuoteUsd: 100, maxBuyerSellerOverlap: 0.33,
+    rejectCreatorSell: true, minOnchainTvlUsd: 10_000, maxOnchainTvlUsd: 50_000,
+    maxEntrySlipPct: 0.03, minRoundTripMultiple: 0.80,
+  },
+  {
+    version: 'robinhood_flow_precision_v2', chains: ['robinhood'], watchType: 'MATURE', windowMs: 300_000,
+    minUniqueBuyers: 8, minBuyQuoteUsd: 2_000, minBuySellRatio: 1.5,
+    maxLargestBuyerShare: 0.50, minPriceMomentum: 1.03, maxPriceMomentum: 1.35,
+    minDistinctBlocks: 3, minNetBuyQuoteUsd: 1_000, maxBuyerSellerOverlap: 0.25,
+    rejectCreatorSell: true, minOnchainTvlUsd: 10_000, maxOnchainTvlUsd: 50_000,
+    maxEntrySlipPct: 0.03, minRoundTripMultiple: 0.80,
+  },
 ] as const;
 
-export function strategiesFor(watchType: FlowWatchType): readonly FlowStrategyDefinition[] {
-  return FLOW_STRATEGIES.filter((strategy) => strategy.watchType === watchType);
+export function strategiesFor(watchType: FlowWatchType, chain?: FlowTrade['chain']): readonly FlowStrategyDefinition[] {
+  return FLOW_STRATEGIES.filter((strategy) =>
+    strategy.watchType === watchType && (chain == null || strategy.chains.includes(chain)),
+  );
 }
 
 export function computeFlowSnapshot(
@@ -54,6 +88,9 @@ export function computeFlowSnapshot(
   const largestBuyer = Math.max(0, ...buyerTotals.values());
   const overlap = [...buyerTotals.keys()].filter((address) => sellerTotals.has(address)).length;
   const creator = creatorAddress?.toLowerCase() ?? null;
+  const creatorSellQuoteUsd = creator == null
+    ? 0
+    : sum(sells.filter((trade) => trade.trader.toLowerCase() === creator).map((trade) => trade.quoteAmountUsd));
 
   return {
     windowMs,
@@ -67,14 +104,17 @@ export function computeFlowSnapshot(
     netBuyQuoteUsd: buyQuoteUsd - sellQuoteUsd,
     buySellRatio: sellQuoteUsd > 0 ? buyQuoteUsd / sellQuoteUsd : buyQuoteUsd > 0 ? 999 : 0,
     largestBuyerShare: buyQuoteUsd > 0 ? largestBuyer / buyQuoteUsd : 1,
-    buyerSellerOverlap: Math.min(buyerTotals.size, sellerTotals.size) > 0
-      ? overlap / Math.min(buyerTotals.size, sellerTotals.size)
+    buyerSellerOverlap: buyerTotals.size > 0
+      ? overlap / buyerTotals.size
       : 0,
+    creatorSellQuoteUsd,
     priceMomentum: firstPriceUsd && lastPriceUsd ? lastPriceUsd / firstPriceUsd : null,
     firstPriceUsd,
     lastPriceUsd,
     distinctBlocks: new Set(recent.map((trade) => trade.blockNumber)).size,
-    creatorSold: creator != null && sells.some((trade) => trade.trader.toLowerCase() === creator),
+    creatorSold: creatorSellQuoteUsd > 0,
+    creatorAddress: creator,
+    latestSwapAtMs: recent.at(-1)?.occurredAtMs ?? null,
   };
 }
 
@@ -94,7 +134,20 @@ export function evaluateFlowStrategy(
   if (snapshot.priceMomentum == null || snapshot.priceMomentum < strategy.minPriceMomentum) {
     reasons.push('weak_price_momentum');
   }
+  if (strategy.maxPriceMomentum != null && snapshot.priceMomentum != null && snapshot.priceMomentum > strategy.maxPriceMomentum) {
+    reasons.push('late_price_momentum');
+  }
   if (snapshot.distinctBlocks < strategy.minDistinctBlocks) reasons.push('insufficient_distinct_blocks');
+  if (strategy.minNetBuyQuoteUsd != null && snapshot.netBuyQuoteUsd < strategy.minNetBuyQuoteUsd) {
+    reasons.push('insufficient_net_buy_quote');
+  }
+  if (strategy.maxBuyerSellerOverlap != null && snapshot.buyerSellerOverlap > strategy.maxBuyerSellerOverlap) {
+    reasons.push('buyer_seller_overlap');
+  }
+  if (strategy.rejectCreatorSell) {
+    const creatorSellThreshold = Math.max(20, snapshot.buyQuoteUsd * 0.05);
+    if (snapshot.creatorSellQuoteUsd >= creatorSellThreshold) reasons.push('creator_sell');
+  }
   return { triggered: reasons.length === 0, reasons, snapshot };
 }
 

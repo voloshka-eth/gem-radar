@@ -794,6 +794,8 @@ describe('CollectorService', () => {
       onchainTvlUsd: 12_345,
       reportedVsOnchainPct: 0.01,
       executableDepthUsd: 500,
+      entrySlip20: 0.01,
+      exitSlip20: 0.01,
       slip50: 0.01,
       slip100: 0.02,
       slip500: 0.08,
@@ -850,6 +852,8 @@ describe('CollectorService', () => {
       onchainTvlUsd: 12_345,
       reportedVsOnchainPct: 0.01,
       executableDepthUsd: 500,
+      entrySlip20: 0.01,
+      exitSlip20: 0.01,
       slip50: 0.01,
       slip100: 0.02,
       slip500: 0.08,
@@ -899,6 +903,8 @@ describe('CollectorService', () => {
       onchainTvlUsd: 12_345,
       reportedVsOnchainPct: 0.01,
       executableDepthUsd: 500,
+      entrySlip20: 0.01,
+      exitSlip20: 0.01,
       slip50: 0.01,
       slip100: 0.02,
       slip500: 0.08,
@@ -923,7 +929,7 @@ describe('CollectorService', () => {
     expect(robinhoodExperimentalSafetyMock.inspect).toHaveBeenCalledWith('0xdeadbeef');
     expect(paperMock.recordEntry).toHaveBeenCalledWith(expect.objectContaining({
       riskCohort: 'ROBINHOOD_STATIC_SAFE',
-      strategyVersion: 'robinhood_stages_v1_primary',
+      strategyVersion: 'robinhood_stages_v2_primary',
       exitPolicy: 'SAFE_LADDER',
       benchmarkEligible: true,
       buyTax: null,
@@ -960,7 +966,7 @@ describe('CollectorService', () => {
 
     expect(paperMock.recordEntry).toHaveBeenCalledWith(expect.objectContaining({
       riskCohort: 'ROBINHOOD_STAGE_SHADOW',
-      strategyVersion: 'robinhood_stages_v1_shadow',
+      strategyVersion: 'robinhood_stages_v2_shadow',
       exitPolicy: 'SOFT_RISK_2X',
       benchmarkEligible: false,
     }));

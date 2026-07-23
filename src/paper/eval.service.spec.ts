@@ -105,6 +105,7 @@ function harness(
   position: ReturnType<typeof openPosition>,
   liq: LiquidityCheckResult,
   configOverrides: Record<string, unknown> = {},
+  swaps: Array<{ kind: string; quoteAmountUsd: number; trader: string }> = [],
 ) {
   const prisma = {
     paperPosition: {
@@ -114,6 +115,9 @@ function harness(
     },
     paperEvent: {
       create: jest.fn().mockResolvedValue({}),
+    },
+    evmSwapObservation: {
+      findMany: jest.fn().mockResolvedValue(swaps),
     },
   };
   const fileLogger = {
@@ -420,6 +424,34 @@ describe('EvalService price-read failures', () => {
     });
     expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
       event_type: 'TIME_LOSS_SELL', outcome_class: 'TIME_LOSS', fraction: '1.0000',
+    });
+  });
+
+  it('protects a v2 position immediately when the attributable creator sells', async () => {
+    const creator = '0xccc0000000000000000000000000000000000003';
+    const position = {
+      ...openPosition({ flowSnapshot: { creatorAddress: creator } }),
+      strategyVersion: 'evm_flow_precision_v2',
+      exitPolicy: 'PROTECTED_LADDER_V2',
+    };
+    const { service, prisma, fileLogger } = harness(
+      position as ReturnType<typeof openPosition>,
+      healthyLiquidityAtPrice(1.2),
+      { 'paper.ladder': [{ multiple: 2, sellFraction: 0.8 }] },
+      [
+        { kind: 'BUY', quoteAmountUsd: 100, trader: '0xddd0000000000000000000000000000000000004' },
+        { kind: 'SELL', quoteAmountUsd: 25, trader: creator },
+      ],
+    );
+
+    const result = await service.evaluateOpenPositions();
+
+    expect(result.closed).toBe(1);
+    expect(prisma.paperPosition.update.mock.calls[0][0].data).toMatchObject({
+      status: 'CLOSED', remainingFraction: 0, outcomeClass: 'PARTIAL_PROFIT_CREATOR_EXIT',
+    });
+    expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
+      event_type: 'INVALIDATE_SELL', outcome_class: 'PARTIAL_PROFIT_CREATOR_EXIT',
     });
   });
 });

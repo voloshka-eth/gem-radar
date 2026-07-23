@@ -19,7 +19,7 @@ export interface CandidateResult {
   riskCohort?: string;
   strategyVersion?: string;
   signalId?: string;
-  exitPolicy?: 'SAFE_LADDER' | 'SOFT_RISK_2X' | 'LEGACY_SHADOW';
+  exitPolicy?: 'SAFE_LADDER' | 'SOFT_RISK_2X' | 'PROTECTED_LADDER_V2' | 'LEGACY_SHADOW';
   benchmarkEligible?: boolean;
   flowSnapshot?: Record<string, unknown>;
   observedAt?: Date;

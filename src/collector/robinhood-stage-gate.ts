@@ -1,7 +1,7 @@
 import type { CollectorResult } from './collector.types';
 import type { LiquidityCheckResult } from '../onchain/onchain.types';
 
-export const ROBINHOOD_STAGE_VERSION = 'robinhood-stages-v1' as const;
+export const ROBINHOOD_STAGE_VERSION = 'robinhood-stages-v2' as const;
 
 export type RobinhoodDiscoveryLane =
   | 'robinhood_standard'
@@ -31,6 +31,9 @@ export interface RobinhoodAdmissionStageConfig {
   minOnchainTvlUsd: number;
   primaryMinScore: number;
   shadowMinScore: number;
+  primaryMinFdvToOnchainTvlRatio: number;
+  primaryMaxEntrySlippagePct: number;
+  primaryMinRoundTripMultiple: number;
 }
 
 export interface RobinhoodDiscoveryStageResult {
@@ -47,6 +50,7 @@ export interface RobinhoodAdmissionStageInput {
   providerStatus: string | null | undefined;
   liquidity: LiquidityCheckResult;
   finalScore: number;
+  reportedFdvUsd?: number | null;
 }
 
 export interface RobinhoodAdmissionStageResult {
@@ -55,6 +59,7 @@ export interface RobinhoodAdmissionStageResult {
   stage: 'R3_PROVIDER_CONTRACT' | 'R4_EXECUTABLE_LIQUIDITY' | 'R5_SCORE_ROUTING';
   reason?: string;
   paperLane?: RobinhoodPaperLane;
+  qualityFlags?: string[];
 }
 
 /**
@@ -151,11 +156,37 @@ export function applyRobinhoodAdmissionStages(
   if (input.finalScore < config.shadowMinScore) {
     return fail('R5_SCORE_ROUTING', 'score_below_shadow_floor');
   }
+
+  const qualityFlags: string[] = [];
+  const tvl = finite(input.liquidity.onchainTvlUsd);
+  const fdv = finite(input.reportedFdvUsd);
+  if (fdv != null && tvl != null && tvl > 0 && fdv / tvl < config.primaryMinFdvToOnchainTvlRatio) {
+    qualityFlags.push('fdv_below_onchain_tvl');
+  }
+
+  const entrySlip = finite(input.liquidity.entrySlip20 ?? input.liquidity.slip20);
+  const exitSlip = finite(input.liquidity.exitSlip20 ?? input.liquidity.slip20);
+  if (entrySlip == null || exitSlip == null) {
+    qualityFlags.push('exact_round_trip_quote_missing');
+  } else if (entrySlip < 0 || exitSlip < 0 || entrySlip >= 1 || exitSlip >= 1) {
+    qualityFlags.push('invalid_round_trip_quote');
+  } else {
+    if (entrySlip > config.primaryMaxEntrySlippagePct) {
+      qualityFlags.push('entry_slippage_above_primary_max');
+    }
+    const roundTrip = (1 - entrySlip) * (1 - exitSlip);
+    if (roundTrip < config.primaryMinRoundTripMultiple) {
+      qualityFlags.push('zero_move_round_trip_below_primary_min');
+    }
+  }
+
+  const primary = input.finalScore >= config.primaryMinScore && qualityFlags.length === 0;
   return {
     pass: true,
     version: ROBINHOOD_STAGE_VERSION,
     stage: 'R5_SCORE_ROUTING',
-    paperLane: input.finalScore >= config.primaryMinScore ? 'PRIMARY' : 'SHADOW',
+    paperLane: primary ? 'PRIMARY' : 'SHADOW',
+    qualityFlags,
   };
 }
 

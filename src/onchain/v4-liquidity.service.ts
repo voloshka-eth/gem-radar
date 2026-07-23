@@ -5,6 +5,7 @@ import type { CandidatePool, SupportedChain } from '../collector/collector.types
 import { QUOTE_ASSET_DECIMALS, V4_CONFIG_KEYS, VIEM_CLIENTS } from './onchain.constants';
 import { PriceService } from './price.service';
 import { bigintRatioToNumber, decimalToRawAmount, rawToDecimalNumber } from './bigint-math';
+import type { ExecutionQuoteDirection, ExecutionQuoteResult } from './onchain.types';
 
 const INITIALIZE_EVENT = {
   type: 'event',
@@ -77,7 +78,7 @@ const DECIMALS_ABI = [{
   outputs: [{ type: 'uint8' }],
 }] as const;
 
-const PROBE_SIZES_USD = [50, 100, 500, 1000] as const;
+const PROBE_SIZES_USD = [20, 50, 100, 500, 1000] as const;
 const MAX_SLIPPAGE_FOR_DEPTH = 0.10;
 const TWO_POW_96 = 2n ** 96n;
 const TWO_POW_192 = TWO_POW_96 * TWO_POW_96;
@@ -96,6 +97,9 @@ type PoolMetadata = { key: PoolKey; sqrtPriceX96: bigint };
 
 export interface V4LiquidityResult {
   spotPriceUsd: number;
+  slip20: number | null;
+  entrySlip20: number | null;
+  exitSlip20: number | null;
   slip50: number | null;
   slip100: number | null;
   slip500: number | null;
@@ -179,13 +183,16 @@ export class V4LiquidityService {
     }
 
     const zeroForOne = gemIsToken0;
-    const slip50 = await this.quoteSlippage(
+    const slip20 = await this.quoteSlippage(
       client, quoter, metadata.key, zeroForOne,
       PROBE_SIZES_USD[0], spotPriceUsd, gemDecimals, quoteDec, quotePriceUsd,
     );
-    if (slip50 === null) {
+    if (slip20 === null) {
       return {
         spotPriceUsd,
+        slip20: null,
+        entrySlip20: null,
+        exitSlip20: null,
         slip50: null,
         slip100: null,
         slip500: null,
@@ -197,8 +204,13 @@ export class V4LiquidityService {
       this.quoteSlippage(client, quoter, metadata.key, zeroForOne,
         sizeUsd, spotPriceUsd, gemDecimals, quoteDec, quotePriceUsd),
     ));
-    const slippages = [slip50, ...remainingSlippages];
-    const [slip100, slip500, slip1000] = remainingSlippages;
+    const entrySlip20 = await this.quoteBuySlippage(
+      client, quoter, metadata.key, quoteCurrency === c0,
+      PROBE_SIZES_USD[0], spotPriceUsd, gemDecimals, quoteDec, quotePriceUsd,
+    );
+    const exactSlip20 = entrySlip20 == null ? slip20 : Math.max(slip20, entrySlip20);
+    const slippages = [slip20, ...remainingSlippages];
+    const [slip50, slip100, slip500, slip1000] = remainingSlippages;
     let executableDepthUsd = 0;
     for (let i = PROBE_SIZES_USD.length - 1; i >= 0; i--) {
       if ((slippages[i] ?? 1) < MAX_SLIPPAGE_FOR_DEPTH) {
@@ -206,7 +218,87 @@ export class V4LiquidityService {
         break;
       }
     }
-    return { spotPriceUsd, slip50, slip100, slip500, slip1000, executableDepthUsd };
+    return {
+      spotPriceUsd, slip20: exactSlip20, entrySlip20, exitSlip20: slip20,
+      slip50, slip100, slip500, slip1000, executableDepthUsd,
+    };
+  }
+
+  async quoteTrade(
+    pool: CandidatePool,
+    gemDecimals: number,
+    sizeUsd: number,
+    direction: ExecutionQuoteDirection,
+  ): Promise<ExecutionQuoteResult> {
+    const observedAt = new Date();
+    const client = this.clients.get(pool.chain);
+    const keys = V4_CONFIG_KEYS[pool.chain];
+    const quoter = keys ? this.config.get<string>(keys.quoter) : null;
+    const poolManager = keys ? this.config.get<string>(keys.poolManager) : null;
+    const stateView = keys ? this.config.get<string>(keys.stateView) : null;
+    if (!client || !keys || !quoter || !poolManager || !stateView || !(sizeUsd > 0)) {
+      return {
+        liquidityModel: 'V4', direction, sizeUsd, spotPriceUsd: null, slippagePct: null,
+        executable: false, observedAt, error: 'v4_quote_prerequisite_unavailable',
+      };
+    }
+    try {
+      const metadata = await this.getMetadata(
+        client,
+        pool.chain,
+        pool.poolAddress as `0x${string}`,
+        poolManager,
+        pool.v4Metadata,
+        pool.creationBlockNumber,
+      );
+      const c0 = metadata.key.currency0.toLowerCase();
+      const c1 = metadata.key.currency1.toLowerCase();
+      const configuredQuote = pool.quoteAssetAddress.toLowerCase();
+      const quoteCurrency = configuredQuote === c0 || configuredQuote === c1
+        ? configuredQuote
+        : pool.quoteAsset === 'WETH' && (c0 === NATIVE_CURRENCY || c1 === NATIVE_CURRENCY)
+          ? NATIVE_CURRENCY
+          : null;
+      if (!quoteCurrency) throw new Error('quote_currency_absent_from_pool_key');
+      const gemCurrency = quoteCurrency === c0 ? metadata.key.currency1 : metadata.key.currency0;
+      const gemIsToken0 = gemCurrency.toLowerCase() === c0;
+      const quoteDecimals = QUOTE_ASSET_DECIMALS[pool.quoteAsset] ?? 18;
+      const quotePriceUsd = await this.priceService.getUsdPrice(pool.chain, pool.quoteAssetAddress);
+      if (!(quotePriceUsd && quotePriceUsd > 0)) throw new Error('quote_asset_price_unavailable');
+      const slot0 = await client.readContract({
+        address: stateView as `0x${string}`,
+        abi: STATE_VIEW_ABI,
+        functionName: 'getSlot0',
+        args: [pool.poolAddress as `0x${string}`],
+      }) as readonly [bigint, number, number, number];
+      const sqrtPriceX96 = slot0[0];
+      if (sqrtPriceX96 === 0n) throw new Error('pool_uninitialized');
+      const priceRaw = bigintRatioToNumber(sqrtPriceX96 * sqrtPriceX96, TWO_POW_192);
+      const priceGemInQuote = gemIsToken0
+        ? priceRaw * (10 ** gemDecimals) / (10 ** quoteDecimals)
+        : (10 ** gemDecimals) / (priceRaw * 10 ** quoteDecimals);
+      const spotPriceUsd = priceGemInQuote * quotePriceUsd;
+      if (!(spotPriceUsd > 0 && Number.isFinite(spotPriceUsd))) throw new Error('invalid_spot_price');
+      const slippagePct = direction === 'BUY'
+        ? await this.quoteBuySlippage(
+            client, quoter, metadata.key, quoteCurrency === c0, sizeUsd,
+            spotPriceUsd, gemDecimals, quoteDecimals, quotePriceUsd,
+          )
+        : await this.quoteSlippage(
+            client, quoter, metadata.key, gemIsToken0, sizeUsd,
+            spotPriceUsd, gemDecimals, quoteDecimals, quotePriceUsd,
+          );
+      return {
+        liquidityModel: 'V4', direction, sizeUsd, spotPriceUsd,
+        slippagePct, executable: slippagePct != null && slippagePct < 1, observedAt,
+        ...(slippagePct == null ? { error: 'v4_quote_unavailable' } : {}),
+      };
+    } catch (error) {
+      return {
+        liquidityModel: 'V4', direction, sizeUsd, spotPriceUsd: null, slippagePct: null,
+        executable: false, observedAt, error: (error as Error).message,
+      };
+    }
   }
 
   async readDecimals(chain: SupportedChain, tokenAddress: string): Promise<number> {
@@ -301,6 +393,34 @@ export class V4LiquidityService {
         args: [{ poolKey, zeroForOne, exactAmount: amountIn, hookData: '0x' }],
       }) as readonly [bigint, bigint];
       const actualOutUsd = rawToDecimalNumber(result[0], quoteDecimals) * quotePriceUsd;
+      return 1 - actualOutUsd / sizeUsd;
+    } catch (err) {
+      this.logger.debug(this.quoteFailureMessage(err, sizeUsd, poolKey));
+      return null;
+    }
+  }
+
+  private async quoteBuySlippage(
+    client: PublicClient,
+    quoter: string,
+    poolKey: PoolKey,
+    zeroForOne: boolean,
+    sizeUsd: number,
+    spotPriceUsd: number,
+    gemDecimals: number,
+    quoteDecimals: number,
+    quotePriceUsd: number,
+  ): Promise<number | null> {
+    const amountIn = decimalToRawAmount(sizeUsd / quotePriceUsd, quoteDecimals);
+    if (amountIn < 1n || amountIn > MAX_UINT128) return null;
+    try {
+      const result = await client.readContract({
+        address: quoter as `0x${string}`,
+        abi: QUOTER_V4_ABI,
+        functionName: 'quoteExactInputSingle',
+        args: [{ poolKey, zeroForOne, exactAmount: amountIn, hookData: '0x' }],
+      }) as readonly [bigint, bigint];
+      const actualOutUsd = rawToDecimalNumber(result[0], gemDecimals) * spotPriceUsd;
       return 1 - actualOutUsd / sizeUsd;
     } catch (err) {
       this.logger.debug(this.quoteFailureMessage(err, sizeUsd, poolKey));

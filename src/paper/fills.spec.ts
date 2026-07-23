@@ -8,6 +8,10 @@ const EXIT: ExitParams = { sandwichPct: 0.01, gasUsd: 1.5, sellTaxPct: 0 };
 const LADDER = { slip50: 0.02, slip100: 0.04, slip500: 0.10, slip1000: 0.20 };
 
 describe('slipForSize — pessimistic bucketing', () => {
+  it('uses the exact $20 probe when a flow read provides one', () => {
+    expect(slipForSize(20, { slip20: 0.01, ...LADDER })).toBe(0.01);
+  });
+
   it('charges a $20 trade the $50 probe slippage (over-estimate)', () => {
     expect(slipForSize(20, LADDER)).toBe(0.02);
   });
@@ -57,6 +61,19 @@ describe('modelExit — pessimistic SELL, never mid-price', () => {
   it('unknown depth assumes 100% slippage (net ≈ 0), not a favorable fill', () => {
     const f = modelExit(100, 1.0, null, EXIT);
     expect(f.netUsd).toBe(0);
+  });
+
+  it('rejects a negative entry slippage instead of turning stale price data into a favorable fill', () => {
+    const fill = modelEntry(1, -0.02, {
+      sizeUsd: 20,
+      sandwichPct: 0.01,
+      gasUsd: 0.01,
+      buyTaxPct: 0,
+      maxEntrySlipPct: 0.03,
+    });
+
+    expect(fill.entered).toBe(false);
+    expect(fill.reason).toBe('invalid_depth_data');
   });
   it('sell tax reduces proceeds; never negative', () => {
     const taxed = modelExit(100, 1.0, 0.02, { ...EXIT, sellTaxPct: 0.30 });
