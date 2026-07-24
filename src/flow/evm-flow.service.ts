@@ -127,6 +127,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   private factoryTimer: ReturnType<typeof setInterval> | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private factoryBusy = false;
+  private healthBusy = false;
   private evalBusy = false;
   private readonly latestHead = new Map<SupportedChain, bigint>();
   private readonly latestHttpHead = new Map<SupportedChain, bigint>();
@@ -172,12 +173,12 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
     await this.restoreWatches(activeChains);
     for (const chain of activeChains) this.startHeadWatcher(chain);
     const factoryPollMs = Math.max(1_000, this.config.get<number>('evmFlow.factoryPollMs') ?? 3_000);
-    this.factoryTimer = setInterval(() => void this.pollFactories(), factoryPollMs);
+    this.factoryTimer = setInterval(() => void this.runFactoryTick(), factoryPollMs);
     this.healthTimer = setInterval(
-      () => void this.logHealth(),
+      () => void this.runHealthTick(),
       Math.max(5_000, this.config.get<number>('evmFlow.healthLogMs') ?? 30_000),
     );
-    void this.pollFactories();
+    void this.runFactoryTick();
     this.logger.log(
       `EVM flow watcher started: factory=${factoryPollMs}ms strategies=${strategiesFor('FRESH').length + strategiesFor('MATURE').length} ` +
       `streams=${activeChains.map((chain) => `${chain}:${this.streamMode(chain)}`).join(',')} paper-only`,
@@ -275,6 +276,28 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       }
     } finally {
       this.factoryBusy = false;
+    }
+  }
+
+  private async runFactoryTick(): Promise<void> {
+    try {
+      await this.pollFactories();
+    } catch (error) {
+      this.logger.warn(`Flow factory tick failed: ${(error as Error).message}`);
+    }
+  }
+
+  private async runHealthTick(): Promise<void> {
+    if (this.healthBusy) return;
+    this.healthBusy = true;
+    try {
+      await this.logHealth();
+    } catch (error) {
+      const prismaCode = (error as { code?: string }).code;
+      const suffix = prismaCode ? ` (${prismaCode})` : '';
+      this.logger.warn(`Flow health tick failed${suffix}: ${(error as Error).message}`);
+    } finally {
+      this.healthBusy = false;
     }
   }
 
@@ -1442,6 +1465,11 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
             'evm_flow_precision_v2', 'robinhood_flow_precision_v2',
           ] },
         } as any,
+      }).catch((error) => {
+        const prismaCode = (error as { code?: string }).code;
+        const suffix = prismaCode ? ` (${prismaCode})` : '';
+        this.logger.warn(`Flow health open-position count unavailable ${chain}${suffix}: ${(error as Error).message}`);
+        return null;
       });
       let experimentHealth = '';
       if (chain === 'robinhood') {
@@ -1471,7 +1499,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(
         `Flow health ${chain}: head=${http ?? head ?? '?'} lag=${lag} watching=${entryEligibleWatches.length} ` +
         `outcomeTracking=${chainWatches.length} swaps=${this.swapCount.get(chain) ?? 0} invalidSwaps=${this.invalidSwapCount.get(chain) ?? 0} ` +
-        `signals=${this.signalCount.get(chain) ?? 0} open=${open} rpcErrors=${this.rpcFailures.get(chain) ?? 0} ` +
+        `signals=${this.signalCount.get(chain) ?? 0} open=${open ?? '?'} rpcErrors=${this.rpcFailures.get(chain) ?? 0} ` +
         `coverage=${(stats.coverageRatio * 100).toFixed(2)}% unresolved=${unresolvedRanges} eligible=${signalEligible}${experimentHealth}`,
       );
     }

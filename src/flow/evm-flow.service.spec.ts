@@ -73,4 +73,43 @@ describe('EvmFlowService data-plane guards', () => {
       .find((row: any) => row.chain === 'robinhood');
     expect(health.lagBlocks).toBe(1);
   });
+
+  it('keeps the process alive when a health count exhausts the Prisma pool', async () => {
+    const flow = service();
+    const error = Object.assign(new Error('Timed out fetching a new connection from the connection pool.'), {
+      code: 'P2024',
+    });
+    (flow as any).prisma.paperPosition.count.mockRejectedValueOnce(error);
+    const warn = jest.spyOn((flow as any).logger, 'warn').mockImplementation();
+
+    await expect((flow as any).runHealthTick()).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('P2024'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('open-position count unavailable'));
+  });
+
+  it('does not overlap health ticks while the previous database read is running', async () => {
+    const flow = service();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const logHealth = jest.spyOn(flow as any, 'logHealth').mockReturnValue(pending);
+
+    const first = (flow as any).runHealthTick();
+    await (flow as any).runHealthTick();
+    expect(logHealth).toHaveBeenCalledTimes(1);
+
+    release();
+    await first;
+    await (flow as any).runHealthTick();
+    expect(logHealth).toHaveBeenCalledTimes(2);
+  });
+
+  it('contains factory timer failures instead of rejecting from setInterval', async () => {
+    const flow = service();
+    const warn = jest.spyOn((flow as any).logger, 'warn').mockImplementation();
+    jest.spyOn(flow as any, 'pollFactories').mockRejectedValue(new Error('temporary factory RPC failure'));
+
+    await expect((flow as any).runFactoryTick()).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Flow factory tick failed'));
+  });
 });
