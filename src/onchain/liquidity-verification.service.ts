@@ -64,21 +64,6 @@ export class LiquidityVerificationService {
   ) {}
 
   async verify(pool: CandidatePool, gemDecimalsHint?: number): Promise<LiquidityCheckResult> {
-    return this.verifyWithProfile(pool, gemDecimalsHint, 'FULL');
-  }
-
-  async verifyEntrySnapshot(
-    pool: CandidatePool,
-    gemDecimalsHint?: number,
-  ): Promise<LiquidityCheckResult> {
-    return this.verifyWithProfile(pool, gemDecimalsHint, 'ENTRY');
-  }
-
-  private async verifyWithProfile(
-    pool: CandidatePool,
-    gemDecimalsHint: number | undefined,
-    profile: 'FULL' | 'ENTRY',
-  ): Promise<LiquidityCheckResult> {
     const { model, feeBps, probeError } = await this.resolveModel(pool);
 
     if (model !== 'V2' && model !== 'V3' && model !== 'V4') {
@@ -104,12 +89,7 @@ export class LiquidityVerificationService {
         const r = await this.v2.readLiquidity(pool, gemDecimals, feeBps ?? 30);
         return this.buildResult('V2', r.onchainTvlUsd, pool.liquidityUsd, r);
       } else if (model === 'V3') {
-        const r = await this.v3.readLiquidity(
-          pool,
-          gemDecimals,
-          feeBps ?? 3000,
-          profile === 'ENTRY' ? [20, 100] : undefined,
-        );
+        const r = await this.v3.readLiquidity(pool, gemDecimals, feeBps ?? 3000);
         return this.buildResult('V3', r.onchainTvlUsd, pool.liquidityUsd, r);
       } else {
         const r = await this.v4.readLiquidity(pool, gemDecimals);

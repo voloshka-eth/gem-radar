@@ -25,18 +25,4 @@ describe('adaptiveBatchRead', () => {
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].values).toEqual(['bad']);
   });
-
-  it('does not amplify a transient provider failure into one request per value', async () => {
-    const reader = jest.fn().mockRejectedValue(new Error('429 Too Many Requests'));
-    const result = await adaptiveBatchRead(
-      Array.from({ length: 32 }, (_, index) => index),
-      32,
-      reader,
-      (error) => !error.message.includes('429'),
-    );
-
-    expect(reader).toHaveBeenCalledTimes(1);
-    expect(result.failures).toHaveLength(1);
-    expect(result.failures[0].values).toHaveLength(32);
-  });
 });

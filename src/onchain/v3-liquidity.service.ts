@@ -110,7 +110,6 @@ export class V3LiquidityService {
     pool: CandidatePool,
     gemDecimals: number,
     feeBps: number,
-    probeSizesUsd: readonly number[] = PROBE_SIZES_USD,
   ): Promise<V3LiquidityResult> {
     const client = this.viemClients.get(pool.chain);
     if (!client) {
@@ -210,19 +209,13 @@ export class V3LiquidityService {
     // Slippage probes via QuoterV2 quoteExactInputSingle (gem → quote direction)
     const feeUint24 = feeBps; // V3 fee is already in pool units (e.g. 3000 = 0.3%)
     const slippages = await Promise.all(
-      probeSizesUsd.map((sizeUsd) =>
+      PROBE_SIZES_USD.map((sizeUsd) =>
         this.quoteExitSlippage(client, quoterAddr, gemAddr, quoteAddr, feeUint24,
                                sizeUsd, spotPriceUsd, gemDec, quoteDec, quotePriceUsd),
       ),
     );
 
-    const slippageAt = (sizeUsd: number): number | null =>
-      slippages.find((probe) => probe.sizeUsd === sizeUsd)?.slippage ?? null;
-    const exitSlip20 = slippageAt(20);
-    const slip50 = slippageAt(50);
-    const slip100 = slippageAt(100);
-    const slip500 = slippageAt(500);
-    const slip1000 = slippageAt(1000);
+    const [exitSlip20, slip50, slip100, slip500, slip1000] = slippages.map((probe) => probe.slippage);
     const entryProbe20 = await this.quoteSlippage(
       client, quoterAddr, gemAddr, quoteAddr, feeUint24,
       PROBE_SIZES_USD[0], spotPriceUsd, gemDec, quoteDec, quotePriceUsd,
@@ -243,9 +236,9 @@ export class V3LiquidityService {
     }
 
     let executableDepthUsd = 0;
-    for (let i = probeSizesUsd.length - 1; i >= 0; i--) {
+    for (let i = PROBE_SIZES_USD.length - 1; i >= 0; i--) {
       if ((slippages[i]?.slippage ?? 1) < MAX_SLIPPAGE_FOR_DEPTH) {
-        executableDepthUsd = probeSizesUsd[i];
+        executableDepthUsd = PROBE_SIZES_USD[i];
         break;
       }
     }

@@ -2,7 +2,7 @@
 // Adding a field: extend the interface, add an entry to the headers array,
 // bump CSV_SCHEMA_VERSION.  Never reorder existing columns — append only.
 
-export const CSV_SCHEMA_VERSION = '1.11.0'; // Append-only Robinhood execution-friction fields
+export const CSV_SCHEMA_VERSION = '1.10.0'; // Append-only paper entry note
 
 export interface CsvHeader {
   id: string;   // matches the key in the row object
@@ -325,11 +325,6 @@ export interface PaperEntryRow {
   data_health?: string;
   signal_latency_ms?: string;
   note?: string;
-  friction_cohort?: string;
-  buy_impact_pct?: string;
-  sell_impact_pct?: string;
-  quote_age_ms?: string;
-  shared_entry_quote_id?: string;
 }
 
 export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
@@ -390,11 +385,6 @@ export const PAPER_ENTRY_HEADERS: CsvHeader[] = [
   { id: 'data_health', title: 'data_health' },
   { id: 'signal_latency_ms', title: 'signal_latency_ms' },
   { id: 'note', title: 'note' },
-  { id: 'friction_cohort', title: 'friction_cohort' },
-  { id: 'buy_impact_pct', title: 'buy_impact_pct' },
-  { id: 'sell_impact_pct', title: 'sell_impact_pct' },
-  { id: 'quote_age_ms', title: 'quote_age_ms' },
-  { id: 'shared_entry_quote_id', title: 'shared_entry_quote_id' },
 ];
 
 export interface ResearchPaperEntryRow {
@@ -656,11 +646,6 @@ export interface PaperExitRow {
   flow_snapshot?: string;
   data_health?: string;
   signal_latency_ms?: string;
-  friction_cohort?: string;
-  buy_impact_pct?: string;
-  sell_impact_pct?: string;
-  quote_age_ms?: string;
-  shared_entry_quote_id?: string;
 }
 
 export const PAPER_EXIT_HEADERS: CsvHeader[] = [
@@ -703,11 +688,6 @@ export const PAPER_EXIT_HEADERS: CsvHeader[] = [
   { id: 'flow_snapshot', title: 'flow_snapshot' },
   { id: 'data_health', title: 'data_health' },
   { id: 'signal_latency_ms', title: 'signal_latency_ms' },
-  { id: 'friction_cohort', title: 'friction_cohort' },
-  { id: 'buy_impact_pct', title: 'buy_impact_pct' },
-  { id: 'sell_impact_pct', title: 'sell_impact_pct' },
-  { id: 'quote_age_ms', title: 'quote_age_ms' },
-  { id: 'shared_entry_quote_id', title: 'shared_entry_quote_id' },
 ];
 
 // ─── raw/contract_risk_checks.csv ─────────────────────────────────────────────

@@ -43,11 +43,8 @@ export class PaperService {
   async recordEntry(c: CandidateResult): Promise<void> {
     const { pool, token, liq, score, ageDays, tokenId, poolId, runId, buyTax } = c;
     const riskCohort = c.riskCohort ?? 'CONTRACT_SAFE';
-    const legacyShadowAll = this.config.get<boolean>('paper.legacyShadowAll') ?? true;
     const strategyVersion = c.strategyVersion ??
-      (legacyShadowAll || pool.chain === 'ethereum' || pool.chain === 'base'
-        ? 'legacy_static_shadow_v0'
-        : 'legacy_static_v0');
+      (pool.chain === 'ethereum' || pool.chain === 'base' ? 'legacy_static_shadow_v0' : 'legacy_static_v0');
     const exitPolicy = c.exitPolicy ??
       (strategyVersion === 'legacy_static_shadow_v0' ? 'LEGACY_SHADOW' : 'SAFE_LADDER');
     const benchmarkEligible = c.benchmarkEligible ?? strategyVersion !== 'legacy_static_shadow_v0';

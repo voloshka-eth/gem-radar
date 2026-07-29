@@ -13,46 +13,16 @@ import type { ExecutionQuoteResult, LiquidityCheckResult } from '../onchain/onch
 import { modelEntry, modelExit } from '../paper/fills';
 import { RiskEngineService } from '../risk-engine/risk-engine.service';
 import type { ContractRiskResult } from '../risk-engine/risk-engine.types';
-import { BubblemapsService } from '../risk-engine/providers/bubblemaps.service';
-import { FreeHolderConcentrationService } from '../risk-engine/providers/free-holder-concentration.service';
 import { contractHardRiskReason } from './flow-risk';
 import { computeBuyerQualityShadow } from './buyer-quality';
-import { reconcileRobinhoodArm } from './robinhood-experiment-accounting';
 import {
-  evaluateRobinhoodGeckoLaneEligibility,
-  ROBINHOOD_GECKO_LANE_CONFIG,
-  ROBINHOOD_GECKO_LANE_CONFIG_HASH,
-} from './robinhood-gecko-lane';
-import {
-  evaluateRobinhoodEasyProfitEligibility,
-  easyProfitExitRungs,
-  isEasyProfitArmCode,
-  ROBINHOOD_EASY_PROFIT_EXIT_ARMS,
-  ROBINHOOD_EASY_PROFIT_V1_CONFIG,
-  ROBINHOOD_EASY_PROFIT_V1_CONFIG_HASH,
-} from './robinhood-easy-profit-v1';
-import {
-  ROBINHOOD_PAPER_BANKROLL_POLICY,
-  ROBINHOOD_PAPER_BANKROLL_POLICY_HASH,
-  evaluateRobinhoodPaperBankroll,
-  pnlAndDrawdown,
-  utcDayStart,
-  type RobinhoodPaperBankrollDecision,
-} from './robinhood-paper-bankroll';
-import {
-  classifyRobinhoodFriction,
   ROBINHOOD_EXECUTION_SCENARIOS,
   ROBINHOOD_EXPERIMENT_ARMS,
   ROBINHOOD_PAIRED_EXIT_ARMS,
   ROBINHOOD_EXIT_EXPERIMENT_CONFIG,
   ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH,
-  ROBINHOOD_EXIT_EXPERIMENT_LEGACY_CONFIG_HASH,
-  ROBINHOOD_FRICTION_FEATURE_SCHEMA,
-  ROBINHOOD_FRICTION_FEATURE_SCHEMA_HASH,
   ROBINHOOD_FLOW_V3_CONFIG,
   ROBINHOOD_FLOW_V3_CONFIG_HASH,
-  ROBINHOOD_FLOW_V3_LEGACY_CONFIG_HASH,
-  ROBINHOOD_REGISTERED_EXPERIMENT_CONFIG,
   evaluateRobinhoodFlowV3,
 } from './robinhood-flow-v3';
 import type { FlowTrade } from './flow.types';
@@ -75,25 +45,14 @@ interface SafetyAssessment {
   buyTaxPct: number;
   sellTaxPct: number;
   staticSnapshot: Record<string, unknown>;
-  bubblemapsSnapshot: Record<string, unknown> | null;
-  holderConcentrationSnapshot: Record<string, unknown> | null;
 }
 
 @Injectable()
 export class RobinhoodEntryExperimentService {
   private readonly logger = new Logger(RobinhoodEntryExperimentService.name);
   private readonly createAttemptAt = new Map<string, number>();
-  private readonly attemptSnapshots = new Map<string, {
-    observedAt: string;
-    outcome: 'WAIT' | 'CREATED' | 'ACTIVE' | 'TERMINAL';
-    reason: string;
-  }>();
   private readonly dynamicSafetyAt = new Map<string, number>();
   private readonly marketEvaluationAt = new Map<string, number>();
-  private bankrollDecisionCache: {
-    observedAtMs: number;
-    decision: RobinhoodPaperBankrollDecision;
-  } | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -104,39 +63,26 @@ export class RobinhoodEntryExperimentService {
     private readonly deployers: DeployerReputationService,
     private readonly gasModel: GasModelService,
     private readonly files: FileLoggerService,
-    private readonly bubblemaps: BubblemapsService,
-    private readonly freeHolders: FreeHolderConcentrationService,
   ) {}
 
   async handleTick(tick: RobinhoodExperimentTick): Promise<number | null> {
     if (tick.candidate.pool.chain !== 'robinhood' || tick.watchType !== 'FRESH') return null;
     let experiment = await this.findExperiment(tick.watchId);
     if (!experiment) {
-      if (!tick.pipelineHealthy) {
-        this.recordAttempt(tick.watchId, 'WAIT', 'pipeline_unhealthy');
-        return null;
-      }
+      if (!tick.dataHealthy || !tick.pipelineHealthy) return null;
       const lastAttempt = this.createAttemptAt.get(tick.watchId) ?? 0;
-      const attemptCooldownMs = Math.max(
-        10_000,
-        this.config.get<number>('evmFlow.robinhoodExperimentAttemptCooldownMs') ?? 30_000,
-      );
-      if (tick.observedAtMs - lastAttempt < attemptCooldownMs) return null;
+      if (tick.observedAtMs - lastAttempt < 10_000) return null;
       this.createAttemptAt.set(tick.watchId, tick.observedAtMs);
       experiment = await this.tryCreateExperiment(tick);
       if (!experiment) return null;
     }
-    if (!ACTIVE_EXPERIMENT_STATUSES.includes(experiment.status)) {
-      this.recordAttempt(tick.watchId, 'TERMINAL', `experiment_${String(experiment.status).toLowerCase()}`);
-      return null;
-    }
-    this.recordAttempt(tick.watchId, 'ACTIVE', `experiment_${String(experiment.status).toLowerCase()}`);
-    if (![ROBINHOOD_FLOW_V3_CONFIG_HASH, ROBINHOOD_FLOW_V3_LEGACY_CONFIG_HASH].includes(experiment.configHash)) {
+    if (!ACTIVE_EXPERIMENT_STATUSES.includes(experiment.status)) return null;
+    if (experiment.configHash !== ROBINHOOD_FLOW_V3_CONFIG_HASH) {
       await this.invalidateExperiment(experiment, 'frozen_config_hash_mismatch');
       return null;
     }
     if (!tick.pipelineHealthy) {
-      await this.handleUnhealthyPipeline(experiment, tick);
+      await this.invalidateExperiment(experiment, 'unhealthy_paired_signal_period');
       return null;
     }
     await this.processExperiment(experiment, tick);
@@ -144,14 +90,6 @@ export class RobinhoodEntryExperimentService {
     return latest && ACTIVE_EXPERIMENT_STATUSES.includes(latest.status)
       ? latest.horizonAt.getTime()
       : null;
-  }
-
-  getAttemptSnapshot(watchId: string): {
-    observedAt: string;
-    outcome: 'WAIT' | 'CREATED' | 'ACTIVE' | 'TERMINAL';
-    reason: string;
-  } | null {
-    return this.attemptSnapshots.get(watchId) ?? null;
   }
 
   async invalidateReorg(watchId: string, newHead: bigint): Promise<void> {
@@ -162,62 +100,25 @@ export class RobinhoodEntryExperimentService {
 
   private async tryCreateExperiment(tick: RobinhoodExperimentTick): Promise<DbExperiment | null> {
     const maxTickAgeMs = this.config.get<number>('evmFlow.robinhoodExperimentMaxTickAgeMs') ?? 10_000;
-    if (Date.now() - tick.observedAtMs > maxTickAgeMs) {
-      this.recordAttempt(tick.watchId, 'WAIT', 'tick_stale_before_preflight');
-      return null;
-    }
+    if (Date.now() - tick.observedAtMs > maxTickAgeMs) return null;
     const preflightStartedAtMs = Date.now();
     const pool = tick.candidate.pool;
-    if (tick.creatorAttributable && tick.creatorAddress) {
-      const serial = await this.serialDeployerBlockReason(tick.creatorAddress);
-      if (serial) {
-        this.recordAttempt(tick.watchId, 'WAIT', serial);
-        return null;
-      }
-    }
-
-    // The venue read already contains exact $20 bidirectional impact and the
-    // complete depth matrix. Reusing that snapshot avoids duplicate quote paths.
-    const liq = await this.liquidity.verifyEntrySnapshot(pool, tick.gemDecimals);
-    const quoteObservedAt = new Date(preflightStartedAtMs);
-    const buyQuote = this.quoteFromLiquidity(liq, 'BUY', quoteObservedAt);
-    const sellQuote = this.quoteFromLiquidity(liq, 'SELL', quoteObservedAt);
-    const marketPreflight = this.t0MarketRejectReason(liq, buyQuote, sellQuote);
-    if (marketPreflight) {
-      this.recordAttempt(tick.watchId, 'WAIT', marketPreflight);
-      this.logger.debug(
-        `Robinhood v3 t0 waiting ${tick.candidate.token.tokenAddress}: ${marketPreflight}`,
-      );
-      return null;
-    }
-
-    // Safety and accounting are only queried after the route is executable.
-    const [safety, gasUsd, bankrollDecision] = await Promise.all([
+    const [liq, buyQuote, sellQuote, safety, gasUsd] = await Promise.all([
+      this.liquidity.verify(pool, tick.gemDecimals),
+      this.liquidity.quoteTrade(pool, 20, 'BUY', tick.gemDecimals),
+      this.liquidity.quoteTrade(pool, 20, 'SELL', tick.gemDecimals),
       this.assessSafety(tick),
       this.gasModel.estimateUsd('robinhood', tick.liquidityModel),
-      this.paperBankrollDecision(preflightStartedAtMs),
     ]);
-    const preflight = safety.hardReason;
+    const preflight = await this.t0RejectReason(tick, liq, buyQuote, sellQuote, safety);
     if (preflight) {
-      this.recordAttempt(tick.watchId, 'WAIT', preflight);
       this.logger.debug(
         `Robinhood v3 t0 waiting ${tick.candidate.token.tokenAddress}: ${preflight}`,
       );
       return null;
     }
     const t0Ms = Date.now();
-    const quoteAgeMs = Math.max(
-      0,
-      t0Ms - Math.min(buyQuote.observedAt.getTime(), sellQuote.observedAt.getTime()),
-    );
-    if (quoteAgeMs > (ROBINHOOD_FLOW_V3_CONFIG.maxQuoteAgeMs ?? 5_000)) {
-      this.recordAttempt(tick.watchId, 'WAIT', `t0_quote_stale:${quoteAgeMs}ms`);
-      return null;
-    }
     if (!tick.pipelineHealthy || t0Ms - tick.observedAtMs > maxTickAgeMs) {
-      this.recordAttempt(tick.watchId, 'WAIT', !tick.pipelineHealthy
-        ? 'pipeline_unhealthy_after_preflight'
-        : 'tick_stale_after_preflight');
       this.logger.warn(
         `Robinhood v3 preflight stale ${tick.candidate.token.tokenAddress}: ` +
         `age=${t0Ms - tick.observedAtMs}ms preflight=${t0Ms - preflightStartedAtMs}ms`,
@@ -232,124 +133,19 @@ export class RobinhoodEntryExperimentService {
       buyTaxPct: safety.buyTaxPct,
       maxEntrySlipPct: ROBINHOOD_FLOW_V3_CONFIG.maxEntrySlippagePct,
     });
-    if (!entry.entered || entry.tokensBought == null) {
-      this.recordAttempt(tick.watchId, 'WAIT', entry.reason ?? 'entry_model_failed');
-      return null;
-    }
+    if (!entry.entered || entry.tokensBought == null) return null;
     const exit = modelExit(entry.tokensBought, sellQuote.spotPriceUsd!, sellQuote.slippagePct, {
       sandwichPct,
       gasUsd,
       sellTaxPct: safety.sellTaxPct,
     });
     const roundTrip = exit.netUsd / 20;
-    if (roundTrip < ROBINHOOD_FLOW_V3_CONFIG.minZeroMoveRoundTrip) {
-      this.recordAttempt(tick.watchId, 'WAIT', 'round_trip_below_0_8x');
-      return null;
-    }
-    const executionFrictionCohort =
-      buyQuote.slippagePct! <= (ROBINHOOD_FLOW_V3_CONFIG.primaryMaxEntrySlippagePct ?? 0.01) &&
-      sellQuote.slippagePct! <= (ROBINHOOD_FLOW_V3_CONFIG.primaryMaxSellSlippagePct ?? 0.01)
-        ? 'LOW_FRICTION_PRIMARY'
-        : 'HIGH_FRICTION_SHADOW';
-    const frictionCohort =
-      executionFrictionCohort === 'LOW_FRICTION_PRIMARY' && !bankrollDecision.eligible
-        ? 'BANKROLL_LIMIT_SHADOW'
-        : executionFrictionCohort;
-    const bankrollEligible =
-      executionFrictionCohort === 'LOW_FRICTION_PRIMARY' &&
-      tick.dataHealthy &&
-      bankrollDecision.eligible;
-    const bankrollReasons =
-      executionFrictionCohort === 'HIGH_FRICTION_SHADOW'
-        ? ['high_friction_shadow']
-        : tick.dataHealthy
-          ? bankrollDecision.reasons
-          : ['flow_snapshot_stale_at_t0', ...bankrollDecision.reasons];
-    const frictionDetailCohort = classifyRobinhoodFriction(
-      buyQuote.slippagePct!,
-      sellQuote.slippagePct!,
-    );
-    const discoverySource = tick.candidate.pool.source || tick.candidate.token.source || 'unknown';
-    const geckoLane = evaluateRobinhoodGeckoLaneEligibility({
-      discoverySource,
-      frictionCohort: executionFrictionCohort,
-      bankrollEligible: bankrollDecision.eligible,
-      bankrollReasons: bankrollDecision.reasons,
-    });
-    const easyProfit = evaluateRobinhoodEasyProfitEligibility({
-      buyImpactPct: buyQuote.slippagePct!,
-      sellImpactPct: sellQuote.slippagePct!,
-      roundTripMultiple: roundTrip,
-      dataHealthy: tick.dataHealthy,
-      trades: tick.trades,
-      nowMs: t0Ms,
-    });
-    const sharedEntryQuoteId = `${tick.watchId}:${tick.latestBlock.toString()}:${t0Ms}`;
+    if (roundTrip < ROBINHOOD_FLOW_V3_CONFIG.minZeroMoveRoundTrip) return null;
 
     const t0At = new Date(t0Ms);
-    const v1SignalEligible =
-      executionFrictionCohort === 'LOW_FRICTION_PRIMARY' && tick.dataHealthy;
-    const armDefinitions = [
-      ...ROBINHOOD_EXPERIMENT_ARMS,
-      ...ROBINHOOD_PAIRED_EXIT_ARMS,
-      ...(easyProfit.eligible ? ROBINHOOD_EASY_PROFIT_EXIT_ARMS : []),
-    ];
-    const arms = armDefinitions.flatMap((arm) =>
+    const arms = [...ROBINHOOD_EXPERIMENT_ARMS, ...ROBINHOOD_PAIRED_EXIT_ARMS].flatMap((arm) =>
       ROBINHOOD_EXECUTION_SCENARIOS.map((scenario) => {
         const legType = arm.immediateUsd > 0 ? 'IMMEDIATE_BUY' : 'PROBE_BUY';
-        const easyArm = isEasyProfitArmCode(arm.code);
-        const observedPairedFill =
-          this.isPairedExitArmCode(arm.code) &&
-          scenario.code === 'OBSERVED_ENTRY' &&
-          arm.immediateUsd > 0;
-        const stateJson = {
-          lastCapitalAtMs: t0Ms, flowExitScheduled: false,
-          frictionCohort,
-          frictionDetailCohort,
-          frictionFeatureVersion: ROBINHOOD_FRICTION_FEATURE_SCHEMA.version,
-          frictionFeatureHash: ROBINHOOD_FRICTION_FEATURE_SCHEMA_HASH,
-          frictionQuoteModel: ROBINHOOD_FRICTION_FEATURE_SCHEMA.quoteModel,
-          bankrollPolicyVersion: ROBINHOOD_PAPER_BANKROLL_POLICY.version,
-          bankrollPolicyHash: ROBINHOOD_PAPER_BANKROLL_POLICY_HASH,
-          bankrollEligible,
-          bankrollReasons,
-          flowFreshAtT0: tick.dataHealthy,
-          v1SignalEligible,
-          geckoLaneVersion: ROBINHOOD_GECKO_LANE_CONFIG.version,
-          geckoLaneHash: ROBINHOOD_GECKO_LANE_CONFIG_HASH,
-          geckoLaneSignalEligible: geckoLane.signalEligible,
-          geckoLaneBankrollEligible: geckoLane.bankrollEligible,
-          geckoLaneReasons: geckoLane.reasons,
-          easyProfitVersion: ROBINHOOD_EASY_PROFIT_V1_CONFIG.version,
-          easyProfitHash: ROBINHOOD_EASY_PROFIT_V1_CONFIG_HASH,
-          easyProfitEligible: easyProfit.eligible,
-          easyProfitReasons: easyProfit.reasons,
-          easyProfitBuyUsd: easyProfit.buyUsd,
-          easyProfitSellUsd: easyProfit.sellUsd,
-          easyProfitBuyToSellRatio: easyProfit.buyToSellRatio,
-          discoverySource,
-          sharedEntryQuoteId,
-          ...(observedPairedFill ? {
-            observedSignalLatencyMs: 0,
-            observedEntryLatenessMs: 0,
-            quoteAgeMs,
-            executionTimingEligible: true,
-            benchmarkEntryEligible: easyArm ? false : v1SignalEligible,
-            atomicT0Fill: true,
-          } : {}),
-          ...(easyArm
-            ? {
-                experimentType: 'EASY_PROFIT_EXIT',
-                exitConfigHash: ROBINHOOD_EASY_PROFIT_V1_CONFIG_HASH,
-                easyProfitHorizonMs: ROBINHOOD_EASY_PROFIT_V1_CONFIG.horizonMs,
-                easyProfitHardStopMultiple: ROBINHOOD_EASY_PROFIT_V1_CONFIG.hardStopMultiple,
-                easyProfitSoftTargetMultiple: ROBINHOOD_EASY_PROFIT_V1_CONFIG.softTargetMultiple,
-                easyProfitSoftTargetDeadlineMs: ROBINHOOD_EASY_PROFIT_V1_CONFIG.softTargetDeadlineMs,
-              }
-            : this.isPairedExitArmCode(arm.code)
-              ? { experimentType: 'PAIRED_EXIT', exitConfigHash: ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH }
-              : { experimentType: 'ENTRY' }),
-        };
         return {
           armCode: arm.code,
           scenarioCode: scenario.code,
@@ -361,36 +157,21 @@ export class RobinhoodEntryExperimentService {
           stressScenario: scenario.stress,
           immediateUsd: arm.immediateUsd,
           addUsd: arm.addUsd,
-          status: observedPairedFill ? 'OPEN' : arm.immediateUsd > 0 ? 'PENDING_ENTRY' : 'WAITING_CONFIRMATION',
-          stateJson,
-          ...(observedPairedFill ? {
-            committedUsd: arm.immediateUsd,
-            tokensBought: entry.tokensBought!,
-            remainingTokens: entry.tokensBought!,
-            gasSpentUsd: gasUsd,
-            blendedCostBasisUsd: arm.immediateUsd / entry.tokensBought!,
-            openedAt: t0At,
-          } : {}),
+          status: arm.immediateUsd > 0 ? 'PENDING_ENTRY' : 'WAITING_CONFIRMATION',
+          stateJson: {
+            lastCapitalAtMs: t0Ms, flowExitScheduled: false,
+            ...(this.isPairedExitArmCode(arm.code)
+              ? { experimentType: 'PAIRED_EXIT', exitConfigHash: ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH }
+              : { experimentType: 'ENTRY' }),
+          },
           ...(arm.immediateUsd > 0 ? {
             legs: { create: [{
               sequence: 1,
               legType,
-              status: observedPairedFill ? 'FILLED' : 'PENDING',
+              status: 'PENDING',
               intendedAt: t0At,
               targetAt: new Date(t0Ms + scenario.latencyMs),
               notionalUsd: arm.immediateUsd,
-              ...(observedPairedFill ? {
-                executedAt: t0At,
-                blockNumber: tick.latestBlock.toString(),
-                tokenAmount: entry.tokensBought!,
-                spotPriceUsd: buyQuote.spotPriceUsd,
-                effectivePriceUsd: entry.effectivePriceUsd,
-                slippagePct: buyQuote.slippagePct,
-                gasUsd,
-                taxPct: safety.buyTaxPct,
-                netUsd: -arm.immediateUsd,
-                quoteSnapshot: buyQuote as unknown as Prisma.InputJsonValue,
-              } : {}),
             }] },
           } : {}),
         };
@@ -402,8 +183,6 @@ export class RobinhoodEntryExperimentService {
       rejectReasons: safety.risk.rejectReasons,
       merged: safety.risk.merged,
       static: safety.staticSnapshot,
-      holderConcentration: safety.holderConcentrationSnapshot,
-      bubblemaps: safety.bubblemapsSnapshot,
       buyQuote,
       sellQuote,
       gasUsd,
@@ -417,51 +196,19 @@ export class RobinhoodEntryExperimentService {
         liquidityModel: tick.liquidityModel,
         configVersion: ROBINHOOD_FLOW_V3_CONFIG.version,
         configHash: ROBINHOOD_FLOW_V3_CONFIG_HASH,
-        configJson: ROBINHOOD_REGISTERED_EXPERIMENT_CONFIG as unknown as Prisma.InputJsonValue,
+        configJson: ROBINHOOD_FLOW_V3_CONFIG as unknown as Prisma.InputJsonValue,
         t0At,
         horizonAt: new Date(t0Ms + ROBINHOOD_FLOW_V3_CONFIG.horizonMs),
         t0Block: tick.latestBlock.toString(),
         t0SpotPriceUsd: buyQuote.spotPriceUsd,
         t0DepthUsd: liq.executableDepthUsd,
         t0RoundTripMultiple: roundTrip,
-        frictionCohort,
-        t0BuyImpactPct: buyQuote.slippagePct,
-        t0SellImpactPct: sellQuote.slippagePct,
-        t0QuoteAgeMs: quoteAgeMs,
-        sharedEntryQuoteId,
         riskSnapshot: riskSnapshot as unknown as Prisma.InputJsonValue,
         dataHealthSnapshot: {
           ...tick.dataHealth,
           sourceTickAt: new Date(tick.observedAtMs).toISOString(),
           preflightLatencyMs: t0Ms - preflightStartedAtMs,
-          frictionDetailCohort,
-          frictionFeatureVersion: ROBINHOOD_FRICTION_FEATURE_SCHEMA.version,
-          frictionFeatureHash: ROBINHOOD_FRICTION_FEATURE_SCHEMA_HASH,
-          frictionQuoteModel: ROBINHOOD_FRICTION_FEATURE_SCHEMA.quoteModel,
-          bankrollPolicyVersion: ROBINHOOD_PAPER_BANKROLL_POLICY.version,
-          bankrollPolicyHash: ROBINHOOD_PAPER_BANKROLL_POLICY_HASH,
-          bankrollEligible,
-          bankrollReasons,
-          bankrollSnapshot: bankrollDecision.snapshot,
-          flowFreshAtT0: tick.dataHealthy,
-          v1SignalEligible:
-            executionFrictionCohort === 'LOW_FRICTION_PRIMARY' && tick.dataHealthy,
-          geckoLaneVersion: ROBINHOOD_GECKO_LANE_CONFIG.version,
-          geckoLaneHash: ROBINHOOD_GECKO_LANE_CONFIG_HASH,
-          geckoLaneSignalEligible: geckoLane.signalEligible,
-          geckoLaneBankrollEligible: geckoLane.bankrollEligible,
-          geckoLaneReasons: geckoLane.reasons,
-          easyProfitVersion: ROBINHOOD_EASY_PROFIT_V1_CONFIG.version,
-          easyProfitHash: ROBINHOOD_EASY_PROFIT_V1_CONFIG_HASH,
-          easyProfitEligible: easyProfit.eligible,
-          easyProfitReasons: easyProfit.reasons,
-          easyProfitBuyUsd: easyProfit.buyUsd,
-          easyProfitSellUsd: easyProfit.sellUsd,
-          easyProfitBuyToSellRatio: easyProfit.buyToSellRatio,
-          discoverySource,
-          tokenDiscoverySource: tick.candidate.token.source ?? null,
-          poolDiscoverySource: tick.candidate.pool.source ?? null,
-        } as unknown as Prisma.InputJsonValue,
+        } as Prisma.InputJsonValue,
         v2ShadowDecision: tick.v2ShadowDecision?.triggered ? 'TRIGGERED' : 'NOT_TRIGGERED',
         v2ShadowSnapshot: (tick.v2ShadowDecision ?? {}) as unknown as Prisma.InputJsonValue,
         arms: { create: arms },
@@ -471,139 +218,9 @@ export class RobinhoodEntryExperimentService {
     this.logger.log(
       `ROBINHOOD EXPERIMENT t0 ${tick.candidate.token.tokenAddress} ` +
       `depth=$${Number(liq.executableDepthUsd).toFixed(0)} roundTrip=${roundTrip.toFixed(3)} ` +
-      `cohort=${frictionCohort}/${frictionDetailCohort} source=${discoverySource} ` +
-        `easy=${easyProfit.eligible ? 'yes' : 'no'} arms=${arms.length} ` +
-        `config=${ROBINHOOD_FLOW_V3_CONFIG_HASH.slice(0, 12)}`,
+      `arms=${arms.length} config=${ROBINHOOD_FLOW_V3_CONFIG_HASH.slice(0, 12)}`,
     );
-    if (Array.isArray(created.arms)) {
-      for (const arm of created.arms as DbArm[]) {
-        const leg = (arm.legs as DbLeg[]).find((item) =>
-          item.status === 'FILLED' && item.legType === 'IMMEDIATE_BUY',
-        );
-        if (!leg || !this.isPairedExitArmCode(String(arm.armCode))) continue;
-        this.logEntry(
-          { ...arm, experiment: created },
-          leg,
-          tick,
-          buyQuote,
-          entry,
-          gasUsd,
-          safety.buyTaxPct,
-          null,
-          t0At,
-        );
-      }
-    }
-    this.recordAttempt(tick.watchId, 'CREATED', frictionCohort.toLowerCase());
-    this.bankrollDecisionCache = null;
     return created;
-  }
-
-  private async paperBankrollDecision(nowMs: number): Promise<RobinhoodPaperBankrollDecision> {
-    if (
-      this.bankrollDecisionCache != null &&
-      nowMs - this.bankrollDecisionCache.observedAtMs <= 2_000
-    ) {
-      return this.bankrollDecisionCache.decision;
-    }
-    const dayStart = utcDayStart(nowMs);
-    try {
-      const [activeSignals, newSignalsToday, closedArms] = await Promise.all([
-        (this.prisma as any).robinhoodEntryExperiment.count({
-          where: {
-            frictionCohort: 'LOW_FRICTION_PRIMARY',
-            invalidReason: null,
-            status: { in: [...ACTIVE_EXPERIMENT_STATUSES] },
-            arms: {
-              some: {
-                armCode: 'EXIT_A_FULL_2X',
-                scenarioCode: 'OBSERVED_ENTRY',
-                stateJson: {
-                  path: ['exitConfigHash'],
-                  equals: ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH,
-                },
-              },
-            },
-          },
-        }),
-        (this.prisma as any).robinhoodEntryExperiment.count({
-          where: {
-            frictionCohort: 'LOW_FRICTION_PRIMARY',
-            invalidReason: null,
-            t0At: { gte: dayStart },
-            arms: {
-              some: {
-                armCode: 'EXIT_A_FULL_2X',
-                scenarioCode: 'OBSERVED_ENTRY',
-                stateJson: {
-                  path: ['exitConfigHash'],
-                  equals: ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH,
-                },
-              },
-            },
-          },
-        }),
-        (this.prisma as any).robinhoodExperimentArm.findMany({
-          where: {
-            armCode: 'EXIT_A_FULL_2X',
-            scenarioCode: 'OBSERVED_ENTRY',
-            status: 'CLOSED',
-            closedAt: { gte: dayStart },
-            stateJson: {
-              path: ['exitConfigHash'],
-              equals: ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH,
-            },
-            experiment: {
-              is: {
-                frictionCohort: 'LOW_FRICTION_PRIMARY',
-                invalidReason: null,
-              },
-            },
-          },
-          include: { legs: true },
-          orderBy: { closedAt: 'asc' },
-        }),
-      ]);
-      const realized = (closedArms as DbArm[]).map((arm) => {
-        const accounting = reconcileRobinhoodArm(arm);
-        return accounting.exitProceedsUsd - accounting.entryAndFailedCostsUsd;
-      });
-      const economics = pnlAndDrawdown(realized);
-      const decision = evaluateRobinhoodPaperBankroll({
-        activeSignals,
-        activeExposureUsd: activeSignals * ROBINHOOD_PAPER_BANKROLL_POLICY.positionUsd,
-        newSignalsToday,
-        realizedPnlTodayUsd: economics.realizedPnlUsd,
-        intradayDrawdownUsd: economics.drawdownUsd,
-      });
-      this.bankrollDecisionCache = { observedAtMs: nowMs, decision };
-      return decision;
-    } catch (error) {
-      this.logger.warn(`Robinhood bankroll snapshot unavailable: ${(error as Error).message}`);
-      return {
-        eligible: false,
-        reasons: ['bankroll_state_unavailable'],
-        snapshot: {
-          activeSignals: 0,
-          activeExposureUsd: 0,
-          newSignalsToday: 0,
-          realizedPnlTodayUsd: 0,
-          intradayDrawdownUsd: 0,
-        },
-      };
-    }
-  }
-
-  private recordAttempt(
-    watchId: string,
-    outcome: 'WAIT' | 'CREATED' | 'ACTIVE' | 'TERMINAL',
-    reason: string,
-  ): void {
-    this.attemptSnapshots.set(watchId, {
-      observedAt: new Date().toISOString(),
-      outcome,
-      reason,
-    });
   }
 
   private async processExperiment(experiment: DbExperiment, tick: RobinhoodExperimentTick): Promise<void> {
@@ -646,82 +263,6 @@ export class RobinhoodEntryExperimentService {
     if (!current) return;
     await this.executeDueLegs(current, tick);
     await this.resolveIfComplete(current, tick.observedAtMs);
-  }
-
-  private async handleUnhealthyPipeline(
-    experiment: DbExperiment,
-    tick: RobinhoodExperimentTick,
-  ): Promise<void> {
-    let current = await this.findExperiment(experiment.watchId);
-    if (!current) return;
-    // Preserve deterministic execution legs that only need a quote snapshot.
-    await this.executeDueLegs(current, tick);
-    current = await this.findExperiment(experiment.watchId);
-    if (!current || current.status === 'INVALIDATED') return;
-
-    const now = new Date(tick.observedAtMs);
-    const previousHealth = (current.dataHealthSnapshot ?? {}) as Record<string, unknown>;
-    const previousCount = Number(previousHealth.unhealthyTickCount ?? 0);
-    const unhealthySince = typeof previousHealth.unhealthySince === 'string'
-      ? previousHealth.unhealthySince
-      : now.toISOString();
-    const dataHealthSnapshot = {
-      ...previousHealth,
-      ...tick.dataHealth,
-      lastPipelineHealthy: false,
-      unhealthyTickCount: previousCount + 1,
-      unhealthySince,
-      lastPipelineUnhealthyAt: now.toISOString(),
-      lastUnhealthyReason: 'coverage_or_backfill_gap',
-    } as Prisma.InputJsonValue;
-
-    if (
-      current.confirmationStatus === 'PENDING' &&
-      tick.observedAtMs - current.t0At.getTime() > ROBINHOOD_FLOW_V3_CONFIG.confirmationEndMs
-    ) {
-      await (this.prisma as any).robinhoodEntryExperiment.update({
-        where: { id: current.id },
-        data: {
-          status: 'EXPIRED',
-          confirmationStatus: 'EXPIRED',
-          confirmationAt: now,
-          confirmationBlock: tick.latestBlock.toString(),
-          classifierReferenceStatus: 'UNAVAILABLE',
-          classifierResolvedAt: now,
-          resolutionReason: 'pipeline_unhealthy_confirmation_timeout',
-          dataHealthSnapshot,
-        },
-      });
-      await this.expireUnconfirmedArms(current, tick);
-      const expired = await this.findExperiment(experiment.watchId);
-      if (expired) await this.resolveIfComplete(expired, tick.observedAtMs);
-      this.recordAttempt(tick.watchId, 'ACTIVE', 'pipeline_unhealthy_confirmation_timeout');
-      return;
-    }
-
-    if (
-      tick.observedAtMs >= current.horizonAt.getTime() &&
-      current.classifierReferenceStatus === 'PENDING'
-    ) {
-      await (this.prisma as any).robinhoodEntryExperiment.update({
-        where: { id: current.id },
-        data: {
-          classifierReferenceStatus: 'UNAVAILABLE',
-          classifierResolvedAt: now,
-          dataHealthSnapshot,
-        },
-      });
-      const latest = await this.findExperiment(experiment.watchId);
-      if (latest) await this.resolveIfComplete(latest, tick.observedAtMs);
-      this.recordAttempt(tick.watchId, 'ACTIVE', 'pipeline_unhealthy_classifier_unavailable');
-      return;
-    }
-
-    await (this.prisma as any).robinhoodEntryExperiment.update({
-      where: { id: current.id },
-      data: { dataHealthSnapshot },
-    });
-    this.recordAttempt(tick.watchId, 'ACTIVE', 'pipeline_unhealthy_degraded');
   }
 
   private async evaluateConfirmation(
@@ -900,11 +441,7 @@ export class RobinhoodEntryExperimentService {
       );
       return;
     }
-    const lowFrictionExperiment = arm.experiment?.configHash === ROBINHOOD_FLOW_V3_CONFIG_HASH;
-    const paidArmAllowed =
-      arm.armCode === 'C_CONFIRM_20' ||
-      (lowFrictionExperiment && this.isPairedExitArmCode(String(arm.armCode)));
-    if (sizeUsd > 0 && !paidArmAllowed) {
+    if (sizeUsd > 0 && arm.armCode !== 'C_CONFIRM_20') {
       const reason = `non_confirmation_paid_arm:${arm.armCode}`;
       await (this.prisma as any).robinhoodExperimentLeg.update({
         where: { id: leg.id }, data: {
@@ -921,7 +458,6 @@ export class RobinhoodEntryExperimentService {
     }
     const quote = await this.cachedQuote(quotes, tick, sizeUsd, 'BUY');
     const executedAt = quote.observedAt;
-    const quoteAgeMs = Math.max(0, nowMs - quote.observedAt.getTime());
     const gasUsd = gasBase * Number(arm.gasMultiplier);
     const risk = arm.experiment.riskSnapshot as any;
     const buyTaxPct = this.taxFraction(risk?.merged?.buyTax);
@@ -932,9 +468,8 @@ export class RobinhoodEntryExperimentService {
       buyTaxPct,
       maxEntrySlipPct: ROBINHOOD_FLOW_V3_CONFIG.maxEntrySlippagePct,
     });
-    const quoteFresh = quoteAgeMs <= (ROBINHOOD_FLOW_V3_CONFIG.maxQuoteAgeMs ?? 5_000);
-    if (!quoteFresh || !quote.executable || !fill.entered || fill.tokensBought == null || fill.effectivePriceUsd == null) {
-      const reason = !quoteFresh ? `quote_stale:${quoteAgeMs}ms` : quote.error ?? fill.reason ?? 'delayed_quote_failed';
+    if (!quote.executable || !fill.entered || fill.tokensBought == null || fill.effectivePriceUsd == null) {
+      const reason = quote.error ?? fill.reason ?? 'delayed_quote_failed';
       const noTrade = Number(arm.tokensBought) <= 0 &&
         (leg.legType === 'CONFIRM_ADD' || leg.legType === 'IMMEDIATE_BUY');
       await (this.prisma as any).$transaction([
@@ -961,18 +496,6 @@ export class RobinhoodEntryExperimentService {
     const previousTokens = Number(arm.tokensBought);
     const totalTokens = previousTokens + tokensBought;
     const committedUsd = Number(arm.committedUsd) + sizeUsd;
-    const observedEntryLatenessMs = Math.max(0, executedAt.getTime() - leg.targetAt.getTime());
-    const frictionCohort =
-      arm.experiment.frictionCohort === 'LOW_FRICTION_PRIMARY' &&
-      (quote.slippagePct ?? Number.POSITIVE_INFINITY) <=
-        (ROBINHOOD_FLOW_V3_CONFIG.primaryMaxEntrySlippagePct ?? 0.01)
-        ? 'LOW_FRICTION_PRIMARY'
-        : 'HIGH_FRICTION_SHADOW';
-    const executionTimingEligible =
-      observedEntryLatenessMs <= ROBINHOOD_EXIT_EXPERIMENT_CONFIG.maxBenchmarkEntryLatencyMs;
-    const persistedV1Eligibility =
-      ((arm.stateJson ?? {}) as Record<string, unknown>).v1SignalEligible;
-    const v1SignalEligible = persistedV1Eligibility !== false;
     await (this.prisma as any).$transaction([
       (this.prisma as any).robinhoodExperimentLeg.update({
         where: { id: leg.id }, data: {
@@ -995,14 +518,10 @@ export class RobinhoodEntryExperimentService {
           stateJson: {
             ...((arm.stateJson ?? {}) as Record<string, unknown>),
             observedSignalLatencyMs: Math.max(0, executedAt.getTime() - arm.experiment.t0At.getTime()),
-            observedEntryLatenessMs,
-            quoteAgeMs,
-            frictionCohort,
-            executionTimingEligible,
+            observedEntryLatenessMs: Math.max(0, executedAt.getTime() - leg.targetAt.getTime()),
             benchmarkEntryEligible:
-              executionTimingEligible &&
-              frictionCohort === 'LOW_FRICTION_PRIMARY' &&
-              v1SignalEligible,
+              executedAt.getTime() - leg.targetAt.getTime() <=
+              ROBINHOOD_EXIT_EXPERIMENT_CONFIG.maxBenchmarkEntryLatencyMs,
           } as Prisma.InputJsonValue,
         },
       }),
@@ -1042,11 +561,6 @@ export class RobinhoodEntryExperimentService {
     const sellTaxPct = this.taxFraction(risk?.merged?.sellTax);
     if (!quote.executable || !(quote.spotPriceUsd && quote.spotPriceUsd > 0)) {
       const reason = quote.error ?? 'sell_quote_failed';
-      const terminalFailure = leg.legType === 'TIME_SELL';
-      const committedAfterGas = Number(arm.committedUsd) + gasUsd;
-      const terminalMultiple = committedAfterGas > 0
-        ? Number(arm.realizedValueUsd) / committedAfterGas
-        : 0;
       await (this.prisma as any).$transaction([
         (this.prisma as any).robinhoodExperimentLeg.update({
           where: { id: leg.id }, data: {
@@ -1058,31 +572,10 @@ export class RobinhoodEntryExperimentService {
         (this.prisma as any).robinhoodExperimentArm.update({
           where: { id: arm.id }, data: {
             committedUsd: { increment: gasUsd }, gasSpentUsd: { increment: gasUsd },
-            status: terminalFailure ? 'CLOSED' : undefined,
-            remainingTokens: terminalFailure ? 0 : undefined,
-            realizedMultiple: terminalFailure ? terminalMultiple : undefined,
-            closedAt: terminalFailure ? executedAt : undefined,
-            outcomeClass: terminalFailure ? 'UNSELLABLE' : undefined,
-            stateJson: terminalFailure ? {
-              ...((arm.stateJson ?? {}) as Record<string, unknown>),
-              terminalResidualMarkedZero: true,
-              terminalSellFailure: reason,
-            } as Prisma.InputJsonValue : undefined,
           },
         }),
       ]);
-      this.logExit(
-        arm,
-        leg,
-        tick,
-        quote,
-        0,
-        gasUsd,
-        sellTaxPct,
-        reason,
-        terminalFailure ? 'UNSELLABLE' : null,
-        executedAt,
-      );
+      this.logExit(arm, leg, tick, quote, 0, gasUsd, sellTaxPct, reason, null, executedAt);
       return;
     }
     const fill = modelExit(tokensToSell, quote.spotPriceUsd, quote.slippagePct, {
@@ -1090,54 +583,6 @@ export class RobinhoodEntryExperimentService {
       gasUsd,
       sellTaxPct,
     });
-    const triggerSnapshot = (leg.quoteSnapshot ?? {}) as Record<string, any>;
-    const executionGuard = triggerSnapshot.executionGuard as Record<string, any> | undefined;
-    const minimumNetUsd = Number(executionGuard?.minimumNetUsd);
-    if (
-      leg.legType === 'LADDER_SELL' &&
-      (
-        executionGuard?.configHash === ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH ||
-        executionGuard?.configHash === ROBINHOOD_EASY_PROFIT_V1_CONFIG_HASH
-      ) &&
-      Number.isFinite(minimumNetUsd) &&
-      minimumNetUsd > 0 &&
-      fill.netUsd + 1e-9 < minimumNetUsd
-    ) {
-      const reason = `min_out_violated:${fill.netUsd.toFixed(6)}<${minimumNetUsd.toFixed(6)}`;
-      await (this.prisma as any).$transaction([
-        (this.prisma as any).robinhoodExperimentLeg.update({
-          where: { id: leg.id }, data: {
-            status: 'FAILED', executedAt, blockNumber: tick.latestBlock.toString(),
-            tokenAmount: tokensToSell, notionalUsd: grossUsd, spotPriceUsd: quote.spotPriceUsd,
-            effectivePriceUsd: tokensToSell > 0 ? fill.netUsd / tokensToSell : null,
-            slippagePct: quote.slippagePct, gasUsd, taxPct: sellTaxPct, netUsd: null,
-            failureReason: reason,
-            quoteSnapshot: {
-              ...triggerSnapshot,
-              executionQuote: quote,
-              executionNetUsd: fill.netUsd,
-            } as unknown as Prisma.InputJsonValue,
-          },
-        }),
-        (this.prisma as any).robinhoodExperimentArm.update({
-          where: { id: arm.id }, data: {
-            committedUsd: { increment: gasUsd },
-            gasSpentUsd: { increment: gasUsd },
-            stateJson: {
-              ...((arm.stateJson ?? {}) as Record<string, unknown>),
-              lastMinOutFailure: {
-                at: executedAt.toISOString(),
-                rungMultiple: executionGuard.rungMultiple,
-                minimumNetUsd,
-                executableNetUsd: fill.netUsd,
-              },
-            } as Prisma.InputJsonValue,
-          },
-        }),
-      ]);
-      this.logExit(arm, leg, tick, quote, 0, gasUsd, sellTaxPct, reason, null, executedAt);
-      return;
-    }
     const remainingTokens = Math.max(0, Number(arm.remainingTokens) - tokensToSell);
     const realizedValueUsd = Number(arm.realizedValueUsd) + fill.netUsd;
     const committedUsd = Number(arm.committedUsd);
@@ -1183,9 +628,7 @@ export class RobinhoodEntryExperimentService {
     tick: RobinhoodExperimentTick,
     liq: LiquidityCheckResult,
   ): Promise<void> {
-    const marketReadable = Boolean(
-      liq.liquidityVerified && liq.spotPriceUsd && liq.spotPriceUsd > 0,
-    );
+    if (!(liq.liquidityVerified && liq.spotPriceUsd && liq.spotPriceUsd > 0)) return;
     const quoteCache = new Map<string, Promise<ExecutionQuoteResult>>();
     for (const arm of experiment.arms as DbArm[]) {
       if (!ACTIVE_ARM_STATUSES.includes(arm.status) || !(Number(arm.remainingTokens) > 0)) continue;
@@ -1194,32 +637,7 @@ export class RobinhoodEntryExperimentService {
       if (pendingBuy) continue;
       const pendingExit = (arm.legs as DbLeg[]).some((leg) => leg.status === 'PENDING' && SELL_LEG_TYPES.has(leg.legType));
       if (pendingExit) continue;
-      const state = (arm.stateJson ?? {}) as Record<string, unknown>;
-      const easyArm = isEasyProfitArmCode(String(arm.armCode));
-      const easyHorizonMs = Number(state.easyProfitHorizonMs ?? ROBINHOOD_EASY_PROFIT_V1_CONFIG.horizonMs);
-      const easyHardStop = Number(
-        state.easyProfitHardStopMultiple ?? ROBINHOOD_EASY_PROFIT_V1_CONFIG.hardStopMultiple,
-      );
-      const softTargetMultiple = Number(
-        state.easyProfitSoftTargetMultiple ?? ROBINHOOD_EASY_PROFIT_V1_CONFIG.softTargetMultiple,
-      );
-      const softTargetDeadlineMs = Number(
-        state.easyProfitSoftTargetDeadlineMs ?? ROBINHOOD_EASY_PROFIT_V1_CONFIG.softTargetDeadlineMs,
-      );
-      const elapsedMs = tick.observedAtMs - (
-        experiment.t0At?.getTime?.()
-          ?? (tick.observedAtMs - (easyArm ? easyHorizonMs : ROBINHOOD_FLOW_V3_CONFIG.horizonMs))
-      );
-      const horizonReached = easyArm
-        ? elapsedMs >= easyHorizonMs
-        : tick.observedAtMs >= experiment.horizonAt.getTime();
-      if (!marketReadable) {
-        if (horizonReached) {
-          await this.createSellLeg(arm, 'TIME_SELL', tick.observedAtMs, Number(arm.remainingTokens));
-        }
-        continue;
-      }
-      const grossUsd = Number(arm.remainingTokens) * liq.spotPriceUsd!;
+      const grossUsd = Number(arm.remainingTokens) * liq.spotPriceUsd;
       const quote = await this.cachedQuote(quoteCache, tick, Math.max(grossUsd, 0.000001), 'SELL');
       if (!quote.executable || !(quote.spotPriceUsd && quote.spotPriceUsd > 0)) continue;
       const gasUsd = await this.gasModel.estimateUsd('robinhood', tick.liquidityModel) * Number(arm.gasMultiplier);
@@ -1242,11 +660,12 @@ export class RobinhoodEntryExperimentService {
         },
       });
 
-      if (horizonReached || (easyArm && elapsedMs >= softTargetDeadlineMs && multiple < softTargetMultiple)) {
+      const horizonReached = tick.observedAtMs >= experiment.horizonAt.getTime();
+      if (horizonReached) {
         await this.createSellLeg(arm, 'TIME_SELL', tick.observedAtMs, Number(arm.remainingTokens));
         continue;
       }
-      if (multiple <= (easyArm ? easyHardStop : ROBINHOOD_FLOW_V3_CONFIG.hardStopMultiple)) {
+      if (multiple <= ROBINHOOD_FLOW_V3_CONFIG.hardStopMultiple) {
         await this.createSellLeg(arm, 'HARD_STOP_SELL', tick.observedAtMs, Number(arm.remainingTokens));
         continue;
       }
@@ -1255,79 +674,22 @@ export class RobinhoodEntryExperimentService {
         continue;
       }
       const executed = new Set(String(arm.executedRungs || '').split(',').filter(Boolean).map(Number));
-      const rungs = this.exitRungs(arm).filter((rung) => !executed.has(rung.multiple));
-      const remaining = Number(arm.remainingTokens);
+      const rungs = this.exitRungs(arm)
+        .filter((rung) => multiple >= rung.multiple && !executed.has(rung.multiple));
+      let remaining = Number(arm.remainingTokens);
       for (const rung of rungs) {
         const tokens = Math.min(remaining, Number(arm.tokensBought) * rung.fraction);
         if (!(tokens > 0)) continue;
-        if (this.usesExecutableRungGuard(arm)) {
-          const rungGrossUsd = tokens * liq.spotPriceUsd!;
-          const rungQuote = tokens === Number(arm.remainingTokens)
-            ? quote
-            : await this.cachedQuote(quoteCache, tick, Math.max(rungGrossUsd, 0.000001), 'SELL');
-          if (!rungQuote.executable || !(rungQuote.spotPriceUsd && rungQuote.spotPriceUsd > 0)) continue;
-          const rungFill = modelExit(tokens, rungQuote.spotPriceUsd, rungQuote.slippagePct, {
-            sandwichPct: this.config.get<number>('paper.sandwichPct') ?? 0.01,
-            gasUsd,
-            sellTaxPct: this.taxFraction(risk?.merged?.sellTax),
-          });
-          const costBasisUsd = Number(arm.blendedCostBasisUsd);
-          const executablePriceMultiple = tokens > 0 && costBasisUsd > 0
-            ? rungFill.netUsd / tokens / costBasisUsd
-            : 0;
-          if (executablePriceMultiple < rung.multiple) continue;
-          const rungTargetNetUsd = tokens * costBasisUsd * rung.multiple;
-          const minimumNetUsd = Math.max(
-            rungTargetNetUsd,
-            rungFill.netUsd * (1 - ROBINHOOD_EXIT_EXPERIMENT_CONFIG.delayedSellMinOutDeteriorationPct),
-          );
-          await this.createSellLeg(
-            arm,
-            'LADDER_SELL',
-            tick.observedAtMs,
-            tokens,
-            `rung:${rung.multiple}`,
-            {
-              executionGuard: {
-                configHash: String(
-                  ((arm.stateJson ?? {}) as Record<string, unknown>).exitConfigHash
-                    ?? ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH,
-                ),
-                rungMultiple: rung.multiple,
-                triggerBlock: tick.latestBlock.toString(),
-                triggerAt: new Date(tick.observedAtMs).toISOString(),
-                triggerNetUsd: rungFill.netUsd,
-                minimumNetUsd,
-                executablePriceMultiple,
-                quoteDeteriorationPct:
-                  ROBINHOOD_EXIT_EXPERIMENT_CONFIG.delayedSellMinOutDeteriorationPct,
-              },
-              triggerQuote: rungQuote,
-            },
-          );
-          break;
-        }
-        if (multiple >= rung.multiple) {
-          await this.createSellLeg(
-            arm,
-            'LADDER_SELL',
-            tick.observedAtMs,
-            tokens,
-            `rung:${rung.multiple}`,
-          );
-          break;
-        }
+        await this.createSellLeg(arm, 'LADDER_SELL', tick.observedAtMs, tokens, `rung:${rung.multiple}`);
+        executed.add(rung.multiple);
+        remaining -= tokens;
       }
     }
   }
 
   private async expireUnconfirmedArms(experiment: DbExperiment, tick: RobinhoodExperimentTick): Promise<void> {
     for (const arm of experiment.arms as DbArm[]) {
-      if (this.isPairedExitArm(arm) &&
-        (Number(arm.immediateUsd) > 0 || Number(arm.remainingTokens) > 0 || arm.status === 'OPEN')) {
-        continue;
-      }
-      if (arm.armCode === 'A_IMMEDIATE_20' && Number(arm.immediateUsd) > 0) continue;
+      if (arm.armCode === 'A_IMMEDIATE_20' || this.isPairedExitArm(arm)) continue;
       if (Number(arm.remainingTokens) > 0) {
         await this.createSellLeg(arm, 'CONFIRMATION_EXPIRY_SELL', tick.observedAtMs, Number(arm.remainingTokens));
       } else {
@@ -1344,11 +706,10 @@ export class RobinhoodEntryExperimentService {
   }
 
   private isPairedExitArmCode(armCode: string): boolean {
-    return armCode.startsWith('EXIT_') || isEasyProfitArmCode(armCode);
+    return armCode.startsWith('EXIT_');
   }
 
   private exitRungs(arm: DbArm): readonly { multiple: number; fraction: number }[] {
-    if (isEasyProfitArmCode(String(arm.armCode))) return easyProfitExitRungs();
     switch (arm.armCode) {
       case 'EXIT_A_FULL_2X': return [{ multiple: 2, fraction: 1 }];
       case 'EXIT_C_90_10': return [{ multiple: 2, fraction: 0.90 }];
@@ -1361,18 +722,13 @@ export class RobinhoodEntryExperimentService {
   }
 
   private exitPolicy(arm: DbArm): string {
-    if (isEasyProfitArmCode(String(arm.armCode))) {
-      return ROBINHOOD_EASY_PROFIT_V1_CONFIG.exit.policy;
-    }
     if (arm.armCode === 'EXIT_A_FULL_2X') return 'FULL_2X';
     if (arm.armCode === 'EXIT_C_90_10') return 'PROTECTED_90_10';
     return 'LADDER_80_15_5';
   }
 
   private armConfigHash(arm: DbArm): string {
-    if (isEasyProfitArmCode(String(arm.armCode))) return ROBINHOOD_EASY_PROFIT_V1_CONFIG_HASH;
-    return arm.experiment?.configHash ??
-      (this.isPairedExitArm(arm) ? ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH : ROBINHOOD_FLOW_V3_CONFIG_HASH);
+    return this.isPairedExitArm(arm) ? ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH : ROBINHOOD_FLOW_V3_CONFIG_HASH;
   }
 
   private async scheduleFullExits(experiment: DbExperiment, tick: RobinhoodExperimentTick, legType: string): Promise<void> {
@@ -1408,7 +764,6 @@ export class RobinhoodEntryExperimentService {
     intendedAtMs: number,
     tokens: number,
     note?: string,
-    quoteSnapshot?: Record<string, unknown>,
   ): Promise<void> {
     const pending = await (this.prisma as any).robinhoodExperimentLeg.findFirst({
       where: {
@@ -1427,7 +782,6 @@ export class RobinhoodEntryExperimentService {
       0,
       tokens,
       note,
-      quoteSnapshot,
     );
   }
 
@@ -1439,7 +793,6 @@ export class RobinhoodEntryExperimentService {
     notionalUsd: number,
     tokenAmount?: number,
     note?: string,
-    quoteSnapshot?: Record<string, unknown>,
   ): Promise<void> {
     const lastLeg = await (this.prisma as any).robinhoodExperimentLeg.findFirst({
       where: { armId: arm.id }, orderBy: { sequence: 'desc' }, select: { sequence: true },
@@ -1456,19 +809,8 @@ export class RobinhoodEntryExperimentService {
         notionalUsd,
         tokenAmount: tokenAmount ?? null,
         failureReason: note ?? null,
-        quoteSnapshot: quoteSnapshot
-          ? quoteSnapshot as Prisma.InputJsonValue
-          : undefined,
       },
     });
-  }
-
-  private usesExecutableRungGuard(arm: DbArm): boolean {
-    const hash = String(((arm.stateJson ?? {}) as Record<string, unknown>).exitConfigHash ?? '');
-    if (hash === ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH) return true;
-    if (hash === ROBINHOOD_EASY_PROFIT_V1_CONFIG_HASH) return true;
-    if (hash === ROBINHOOD_EXIT_EXPERIMENT_LEGACY_CONFIG_HASH) return false;
-    return false;
   }
 
   private async rejectConfirmation(experiment: DbExperiment, tick: RobinhoodExperimentTick, reason: string): Promise<void> {
@@ -1596,58 +938,43 @@ export class RobinhoodEntryExperimentService {
         data: { status: 'SKIPPED', failureReason: reason },
       }),
     ]);
-    // Do NOT append INVALIDATED rows to paper_exits.csv — that file is the
-    // operator P&L trail. Invalidations are terminal research events, not fills;
-    // they stay in DB (status/invalidReason) and in the Nest log line below.
-    this.logger.warn(
-      `Robinhood experiment invalidated ${experiment.id}: ${reason} ` +
-      `arms=${(experiment.arms as DbArm[]).length} token=${experiment.tokenAddress}`,
-    );
+    for (const arm of experiment.arms as DbArm[]) {
+      this.files.logPaperExit({
+        ts: invalidatedAt.toISOString(), run_id: experiment.id,
+        schema_version: CSV_SCHEMA_VERSION, chain: 'robinhood', token_address: experiment.tokenAddress,
+        symbol: experiment.symbol ?? '', pool_address: experiment.poolAddress,
+        event_type: 'EXPERIMENT_INVALIDATED', status: 'invalidated', price_usd: '',
+        multiple: '', fraction: '0', tokens: '0', net_usd: '0', slip_pct: '',
+        realized_multiple_total: '', note: reason, deployer_address: '',
+        deployer_deployments_count: '', deployer_rug_count: '', outcome_class: 'INVALIDATED',
+        strategy_version: ROBINHOOD_FLOW_V3_CONFIG.version, risk_cohort: 'ROBINHOOD_STATIC_SAFETY',
+        exit_policy: 'ROBINHOOD_EXPERIMENT_LADDER', experiment_id: experiment.id,
+        experiment_arm: arm.armCode, execution_scenario: arm.scenarioCode,
+        execution_leg: 'EXPERIMENT_INVALIDATED', config_hash: ROBINHOOD_FLOW_V3_CONFIG_HASH,
+        target_execution_at: '', executed_at: invalidatedAt.toISOString(),
+      });
+    }
+    this.logger.warn(`Robinhood experiment invalidated ${experiment.id}: ${reason}`);
   }
 
-  private t0MarketRejectReason(
+  private async t0RejectReason(
+    tick: RobinhoodExperimentTick,
     liq: LiquidityCheckResult,
     buyQuote: ExecutionQuoteResult,
     sellQuote: ExecutionQuoteResult,
-  ): string | null {
+    safety: SafetyAssessment,
+  ): Promise<string | null> {
+    if (safety.hardReason) return safety.hardReason;
     if (!liq.liquidityVerified || !(liq.spotPriceUsd && liq.spotPriceUsd > 0)) return 'liquidity_unverified';
     if ((liq.executableDepthUsd ?? 0) < ROBINHOOD_FLOW_V3_CONFIG.minExecutableDepthUsd) return 'depth_below_100';
     if (!buyQuote.executable || buyQuote.slippagePct == null) return 'buy_route_unavailable';
     if (!sellQuote.executable || sellQuote.slippagePct == null) return 'sell_route_unavailable';
     if (buyQuote.slippagePct > ROBINHOOD_FLOW_V3_CONFIG.maxEntrySlippagePct) return 'entry_slippage_over_3pct';
-    if (sellQuote.slippagePct > (ROBINHOOD_FLOW_V3_CONFIG.maxSellSlippagePct ?? 0.03)) {
-      return 'exit_slippage_over_3pct';
+    if (tick.creatorAttributable && tick.creatorAddress) {
+      const serial = await this.serialDeployerBlockReason(tick.creatorAddress);
+      if (serial) return serial;
     }
-    const quoteAgeMs = Date.now() -
-      Math.min(buyQuote.observedAt.getTime(), sellQuote.observedAt.getTime());
-    if (quoteAgeMs > (ROBINHOOD_FLOW_V3_CONFIG.maxQuoteAgeMs ?? 5_000)) return 'quote_stale';
     return null;
-  }
-
-  private quoteFromLiquidity(
-    liq: LiquidityCheckResult,
-    direction: 'BUY' | 'SELL',
-    observedAt: Date,
-  ): ExecutionQuoteResult {
-    const slippagePct = direction === 'BUY'
-      ? liq.entrySlip20 ?? liq.slip20 ?? null
-      : liq.exitSlip20 ?? liq.slip20 ?? null;
-    return {
-      liquidityModel: liq.liquidityModel,
-      direction,
-      sizeUsd: 20,
-      spotPriceUsd: liq.spotPriceUsd,
-      slippagePct,
-      executable: Boolean(
-        liq.liquidityVerified &&
-        liq.spotPriceUsd != null &&
-        liq.spotPriceUsd > 0 &&
-        slippagePct != null &&
-        Number.isFinite(slippagePct),
-      ),
-      observedAt,
-      error: liq.error,
-    };
   }
 
   /** Finish-line: any prior rug-like outcome from this creator blocks paid capital. */
@@ -1660,46 +987,23 @@ export class RobinhoodEntryExperimentService {
   }
 
   private async assessSafety(tick: RobinhoodExperimentTick): Promise<SafetyAssessment> {
-    const tokenAddress = tick.candidate.token.tokenAddress;
-    const poolAddress = tick.candidate.pool.poolAddress;
-    const [staticResult, risk, holders, bubblemaps] = await Promise.all([
-      this.staticSafety.inspect(tokenAddress),
+    const [staticResult, risk] = await Promise.all([
+      this.staticSafety.inspect(tick.candidate.token.tokenAddress),
       this.riskEngine.checkToken(
-        'robinhood', tokenAddress,
+        'robinhood', tick.candidate.token.tokenAddress,
         tick.candidate.token.symbol, tick.candidate.token.name,
         `robinhood-exp-${randomUUID()}`,
       ),
-      this.freeHolders.assessToken('robinhood', tokenAddress, poolAddress),
-      this.bubblemaps.assessTokenCluster('robinhood', tokenAddress),
     ]);
     const hardReason = !staticResult.passed
       ? `static_safety:${staticResult.reasons.join('|')}`
-      : contractHardRiskReason(risk)
-        ?? holders.hardReason
-        ?? bubblemaps.hardReason;
+      : contractHardRiskReason(risk);
     return {
       risk,
       hardReason,
       buyTaxPct: this.taxFraction(risk.merged.buyTax),
       sellTaxPct: this.taxFraction(risk.merged.sellTax),
       staticSnapshot: staticResult as unknown as Record<string, unknown>,
-      holderConcentrationSnapshot: {
-        available: holders.available,
-        skipped: holders.skipped,
-        skipReason: holders.skipReason,
-        source: holders.source,
-        hardReason: holders.hardReason,
-        ...(holders.raw ?? {}),
-        ...(holders.gate ?? {}),
-      },
-      bubblemapsSnapshot: {
-        available: bubblemaps.available,
-        skipped: bubblemaps.skipped,
-        skipReason: bubblemaps.skipReason,
-        hardReason: bubblemaps.hardReason,
-        ...(bubblemaps.raw ?? {}),
-        ...(bubblemaps.gate ?? {}),
-      },
     };
   }
 
@@ -1770,7 +1074,7 @@ export class RobinhoodEntryExperimentService {
     let pending = cache.get(key);
     if (!pending) {
       pending = this.liquidity.quoteTrade(tick.candidate.pool, sizeUsd, direction, tick.gemDecimals)
-        .then((quote) => quote);
+        .then((quote) => ({ ...quote, observedAt: new Date() }));
       cache.set(key, pending);
     }
     return pending;
@@ -1806,17 +1110,6 @@ export class RobinhoodEntryExperimentService {
     return multiple >= 1 ? 'WIN' : 'LOSS';
   }
 
-  /**
-   * Operator CSVs (paper_entries / paper_exits) are the live P&L trail.
-   * Both friction cohorts are logged so the operator can see active volume;
-   * bankroll / benchmark eligibility still gates only LOW_FRICTION_PRIMARY.
-   * Invalidations never go here.
-   */
-  private shouldLogOperatorCsv(frictionCohort: string): boolean {
-    return frictionCohort === 'LOW_FRICTION_PRIMARY'
-      || frictionCohort === 'HIGH_FRICTION_SHADOW';
-  }
-
   private logEntry(
     arm: DbArm,
     leg: DbLeg,
@@ -1828,17 +1121,6 @@ export class RobinhoodEntryExperimentService {
     reason: string | null,
     executedAt: Date,
   ): void {
-    const state = (arm.stateJson ?? {}) as Record<string, unknown>;
-    const frictionCohort = String(
-      state.frictionCohort ??
-      arm.experiment?.frictionCohort ??
-      ((quote.slippagePct ?? Number.POSITIVE_INFINITY) <=
-        (ROBINHOOD_FLOW_V3_CONFIG.primaryMaxEntrySlippagePct ?? 0.01)
-        ? 'LOW_FRICTION_PRIMARY'
-        : 'HIGH_FRICTION_SHADOW'),
-    );
-    if (!this.shouldLogOperatorCsv(frictionCohort)) return;
-    const quoteAgeMs = Math.max(0, executedAt.getTime() - quote.observedAt.getTime());
     this.files.logPaperEntry({
       ts: executedAt.toISOString(),
       run_id: arm.experimentId,
@@ -1853,27 +1135,17 @@ export class RobinhoodEntryExperimentService {
       entry_price_effective_usd: String(fill?.effectivePriceUsd ?? ''),
       slippage_pct: String(quote.slippagePct ?? ''), sandwich_pct: String(this.config.get<number>('paper.sandwichPct') ?? 0.01),
       gas_usd: String(gasUsd), buy_tax_pct: String(buyTaxPct), tokens_bought: String(fill?.tokensBought ?? ''),
-      onchain_liq_entry_usd: String(arm.experiment?.t0DepthUsd ?? ''),
-      entered: String(Boolean(fill?.entered)), not_entered_reason: reason ?? '',
+      onchain_liq_entry_usd: '', entered: String(Boolean(fill?.entered)), not_entered_reason: reason ?? '',
       final_score: '', band: '', score_confidence: '', deployer_address: tick.creatorAddress ?? '',
       deployer_deployments_count: '', deployer_rug_count: '', lp_locked: '', lp_lock_source: '', lp_lock_fraction: '',
-      discovery_source: 'evm_flow_rpc', risk_cohort: frictionCohort,
-      strategy_version: arm.experiment?.configVersion ?? ROBINHOOD_FLOW_V3_CONFIG.version,
-      exit_policy: this.exitPolicy(arm),
-      benchmark_eligible: String(state.benchmarkEntryEligible ?? frictionCohort === 'LOW_FRICTION_PRIMARY'),
-      trigger_unique_buyers: '', trigger_buy_quote_usd: '',
+      discovery_source: 'evm_flow_rpc', risk_cohort: 'ROBINHOOD_STATIC_SAFETY',
+      strategy_version: ROBINHOOD_FLOW_V3_CONFIG.version, exit_policy: this.exitPolicy(arm),
+      benchmark_eligible: 'true', trigger_unique_buyers: '', trigger_buy_quote_usd: '',
       trigger_buy_sell_ratio: '', trigger_price_momentum: '',
       experiment_id: arm.experimentId, experiment_arm: arm.armCode, execution_scenario: arm.scenarioCode,
       execution_leg: leg.legType, config_hash: this.armConfigHash(arm),
       target_execution_at: leg.targetAt.toISOString(), executed_at: executedAt.toISOString(),
       confirmation_status: arm.experiment?.confirmationStatus ?? '',
-      friction_cohort: frictionCohort,
-      buy_impact_pct: String(quote.slippagePct ?? ''),
-      sell_impact_pct: String(arm.experiment?.t0SellImpactPct ?? ''),
-      quote_age_ms: String(quoteAgeMs),
-      shared_entry_quote_id: String(
-        state.sharedEntryQuoteId ?? arm.experiment?.sharedEntryQuoteId ?? '',
-      ),
     });
   }
 
@@ -1891,11 +1163,6 @@ export class RobinhoodEntryExperimentService {
   ): void {
     const committed = Number(arm.committedUsd);
     const realized = Number(arm.realizedValueUsd) + netUsd;
-    const state = (arm.stateJson ?? {}) as Record<string, unknown>;
-    const frictionCohort = String(
-      state.frictionCohort ?? arm.experiment?.frictionCohort ?? 'LEGACY_UNCLASSIFIED',
-    );
-    if (!this.shouldLogOperatorCsv(frictionCohort)) return;
     this.files.logPaperExit({
       ts: executedAt.toISOString(), run_id: arm.experimentId,
       schema_version: CSV_SCHEMA_VERSION, chain: 'robinhood', token_address: tick.candidate.token.tokenAddress,
@@ -1906,19 +1173,11 @@ export class RobinhoodEntryExperimentService {
       realized_multiple_total: String(committed > 0 ? realized / committed : 0),
       note: reason ?? `gas=${gasUsd};sellTax=${sellTaxPct}`, deployer_address: tick.creatorAddress ?? '',
       deployer_deployments_count: '', deployer_rug_count: '', outcome_class: outcomeClass ?? '',
-      strategy_version: arm.experiment?.configVersion ?? ROBINHOOD_FLOW_V3_CONFIG.version,
-      risk_cohort: frictionCohort,
+      strategy_version: ROBINHOOD_FLOW_V3_CONFIG.version, risk_cohort: 'ROBINHOOD_STATIC_SAFETY',
       exit_policy: this.exitPolicy(arm),
       experiment_id: arm.experimentId, experiment_arm: arm.armCode, execution_scenario: arm.scenarioCode,
       execution_leg: leg.legType, config_hash: this.armConfigHash(arm),
       target_execution_at: leg.targetAt.toISOString(), executed_at: executedAt.toISOString(),
-      friction_cohort: frictionCohort,
-      buy_impact_pct: String(arm.experiment?.t0BuyImpactPct ?? ''),
-      sell_impact_pct: String(quote.slippagePct ?? ''),
-      quote_age_ms: String(Math.max(0, executedAt.getTime() - quote.observedAt.getTime())),
-      shared_entry_quote_id: String(
-        state.sharedEntryQuoteId ?? arm.experiment?.sharedEntryQuoteId ?? '',
-      ),
     });
   }
 }

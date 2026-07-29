@@ -34,8 +34,6 @@
     "benchmark:flow": "ts-node scripts/flow-benchmark.ts",
     "benchmark:robinhood-entry": "ts-node scripts/robinhood-experiment-benchmark.ts",
     "benchmark:robinhood-ablation": "ts-node scripts/robinhood-buyer-quality-ablation.ts",
-    "benchmark:robinhood-edge-audit": "ts-node scripts/robinhood-edge-audit.ts",
-    "benchmark:robinhood-bankroll": "ts-node scripts/robinhood-bankroll-audit.ts",
     "benchmark:solana-v2": "ts-node scripts/solana-v2-benchmark.ts",
     "benchmark:iteration-v3": "ts-node scripts/research-iteration-baseline.ts",
     "sniper:report": "ts-node scripts/sniper-report.ts",

@@ -359,18 +359,6 @@ describe('CollectorService', () => {
     }
   });
 
-  it('keeps Robinhood discovery but skips duplicate legacy analysis by default', async () => {
-    const candidate = buildResult({ chain: 'robinhood' }, '0xrobinhood');
-    (service as any).enabledChains = ['robinhood'];
-    gtMock.getNewPools.mockResolvedValue([candidate]);
-
-    await service.runCollectionCycle();
-
-    expect(evmFlowMock.registerMatureCandidate).toHaveBeenCalledWith(candidate);
-    expect(riskMock.checkToken).not.toHaveBeenCalled();
-    expect(prismaMock.token.upsert).not.toHaveBeenCalled();
-  });
-
   it('pool upsert UPDATE is empty (structural fields are write-once)', async () => {
     gtMock.getNewPools.mockResolvedValue([buildResult()]);
     await service.runCollectionCycle();
@@ -899,7 +887,6 @@ describe('CollectorService', () => {
 
   it('admits a static-safe Robinhood no-provider token into the primary paper lane', async () => {
     (service as any).robinhoodPaperEnabled = true;
-    (service as any).robinhoodLegacyPaperEnabled = true;
     const robinhoodUnknown: ContractRiskResult = {
       decision: 'CONTRACT_UNKNOWN',
       rejectReasons: [],
@@ -953,7 +940,6 @@ describe('CollectorService', () => {
 
   it('routes a Robinhood score between the shadow floor and primary floor into a full paper lifecycle', async () => {
     (service as any).robinhoodPaperEnabled = true;
-    (service as any).robinhoodLegacyPaperEnabled = true;
     const risk: ContractRiskResult = {
       decision: 'CONTRACT_UNKNOWN', rejectReasons: [], goplusQueried: false,
       honeypotQueried: false, merged: { providerStatus: 'NO_RISK_PROVIDER_SUPPORT' },
@@ -989,7 +975,6 @@ describe('CollectorService', () => {
 
   it('keeps a Robinhood token with dust on-chain TVL out of paper entries', async () => {
     (service as any).robinhoodPaperEnabled = true;
-    (service as any).robinhoodLegacyPaperEnabled = true;
     const risk: ContractRiskResult = {
       decision: 'CONTRACT_UNKNOWN',
       rejectReasons: [],
