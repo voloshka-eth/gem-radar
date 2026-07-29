@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import {
   SolanaProtocolQuoteService,
+  createSolanaRpcFailoverFetch,
   executionPriceImpact,
   measuredExecutableDepth,
   spotPriceFromProbe,
@@ -11,6 +12,7 @@ describe('SolanaProtocolQuoteService RPC coordination', () => {
     const config = {
       get: jest.fn((key: string) => ({
         'solanaLaunch.rpcUrl': 'https://api.mainnet-beta.solana.com',
+        'solanaLaunch.rpcUrls': ['https://api.mainnet-beta.solana.com'],
         'solanaLaunch.wsUrl': 'wss://api.mainnet-beta.solana.com',
         'solanaLaunch.rpcMinRequestIntervalMs': intervalMs,
       } as Record<string, unknown>)[key]),
@@ -83,5 +85,45 @@ describe('SolanaProtocolQuoteService RPC coordination', () => {
       { entryUsd: 50, buySlippagePct: 0.03, sellSlippagePct: 0.07 },
       { entryUsd: 100, buySlippagePct: 0.06, sellSlippagePct: 0.04 },
     ])).toBe(20);
+  });
+
+  it('falls back after the free RPC times out', async () => {
+    jest.useFakeTimers();
+    const fetch = jest.fn()
+      .mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }))
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    const failover = createSolanaRpcFailoverFetch(
+      ['https://free.example', 'https://paid.example'],
+      50,
+      100,
+      fetch as any,
+    );
+
+    const request = failover('https://ignored.example' as any, {} as any);
+    await jest.advanceTimersByTimeAsync(51);
+    await expect(request).resolves.toMatchObject({ ok: true });
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://free.example',
+      'https://paid.example',
+    ]);
+    jest.useRealTimers();
+  });
+
+  it('falls back immediately on rate limiting', async () => {
+    const fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: false, status: 429 })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    const failover = createSolanaRpcFailoverFetch(
+      ['https://free.example', 'https://paid.example'],
+      8_000,
+      12_000,
+      fetch as any,
+    );
+
+    await expect(failover('https://ignored.example' as any, {} as any))
+      .resolves.toMatchObject({ ok: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

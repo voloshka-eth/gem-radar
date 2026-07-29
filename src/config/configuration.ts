@@ -1,6 +1,7 @@
 import { registerAs } from '@nestjs/config';
 import tokenSymbolBlocklist from './token-symbol-blocklist.json';
 import blockedCreatorsFile from './blocked-creators.json';
+import { flattenResolved, resolveRpcEndpoints } from './rpc-endpoints';
 
 const activeStrategyMode = (): string =>
   process.env.STRATEGY_MODE ?? 'legacy_contract_radar';
@@ -8,6 +9,36 @@ const activeStrategyMode = (): string =>
 const blockedTokenSymbols = tokenSymbolBlocklist.symbols
   .map((entry) => entry.symbol.trim().replace(/^\$/, '').toLowerCase())
   .filter(Boolean);
+
+const resolveConfiguredRpc = () => flattenResolved(resolveRpcEndpoints({
+  alchemyApiKey: process.env.ALCHEMY_API_KEY,
+  alchemyRpcUrl: process.env.ALCHEMY_RPC_URL,
+  infuraApiKey: process.env.INFURA_API_KEY,
+  infuraRpcUrl: process.env.INFURA_RPC_URL,
+  rpcAlchemyChains: process.env.RPC_ALCHEMY_CHAINS,
+  rpcInfuraChains: process.env.RPC_INFURA_CHAINS,
+  rpcPaidChains: process.env.RPC_PAID_CHAINS,
+  rpcPriority: process.env.RPC_PRIORITY,
+  rpcPrimaryTimeoutMs: process.env.RPC_PRIMARY_TIMEOUT_MS,
+  rpcFallbackTimeoutMs: process.env.RPC_FALLBACK_TIMEOUT_MS,
+  ethereumRpcUrl: process.env.ETHEREUM_RPC_URL,
+  ethereumRpcUrlFallback: process.env.ETHEREUM_RPC_URL_FALLBACK,
+  ethereumRpcWsUrl: process.env.ETHEREUM_RPC_WS_URL,
+  baseRpcUrl: process.env.BASE_RPC_URL,
+  baseRpcUrlFallback: process.env.BASE_RPC_URL_FALLBACK,
+  baseRpcWsUrl: process.env.BASE_RPC_WS_URL,
+  robinhoodRpcUrl: process.env.ROBINHOOD_RPC_URL,
+  robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK,
+  robinhoodRpcWsUrl: process.env.ROBINHOOD_RPC_WS_URL,
+  solanaRpcUrl: process.env.SOLANA_RPC_URL,
+  solanaRpcWsUrl: process.env.SOLANA_RPC_WS_URL,
+}));
+
+let rpcCache: ReturnType<typeof resolveConfiguredRpc> | null = null;
+const configuredRpc = () => {
+  rpcCache ??= resolveConfiguredRpc();
+  return rpcCache;
+};
 
 export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -25,15 +56,22 @@ export const redisConfig = registerAs('redis', () => ({
 export const chainConfig = registerAs('chain', () => ({
   // drpc.org provides free archive access (required for binary-search token-age).
   // publicnode.com is the fallback — no archive, but handles latest-state calls on RPC outage.
-  ethereumRpcUrl:         process.env.ETHEREUM_RPC_URL          ?? 'https://eth.drpc.org',
-  ethereumRpcUrlFallback: process.env.ETHEREUM_RPC_URL_FALLBACK ?? 'https://ethereum.publicnode.com',
-  ethereumRpcWsUrl:       process.env.ETHEREUM_RPC_WS_URL || undefined,
-  baseRpcUrl:             process.env.BASE_RPC_URL              ?? 'https://base.drpc.org',
-  baseRpcUrlFallback:     process.env.BASE_RPC_URL_FALLBACK     ?? 'https://base.publicnode.com',
-  baseRpcWsUrl:           process.env.BASE_RPC_WS_URL || undefined,
-  robinhoodRpcUrl:        process.env.ROBINHOOD_RPC_URL         ?? 'https://rpc.mainnet.chain.robinhood.com',
-  robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK || undefined,
-  robinhoodRpcWsUrl:       process.env.ROBINHOOD_RPC_WS_URL || undefined,
+  rpcProvider: configuredRpc().providerLabel,
+  paidChains: configuredRpc().paidChains,
+  primaryTimeoutMs: configuredRpc().primaryTimeoutMs,
+  fallbackTimeoutMs: configuredRpc().fallbackTimeoutMs,
+  ethereumRpcUrl: configuredRpc().ethereumRpcUrl,
+  ethereumRpcUrlFallback: configuredRpc().ethereumRpcUrlFallback,
+  ethereumRpcUrls: configuredRpc().ethereumRpcUrls,
+  ethereumRpcWsUrl: configuredRpc().ethereumRpcWsUrl,
+  baseRpcUrl: configuredRpc().baseRpcUrl,
+  baseRpcUrlFallback: configuredRpc().baseRpcUrlFallback,
+  baseRpcUrls: configuredRpc().baseRpcUrls,
+  baseRpcWsUrl: configuredRpc().baseRpcWsUrl,
+  robinhoodRpcUrl: configuredRpc().robinhoodRpcUrl,
+  robinhoodRpcUrlFallback: configuredRpc().robinhoodRpcUrlFallback,
+  robinhoodRpcUrls: configuredRpc().robinhoodRpcUrls,
+  robinhoodRpcWsUrl: configuredRpc().robinhoodRpcWsUrl,
   // Robinhood's public RPC currently rejects historical eth_getCode. Keep token
   // age unknown rather than issuing one failing archive call per fresh token.
   robinhoodHistoricalCodeEnabled: process.env.ROBINHOOD_HISTORICAL_CODE_ENABLED === 'true',
@@ -76,8 +114,11 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
 export const solanaLaunchConfig = registerAs('solanaLaunch', () => ({
   enabled: process.env.SOLANA_LAUNCH_ENABLED !== 'false',
   multiVenueEnabled: process.env.SOLANA_MULTI_VENUE_ENABLED !== 'false',
-  rpcUrl: process.env.SOLANA_RPC_URL ?? 'https://api.mainnet-beta.solana.com',
-  wsUrl: process.env.SOLANA_RPC_WS_URL || undefined,
+  rpcUrl: configuredRpc().solanaRpcUrl,
+  rpcUrls: configuredRpc().solanaRpcUrls,
+  wsUrl: configuredRpc().solanaRpcWsUrl,
+  rpcPrimaryTimeoutMs: configuredRpc().primaryTimeoutMs,
+  rpcFallbackTimeoutMs: configuredRpc().fallbackTimeoutMs,
   launchApiUrl: process.env.RAYDIUM_LAUNCH_API_URL ?? 'https://launch-mint-v1.raydium.io',
   tradeApiUrl: process.env.RAYDIUM_TRADE_API_URL ?? 'https://transaction-v1.raydium.io',
   pollIntervalMs: parseInt(process.env.SOLANA_LAUNCH_POLL_INTERVAL_MS ?? '10000', 10),

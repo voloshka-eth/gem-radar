@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
 import BN from 'bn.js';
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, type FetchFn } from '@solana/web3.js';
 import {
   Curve,
   LAUNCHPAD_PROGRAM,
@@ -73,6 +73,53 @@ interface QueuedRpcOperation {
   reject: (reason: unknown) => void;
 }
 
+export function createSolanaRpcFailoverFetch(
+  urls: readonly string[],
+  primaryTimeoutMs: number,
+  fallbackTimeoutMs: number,
+  baseFetch: FetchFn = ((input: unknown, init?: unknown) =>
+    globalThis.fetch(input as any, init as any)) as FetchFn,
+): FetchFn {
+  const endpoints = [...new Set(urls.map((url) => url.trim()).filter((url) => /^https?:\/\//i.test(url)))];
+  if (!endpoints.length) throw new Error('Solana RPC failover requires at least one HTTP endpoint');
+
+  return (async (_input: unknown, init?: any) => {
+    let lastError: unknown = new Error('All Solana RPC endpoints failed');
+
+    for (let index = 0; index < endpoints.length; index++) {
+      const controller = new AbortController();
+      const upstreamSignal: AbortSignal | undefined = init?.signal;
+      const abortFromUpstream = () => controller.abort(upstreamSignal?.reason);
+      if (upstreamSignal?.aborted) abortFromUpstream();
+      else upstreamSignal?.addEventListener('abort', abortFromUpstream, { once: true });
+
+      const timeoutMs = index === 0 ? primaryTimeoutMs : fallbackTimeoutMs;
+      const timer = setTimeout(() => controller.abort(new Error('RPC endpoint deadline exceeded')), timeoutMs);
+      try {
+        const response: any = await baseFetch(endpoints[index] as any, {
+          ...init,
+          signal: controller.signal,
+        });
+        if (!isRetryableRpcResponse(response)) return response;
+        lastError = new Error(`Solana RPC endpoint returned retryable HTTP ${response.status}`);
+      } catch (error) {
+        if (upstreamSignal?.aborted) throw error;
+        lastError = error;
+      } finally {
+        clearTimeout(timer);
+        upstreamSignal?.removeEventListener('abort', abortFromUpstream);
+      }
+    }
+
+    throw lastError;
+  }) as FetchFn;
+}
+
+function isRetryableRpcResponse(response: { ok?: boolean; status?: number }): boolean {
+  const status = Number(response.status ?? 0);
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 @Injectable()
 export class SolanaProtocolQuoteService {
   readonly connection: Connection;
@@ -89,10 +136,14 @@ export class SolanaProtocolQuoteService {
 
   constructor(private readonly config: ConfigService) {
     const rpcUrl = this.config.get<string>('solanaLaunch.rpcUrl')!;
+    const rpcUrls = this.config.get<string[]>('solanaLaunch.rpcUrls') ?? [rpcUrl];
     const wsEndpoint = this.config.get<string>('solanaLaunch.wsUrl') || undefined;
+    const primaryTimeoutMs = this.config.get<number>('solanaLaunch.rpcPrimaryTimeoutMs') ?? 8_000;
+    const fallbackTimeoutMs = this.config.get<number>('solanaLaunch.rpcFallbackTimeoutMs') ?? 12_000;
     this.connection = new Connection(rpcUrl, {
       commitment: 'confirmed',
       wsEndpoint,
+      fetch: createSolanaRpcFailoverFetch(rpcUrls, primaryTimeoutMs, fallbackTimeoutMs),
       disableRetryOnRateLimit: true,
     });
     this.http = axios.create({
