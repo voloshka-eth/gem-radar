@@ -51,7 +51,9 @@
     "probe:age": "ts-node scripts/probe-age.ts",
     "reset": "ts-node scripts/reset.ts",
     "infra:up": "docker compose up -d",
-    "infra:down": "docker compose down"
+    "infra:down": "docker compose down",
+    "maintenance:retention": "ts-node scripts/run-retention.ts",
+    "maintenance:compact": "ts-node scripts/compact-db.ts --force"
   },
   "dependencies": {
     "@meteora-ag/cp-amm-sdk": "^1.4.5",

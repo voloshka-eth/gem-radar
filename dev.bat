@@ -25,11 +25,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/3] Starting Gem Radar collectors in separate terminals...
-start "Gem Radar Main" cmd /k "cd /d ""%~dp0"" ^&^& npm run start:dev"
-start "Gem Radar Solana" cmd /k "cd /d ""%~dp0"" ^&^& npm run start:solana"
+echo [3/4] Building compiled runtime...
+call npm run build
+if errorlevel 1 (
+    echo ERROR: Build failed. Fix the TypeScript errors before starting collectors.
+    pause
+    exit /b 1
+)
 
-echo Started: Gem Radar Main and Gem Radar Solana.
+echo [4/4] Starting Gem Radar collectors in separate terminals...
+start "Gem Radar Main" cmd /k "cd /d ""%~dp0"" ^&^& npm run start:prod"
+start "Gem Radar Solana" cmd /k "cd /d ""%~dp0"" ^&^& npm run start:solana:prod"
+
+echo Started compiled Gem Radar Main and Gem Radar Solana.
+echo Code changes require restarting dev.bat. Use npm run start:dev only for active debugging.
 echo Keep their windows open. Close them with Ctrl+C when you want to stop collectors.
 timeout /t 3 /nobreak >nul
 endlocal

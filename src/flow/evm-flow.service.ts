@@ -39,6 +39,7 @@ import {
   signalStatusConsumesTrigger,
 } from './flow-state';
 import { adaptiveBatchRead } from './rpc-batching';
+import { RuntimeHealthTracker } from '../runtime/runtime-health';
 import type {
   FlowSnapshot,
   FlowStrategyDefinition,
@@ -122,6 +123,7 @@ interface DecodeTradeResult {
 @Injectable()
 export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(EvmFlowService.name);
+  private readonly runtimeHealth = new RuntimeHealthTracker();
   private readonly watches = new Map<string, WatchState>();
   private readonly unwatch: Array<() => void> = [];
   private factoryTimer: ReturnType<typeof setInterval> | null = null;
@@ -170,6 +172,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const activeChains = this.flowChains();
+    this.runtimeHealth.start();
     await this.restoreWatches(activeChains);
     for (const chain of activeChains) this.startHeadWatcher(chain);
     const factoryPollMs = Math.max(1_000, this.config.get<number>('evmFlow.factoryPollMs') ?? 3_000);
@@ -189,6 +192,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
     if (this.factoryTimer) clearInterval(this.factoryTimer);
     if (this.healthTimer) clearInterval(this.healthTimer);
     for (const stop of this.unwatch) stop();
+    this.runtimeHealth.stop();
   }
 
   async registerMatureCandidate(candidate: CollectorResult): Promise<void> {
@@ -1500,7 +1504,8 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         `Flow health ${chain}: head=${http ?? head ?? '?'} lag=${lag} watching=${entryEligibleWatches.length} ` +
         `outcomeTracking=${chainWatches.length} swaps=${this.swapCount.get(chain) ?? 0} invalidSwaps=${this.invalidSwapCount.get(chain) ?? 0} ` +
         `signals=${this.signalCount.get(chain) ?? 0} open=${open ?? '?'} rpcErrors=${this.rpcFailures.get(chain) ?? 0} ` +
-        `coverage=${(stats.coverageRatio * 100).toFixed(2)}% unresolved=${unresolvedRanges} eligible=${signalEligible}${experimentHealth}`,
+        `coverage=${(stats.coverageRatio * 100).toFixed(2)}% unresolved=${unresolvedRanges} eligible=${signalEligible} ` +
+        `pendingHeads=${this.pendingHeads.size} processingHeads=${this.processingHeads.size} ${this.runtimeHealth.summary()}${experimentHealth}`,
       );
     }
   }

@@ -5,6 +5,7 @@ import { PublicKey } from '@solana/web3.js';
 import { PrismaService } from '../database/prisma.service';
 import { CSV_SCHEMA_VERSION } from '../file-logger/csv-schemas';
 import { FileLoggerService } from '../file-logger/file-logger.service';
+import { RuntimeHealthTracker } from '../runtime/runtime-health';
 import {
   SOLANA_EXPERIMENT_ARMS,
   SOLANA_FLOW_V2_CONFIG,
@@ -59,6 +60,7 @@ type SellOptions = {
 @Injectable()
 export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SolanaMultiLaunchService.name);
+  private readonly runtimeHealth = new RuntimeHealthTracker();
   private readonly streamStates = new Map<string, StreamState>();
   private readonly poolSubscriptions = new Map<string, { subscriptionId: number; poolAddress: string }>();
   private readonly admissionsInFlight = new Set<string>();
@@ -107,6 +109,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Solana multi-venue flow v2.2 disabled');
       return;
     }
+    this.runtimeHealth.start();
     // Restart recovery: resolve every overdue confirmation expiry before any
     // live processing starts, without waiting for a new swap event.
     await this.runIsolated('confirmation-recovery', () => this.sweepOverdueConfirmations());
@@ -170,6 +173,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     if (this.healthTimer) clearInterval(this.healthTimer);
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     if (this.confirmationTimer) clearInterval(this.confirmationTimer);
+    this.runtimeHealth.stop();
     await Promise.allSettled([
       ...(this.slotSubscription == null
         ? []
@@ -2067,7 +2071,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       `observation=${cohorts.get('MARKET_OBSERVATION') ?? 0} ` +
       `discovered=${this.discovered} confirmations=${this.confirmations} entries=${this.entries} exits=${this.exits} ` +
       `rpcErrors=${this.rpcFailures} rpcBackoffMs=${Math.max(0, this.rpcBackoffUntil - now)} ` +
-      `rateLimitStrikes=${this.rpcRateLimitStrikes}`,
+      `rateLimitStrikes=${this.rpcRateLimitStrikes} ${this.runtimeHealth.summary()}`,
     );
     if (venueLines.length) this.logger.log(`SOLANA V2.2 STREAMS ${venueLines.join(' | ')}`);
   }

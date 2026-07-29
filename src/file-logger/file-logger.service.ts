@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as zlib from 'zlib';
 import {
   CsvHeader,
   NewPoolRow, NEW_POOL_HEADERS,
@@ -28,6 +29,9 @@ import {
 @Injectable()
 export class FileLoggerService implements OnModuleInit {
   private readonly logger = new Logger(FileLoggerService.name);
+  /** Existing files need header validation once per process, not once per row. */
+  private readonly validatedHeaders = new Set<string>();
+  private readonly rawLogDays = new Map<string, string>();
   logDir: string; // package-visible for tests
 
   constructor(private readonly config: ConfigService) {
@@ -50,6 +54,7 @@ export class FileLoggerService implements OnModuleInit {
   }
 
   logTrajectorySnapshot(row: TrajectorySnapshotRow): void {
+    this.rotateRawLogIfNeeded('raw/trajectory_snapshots.csv');
     this.writeCsvRow('raw/trajectory_snapshots.csv', TRAJECTORY_SNAPSHOT_HEADERS, row);
   }
 
@@ -134,8 +139,16 @@ export class FileLoggerService implements OnModuleInit {
   // Raw API payloads are stored in DB (RawCollectorPayload table).
   // This file stores per-cycle summaries only (no bulk API dump here).
   logRawPayload(payload: Record<string, unknown>): void {
-    const fullPath = path.join(this.logDir, 'raw', 'source_payloads.jsonl');
+    const relativePath = 'raw/source_payloads.jsonl';
+    this.rotateRawLogIfNeeded(relativePath);
+    const fullPath = path.join(this.logDir, relativePath);
     fs.appendFileSync(fullPath, JSON.stringify(payload) + '\n', 'utf8');
+  }
+
+  /** Called by maintenance to compact the current raw session without touching paper CSVs. */
+  archiveActiveRawLogs(): number {
+    return Number(this.rotateRawLogIfNeeded('raw/source_payloads.jsonl', true)) +
+      Number(this.rotateRawLogIfNeeded('raw/trajectory_snapshots.csv', true));
   }
 
   // ─── TXT report write (overwrite) ───────────────────────────────────────────
@@ -168,13 +181,17 @@ export class FileLoggerService implements OnModuleInit {
     const fullPath = path.join(this.logDir, relativePath);
     const isNewFile = !fs.existsSync(fullPath);
     const rowObj = row as Record<string, unknown>;
+    const expected = headers.map((h) => escapeCsvField(h.title)).join(',');
+    const headerKey = `${fullPath}\u0000${expected}\u0000${leadingComment ?? ''}`;
 
     let output = '';
     if (isNewFile) {
       if (leadingComment) output += leadingComment + '\n';
-      output += headers.map((h) => escapeCsvField(h.title)).join(',') + '\n';
-    } else {
-      this.upgradeHeaderIfAppendOnly(fullPath, headers, leadingComment);
+      output += expected + '\n';
+      this.validatedHeaders.add(headerKey);
+    } else if (!this.validatedHeaders.has(headerKey)) {
+      this.upgradeHeaderIfAppendOnly(fullPath, expected, leadingComment);
+      this.validatedHeaders.add(headerKey);
     }
     output += headers.map((h) => escapeCsvField(rowObj[h.id])).join(',') + '\n';
 
@@ -193,18 +210,24 @@ export class FileLoggerService implements OnModuleInit {
 
   private upgradeHeaderIfAppendOnly(
     fullPath: string,
-    headers: CsvHeader[],
+    expected: string,
     leadingComment?: string,
   ): void {
-    let raw: string;
+    let prefix: string;
     try {
-      raw = fs.readFileSync(fullPath, 'utf8');
+      const descriptor = fs.openSync(fullPath, 'r');
+      try {
+        const bytes = Buffer.alloc(64 * 1024);
+        const length = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
+        prefix = bytes.toString('utf8', 0, length);
+      } finally {
+        fs.closeSync(descriptor);
+      }
     } catch {
       return;
     }
 
-    const expected = headers.map((h) => escapeCsvField(h.title)).join(',');
-    const lines = raw.split(/\r?\n/);
+    const lines = prefix.split(/\r?\n/);
     const headerIndex = leadingComment ? lines.findIndex((line) => !line.startsWith('#')) : 0;
     if (headerIndex < 0 || lines[headerIndex] === expected) return;
 
@@ -215,8 +238,49 @@ export class FileLoggerService implements OnModuleInit {
       existing.every((value, index) => value === next[index]);
     if (!isAppendOnly) return;
 
-    lines[headerIndex] = expected;
-    fs.writeFileSync(fullPath, lines.join('\n'), 'utf8');
+    // Schema upgrades are rare; only that path needs one full-file rewrite.
+    try {
+      const raw = fs.readFileSync(fullPath, 'utf8');
+      const fullLines = raw.split(/\r?\n/);
+      fullLines[headerIndex] = expected;
+      fs.writeFileSync(fullPath, fullLines.join('\n'), 'utf8');
+    } catch (error) {
+      this.logger.warn(`CSV header upgrade skipped for ${path.basename(fullPath)}: ${(error as Error).message}`);
+    }
+  }
+
+  /** Rotate only high-volume raw logs; decision and paper CSVs remain stable. */
+  private rotateRawLogIfNeeded(relativePath: string, force = false): boolean {
+    const today = new Date().toISOString().slice(0, 10);
+    if (!force && this.rawLogDays.get(relativePath) === today) return false;
+    const fullPath = path.join(this.logDir, relativePath);
+    let rotated = false;
+    try {
+      if (fs.existsSync(fullPath)) {
+        const modifiedDay = fs.statSync(fullPath).mtime.toISOString().slice(0, 10);
+        if ((force || modifiedDay !== today) && fs.statSync(fullPath).size > 0) {
+          const archiveDirectory = path.join(this.logDir, 'archive', 'raw-logs', modifiedDay);
+          fs.mkdirSync(archiveDirectory, { recursive: true });
+          const baseArchivePath = path.join(archiveDirectory, `${path.basename(fullPath)}.gz`);
+          const archivePath = fs.existsSync(baseArchivePath)
+            ? path.join(archiveDirectory, `${path.basename(fullPath)}.${Date.now()}.gz`)
+            : baseArchivePath;
+          const compressed = zlib.gzipSync(fs.readFileSync(fullPath), { level: zlib.constants.Z_BEST_COMPRESSION });
+          fs.writeFileSync(`${archivePath}.tmp`, compressed);
+          fs.renameSync(`${archivePath}.tmp`, archivePath);
+          fs.unlinkSync(fullPath);
+          for (const key of this.validatedHeaders) {
+            if (key.startsWith(`${fullPath}\u0000`)) this.validatedHeaders.delete(key);
+          }
+          this.logger.log(`Rotated raw log ${path.basename(fullPath)} -> ${path.basename(archivePath)}`);
+          rotated = true;
+        }
+      }
+    } catch (error) {
+      this.logger.warn(`Raw log rotation skipped for ${path.basename(fullPath)}: ${(error as Error).message}`);
+    }
+    this.rawLogDays.set(relativePath, today);
+    return rotated;
   }
 }
 

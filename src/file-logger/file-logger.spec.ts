@@ -156,6 +156,18 @@ describe('FileLoggerService', () => {
     expect(lines[2].startsWith('ts,')).toBe(false);
   });
 
+  it('does not reread a growing CSV after its header was validated', () => {
+    const csvPath = path.join(tempDir, 'raw', 'new_pools.csv');
+    fs.writeFileSync(csvPath, `ts,run_id,schema_version,chain,token_address,token_symbol,token_name,pool_address,dex,quote_asset,price_usd,liquidity_usd,fdv_usd,vol_5m,vol_1h,vol_6h,vol_24h,buys_1h,sells_1h,pool_created_at,source,risk_decision\n${'x'.repeat(1024 * 1024)}\n`);
+    const readSpy = jest.spyOn(fs, 'readFileSync');
+
+    service.logNewPool(buildNewPoolRow({ token_address: '0xone' }));
+    service.logNewPool(buildNewPoolRow({ token_address: '0xtwo' }));
+
+    expect(readSpy).not.toHaveBeenCalledWith(csvPath, 'utf8');
+    readSpy.mockRestore();
+  });
+
   // ── Timestamp format ─────────────────────────────────────────────────────
 
   it('ts produced by Date.toISOString() is UTC with Z suffix', () => {
@@ -247,5 +259,28 @@ describe('FileLoggerService', () => {
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0])).toMatchObject({ run_id: 'r1', source: 'geckoterminal' });
     expect(JSON.parse(lines[1])).toMatchObject({ source: 'dexscreener', pool_count: 5 });
+  });
+
+  it('rotates a previous-day raw payload log into gzip before appending today', () => {
+    const fullPath = path.join(tempDir, 'raw', 'source_payloads.jsonl');
+    fs.writeFileSync(fullPath, '{"old":true}\n');
+    const yesterday = new Date(Date.now() - 86_400_000);
+    fs.utimesSync(fullPath, yesterday, yesterday);
+
+    service.logRawPayload({ run_id: 'today', source: 'dexscreener' });
+
+    const archiveRoot = path.join(tempDir, 'archive', 'raw-logs');
+    const archiveDay = fs.readdirSync(archiveRoot)[0];
+    const archives = fs.readdirSync(path.join(archiveRoot, archiveDay));
+    expect(archives).toContain('source_payloads.jsonl.gz');
+    expect(fs.readFileSync(fullPath, 'utf8')).toContain('today');
+  });
+
+  it('archives the active raw session on an explicit maintenance request', () => {
+    const fullPath = path.join(tempDir, 'raw', 'source_payloads.jsonl');
+    fs.writeFileSync(fullPath, '{"current":true}\n');
+
+    expect(service.archiveActiveRawLogs()).toBe(1);
+    expect(fs.existsSync(fullPath)).toBe(false);
   });
 });

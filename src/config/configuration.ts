@@ -504,6 +504,14 @@ export const telegramConfig = registerAs('telegram', () => ({
   minScore: parseFloat(process.env.TELEGRAM_MIN_SCORE ?? '75'),
 }));
 
+export const maintenanceConfig = registerAs('maintenance', () => ({
+  retentionEnabled: process.env.RESEARCH_RETENTION_ENABLED !== 'false',
+  hotRawDays: Math.max(1, parseInt(process.env.RESEARCH_HOT_RAW_DAYS ?? '7', 10)),
+  archiveDays: Math.max(7, parseInt(process.env.RESEARCH_ARCHIVE_DAYS ?? '90', 10)),
+  batchSize: Math.min(2_000, Math.max(10, parseInt(process.env.RESEARCH_RETENTION_BATCH_SIZE ?? '500', 10))),
+  archiveDir: process.env.RESEARCH_ARCHIVE_DIR ?? './logs/archive',
+}));
+
 export default [
   appConfig,
   redisConfig,
@@ -517,6 +525,7 @@ export default [
   gemConfig,
   launchSniperConfig,
   telegramConfig,
+  maintenanceConfig,
   explorerConfig,
   onchainConfig,
 ];
