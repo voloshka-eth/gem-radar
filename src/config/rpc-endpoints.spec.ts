@@ -93,6 +93,15 @@ describe('rpc-endpoints Alchemy/Infura split', () => {
 
     expect(resolved.solanaRpcUrls[0]).toBe('https://api.mainnet-beta.solana.com');
     expect(resolved.solanaRpcUrls[1]).toContain('solana-mainnet.infura.io');
-    expect(resolved.solanaRpcWsUrl).toContain('solana-mainnet.infura.io');
+    expect(resolved.solanaRpcWsUrl).toBeUndefined();
+  });
+
+  it('uses a Solana WebSocket endpoint only when it was explicitly configured', () => {
+    const resolved = flattenResolved(resolveRpcEndpoints({
+      infuraApiKey: 'infura-secret-key-1234567890',
+      solanaRpcWsUrl: 'wss://solana.example.test/ws',
+    }));
+
+    expect(resolved.solanaRpcWsUrl).toBe('wss://solana.example.test/ws');
   });
 });

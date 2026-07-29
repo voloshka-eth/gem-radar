@@ -10,9 +10,9 @@
  *   2. Alchemy (if chain is in RPC_ALCHEMY_CHAINS and key set)
  *   3. Infura  (if chain is in RPC_INFURA_CHAINS and key set)
  *
- * Solana (@solana/web3.js) has a single Connection URL — when Infura owns
- * Solana and a key is present, Infura becomes the Solana endpoint (public
- * stays available only if you set SOLANA_RPC_URL explicitly).
+ * Solana HTTP is also free-first. WebSocket subscriptions intentionally stay
+ * on Solana's public WS unless SOLANA_RPC_WS_URL is explicitly configured:
+ * some paid free tiers accept HTTP reads but reject logsSubscribe.
  *
  * Viem transports must use rank:false + a long primary timeout so the free
  * endpoint is always tried first and paid providers only run after timeout.
@@ -319,9 +319,11 @@ export function resolveRpcEndpoints(
   const robinhoodRpcWsUrl = rhWsExplicit
     ?? (alchemyKey && onAlchemy('robinhood') ? alchemyWsUrl('robinhood-mainnet', alchemyKey) : undefined)
     ?? (infuraKey && onInfura('robinhood') ? infuraWsUrl('robinhood-mainnet', infuraKey) : undefined);
-  const solanaRpcWsUrl = solWsExplicit
-    ?? (infuraKey && onInfura('solana') ? infuraWsUrl('solana-mainnet', infuraKey) : undefined)
-    ?? (alchemyKey && onAlchemy('solana') ? alchemyWsUrl('solana-mainnet', alchemyKey) : undefined);
+  // Do not infer a paid Solana WSS endpoint. Providers can expose HTTP RPC on
+  // a free plan while rejecting logsSubscribe, which makes web3.js retry and
+  // log -32601 forever. With no explicit WSS URL, Connection derives the
+  // well-supported public WS endpoint from the public HTTP primary.
+  const solanaRpcWsUrl = solWsExplicit;
 
   const alchemyActive = Boolean(alchemyKey) && alchemyChains.length > 0;
   const infuraActive = Boolean(infuraKey) && infuraChains.length > 0;
