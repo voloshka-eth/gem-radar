@@ -35,6 +35,7 @@ export interface SolanaLaunchEvent {
   poolAddress: string;
   quoteMint: string;
   creatorAddress: string | null;
+  sourcePoolAddress?: string | null;
   rawAccounts: string[];
 }
 
@@ -217,6 +218,7 @@ export function decodeSolanaVenueTransaction(
         poolAddress: launch.pool,
         quoteMint: launch.quoteMint,
         creatorAddress: launch.creator,
+        sourcePoolAddress: launch.sourcePool,
         rawAccounts: instruction.accounts,
       });
     }
@@ -260,32 +262,32 @@ function launchFromInstruction(
   venue: SolanaVenue,
   name: string,
   accounts: Map<string, string>,
-): { kind: 'LAUNCH' | 'MIGRATION'; venue: SolanaVenue; mint: string; pool: string; quoteMint: string; creator: string | null } | null {
+): { kind: 'LAUNCH' | 'MIGRATION'; venue: SolanaVenue; mint: string; pool: string; quoteMint: string; creator: string | null; sourcePool: string | null } | null {
   const normalized = normalizeName(name);
   if (venue === 'PUMP_BONDING_CURVE' && ['create', 'create_v2'].includes(normalized)) {
     return {
       kind: 'LAUNCH', venue, mint: account(accounts, 'mint', 'baseMint')!,
       pool: account(accounts, 'bondingCurve')!, quoteMint: account(accounts, 'quoteMint') ?? WSOL_MINT,
-      creator: account(accounts, 'user', 'creator'),
+      creator: account(accounts, 'user', 'creator'), sourcePool: null,
     };
   }
   if (venue === 'PUMP_BONDING_CURVE' && ['migrate', 'migrate_v2'].includes(normalized)) {
     return {
       kind: 'MIGRATION', venue: 'PUMPSWAP', mint: account(accounts, 'mint', 'baseMint')!,
       pool: account(accounts, 'pool')!, quoteMint: account(accounts, 'quoteMint', 'wsolMint') ?? WSOL_MINT,
-      creator: account(accounts, 'user'),
+      creator: account(accounts, 'user'), sourcePool: account(accounts, 'bondingCurve'),
     };
   }
   if (venue === 'PUMPSWAP' && normalized === 'create_pool') {
     return {
       kind: 'LAUNCH', venue, mint: account(accounts, 'baseMint')!, pool: account(accounts, 'pool')!,
-      quoteMint: account(accounts, 'quoteMint') ?? WSOL_MINT, creator: account(accounts, 'creator'),
+      quoteMint: account(accounts, 'quoteMint') ?? WSOL_MINT, creator: account(accounts, 'creator'), sourcePool: null,
     };
   }
   if (venue === 'METEORA_DBC' && normalized.startsWith('initialize_virtual_pool')) {
     return {
       kind: 'LAUNCH', venue, mint: account(accounts, 'baseMint')!, pool: account(accounts, 'pool')!,
-      quoteMint: account(accounts, 'quoteMint') ?? WSOL_MINT, creator: account(accounts, 'creator'),
+      quoteMint: account(accounts, 'quoteMint') ?? WSOL_MINT, creator: account(accounts, 'creator'), sourcePool: null,
     };
   }
   if (venue === 'METEORA_DBC' && (normalized === 'migrate_meteora_damm' || normalized === 'migration_damm_v2')) {
@@ -293,30 +295,31 @@ function launchFromInstruction(
       kind: 'MIGRATION', venue: normalized === 'migration_damm_v2' ? 'METEORA_DAMM_V2' : 'METEORA_DAMM_V1',
       mint: account(accounts, 'baseMint', 'tokenAMint')!, pool: account(accounts, 'pool')!,
       quoteMint: account(accounts, 'quoteMint', 'tokenBMint') ?? WSOL_MINT, creator: account(accounts, 'payer'),
+      sourcePool: account(accounts, 'virtualPool'),
     };
   }
   if (venue === 'RAYDIUM_LAUNCHLAB' && ['initialize', 'initialize_v2', 'initialize_with_token2022'].includes(normalized)) {
     return {
       kind: 'LAUNCH', venue, mint: account(accounts, 'mintA')!, pool: account(accounts, 'poolId')!,
-      quoteMint: account(accounts, 'mintB') ?? WSOL_MINT, creator: account(accounts, 'creator'),
+      quoteMint: account(accounts, 'mintB') ?? WSOL_MINT, creator: account(accounts, 'creator'), sourcePool: null,
     };
   }
   if (venue === 'RAYDIUM_CPMM' && normalized === 'initialize') {
     return {
       kind: 'MIGRATION', venue, mint: account(accounts, 'mintA')!, pool: account(accounts, 'poolId')!,
-      quoteMint: account(accounts, 'mintB') ?? WSOL_MINT, creator: account(accounts, 'creator'),
+      quoteMint: account(accounts, 'mintB') ?? WSOL_MINT, creator: account(accounts, 'creator'), sourcePool: null,
     };
   }
   if (venue === 'METEORA_DAMM_V1' && normalized.startsWith('initialize')) {
     return {
       kind: 'LAUNCH', venue, mint: account(accounts, 'tokenAMint')!, pool: account(accounts, 'pool')!,
-      quoteMint: account(accounts, 'tokenBMint') ?? WSOL_MINT, creator: account(accounts, 'payer', 'admin'),
+      quoteMint: account(accounts, 'tokenBMint') ?? WSOL_MINT, creator: account(accounts, 'payer', 'admin'), sourcePool: null,
     };
   }
   if (venue === 'METEORA_DAMM_V2' && normalized.startsWith('initialize_') && normalized.includes('pool')) {
     return {
       kind: 'LAUNCH', venue, mint: account(accounts, 'token_a_mint')!, pool: account(accounts, 'pool')!,
-      quoteMint: account(accounts, 'token_b_mint') ?? WSOL_MINT, creator: account(accounts, 'creator', 'payer'),
+      quoteMint: account(accounts, 'token_b_mint') ?? WSOL_MINT, creator: account(accounts, 'creator', 'payer'), sourcePool: null,
     };
   }
   return null;

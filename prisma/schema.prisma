@@ -435,6 +435,11 @@ model RobinhoodEntryExperiment {
   t0SpotPriceUsd                 Decimal   @map("t0_spot_price_usd") @db.Decimal(80, 36)
   t0DepthUsd                     Decimal   @map("t0_depth_usd") @db.Decimal(20, 4)
   t0RoundTripMultiple            Decimal   @map("t0_round_trip_multiple") @db.Decimal(16, 6)
+  frictionCohort                 String    @default("LEGACY_UNCLASSIFIED") @map("friction_cohort")
+  t0BuyImpactPct                 Decimal?  @map("t0_buy_impact_pct") @db.Decimal(10, 6)
+  t0SellImpactPct                Decimal?  @map("t0_sell_impact_pct") @db.Decimal(10, 6)
+  t0QuoteAgeMs                   Int?      @map("t0_quote_age_ms")
+  sharedEntryQuoteId             String?   @map("shared_entry_quote_id")
   riskSnapshot                   Json      @map("risk_snapshot")
   dataHealthSnapshot             Json      @map("data_health_snapshot")
   v2ShadowDecision               String?   @map("v2_shadow_decision")
@@ -460,6 +465,7 @@ model RobinhoodEntryExperiment {
   arms  RobinhoodExperimentArm[]
 
   @@index([status, t0At])
+  @@index([configHash, frictionCohort, status])
   @@index([tokenAddress, poolAddress])
   @@map("robinhood_entry_experiments")
 }
@@ -676,6 +682,10 @@ model SolanaLaunchWatch {
   discoverySlot             BigInt   @map("discovery_slot")
   discoverySignature        String   @map("discovery_signature")
   discoveryInstructionIndex Int      @map("discovery_instruction_index")
+  // Explicit identities are nullable for pre-v3 records. New observations use
+  // these keys to prevent a mint-only match from crossing a migration boundary.
+  launchId                  String?  @map("launch_id")
+  migrationId               String?  @map("migration_id")
   latestSlot                BigInt   @map("latest_slot")
   latestEventAt             DateTime @map("latest_event_at")
   lastObservedSignature     String?  @map("last_observed_signature")
@@ -694,6 +704,7 @@ model SolanaLaunchWatch {
 
   observations SolanaSwapObservation[]
   signals      SolanaExperimentSignal[]
+  poolEras     SolanaPoolEra[]
 
   @@unique([programId, discoverySignature, discoveryInstructionIndex])
   @@index([venue, mintAddress])
@@ -704,8 +715,14 @@ model SolanaLaunchWatch {
 model SolanaSwapObservation {
   id               String   @id @default(cuid())
   watchId          String   @map("watch_id")
+  poolEraId        String?  @map("pool_era_id")
   venue            String
   programId        String   @map("program_id")
+  poolAddress      String?  @map("pool_address")
+  tokenMint        String?  @map("token_mint")
+  launchId         String?  @map("launch_id")
+  migrationId      String?  @map("migration_id")
+  attributionStatus String  @default("RESOLVED") @map("attribution_status")
   signature        String
   instructionIndex Int      @map("instruction_index")
   slot             BigInt
@@ -721,16 +738,67 @@ model SolanaSwapObservation {
   createdAt        DateTime @default(now()) @map("created_at")
 
   watch SolanaLaunchWatch @relation(fields: [watchId], references: [id], onDelete: Cascade)
+  poolEra SolanaPoolEra?   @relation(fields: [poolEraId], references: [id], onDelete: SetNull)
 
   @@unique([programId, signature, instructionIndex])
   @@index([watchId, ts])
+  @@index([poolEraId, ts])
+  @@index([poolAddress, ts])
+  @@index([tokenMint, ts])
   @@map("solana_swap_observations")
+}
+
+// Immutable venue/pool eras belonging to one launch. A migration closes one
+// era and starts another; it never makes a mint-only attribution decision.
+model SolanaPoolEra {
+  id            String   @id @default(cuid())
+  watchId       String   @map("watch_id")
+  venue         String
+  programId     String   @map("program_id")
+  poolAddress   String   @map("pool_address")
+  quoteMint     String   @map("quote_mint")
+  migrationId   String?  @map("migration_id")
+  active        Boolean  @default(true)
+  startedAt     DateTime @map("started_at")
+  endedAt       DateTime? @map("ended_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  watch        SolanaLaunchWatch       @relation(fields: [watchId], references: [id], onDelete: Cascade)
+  observations SolanaSwapObservation[]
+
+  @@unique([programId, poolAddress])
+  @@index([watchId, active])
+  @@index([venue, poolAddress, active])
+  @@map("solana_pool_eras")
+}
+
+// An unresolved trade is valuable research data, but it must never be silently
+// assigned to the oldest mint watch. This is append-only attribution telemetry.
+model SolanaTradeAttributionIssue {
+  id               String   @id @default(cuid())
+  chain            String   @default("solana")
+  venue            String
+  programId        String   @map("program_id")
+  poolAddress      String?  @map("pool_address")
+  tokenMint        String?  @map("token_mint")
+  signature        String
+  instructionIndex Int      @map("instruction_index")
+  slot             BigInt
+  reason           String
+  candidateWatchIds Json?   @map("candidate_watch_ids")
+  rawSnapshot      Json?    @map("raw_snapshot")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@unique([programId, signature, instructionIndex])
+  @@index([reason, createdAt])
+  @@map("solana_trade_attribution_issues")
 }
 
 model SolanaExperimentSignal {
   id                     String    @id @default(cuid())
   watchId                String    @map("watch_id")
   strategyVersion        String    @default("solana_multi_launch_flow_v2") @map("strategy_version")
+  featureSchemaVersion   String?   @map("feature_schema_version")
   configHash             String    @map("config_hash")
   t0                     DateTime
   t0Slot                 BigInt    @map("t0_slot")
@@ -757,6 +825,21 @@ model SolanaExperimentSignal {
   @@unique([watchId, strategyVersion, configHash])
   @@index([status, confirmationDueAt])
   @@map("solana_experiment_signals")
+}
+
+// One immutable baseline per research iteration. It stores provenance only and
+// never mutates trading records or recalculates historical fills.
+model ResearchIterationSnapshot {
+  id                String   @id @default(cuid())
+  iteration         String   @unique
+  gitCommit         String   @map("git_commit")
+  cutoffAt          DateTime @map("cutoff_at")
+  strategyVersions  Json     @map("strategy_versions")
+  configHashes      Json     @map("config_hashes")
+  benchmarkSummary  Json?    @map("benchmark_summary")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@map("research_iteration_snapshots")
 }
 
 model SolanaPaperArm {

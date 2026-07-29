@@ -17,6 +17,7 @@ export async function adaptiveBatchRead<T, R>(
   values: readonly T[],
   initialBatchSize: number,
   reader: (batch: readonly T[]) => Promise<readonly R[]>,
+  shouldSplit: (error: Error, batch: readonly T[]) => boolean = () => true,
 ): Promise<AdaptiveBatchResult<T, R>> {
   const size = Math.max(1, Math.floor(initialBatchSize));
   const results: R[] = [];
@@ -29,12 +30,18 @@ export async function adaptiveBatchRead<T, R>(
       results.push(...await reader(batch));
       maxSuccessfulBatch = Math.max(maxSuccessfulBatch, batch.length);
     } catch (cause) {
+      const error = toError(cause);
       if (batch.length === 1) {
-        failures.push({ values: batch, error: toError(cause) });
+        failures.push({ values: batch, error });
+        return;
+      }
+      if (!shouldSplit(error, batch)) {
+        failures.push({ values: batch, error });
         return;
       }
       const middle = Math.ceil(batch.length / 2);
-      await Promise.all([read(batch.slice(0, middle)), read(batch.slice(middle))]);
+      await read(batch.slice(0, middle));
+      await read(batch.slice(middle));
     }
   };
 

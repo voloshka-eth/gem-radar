@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 
-export const SOLANA_MULTI_LAUNCH_STRATEGY = 'solana_multi_launch_flow_v2_2' as const;
+export const SOLANA_MULTI_LAUNCH_STRATEGY = 'solana_multi_launch_flow_v2_3' as const;
 
 export type SolanaVenue =
   | 'RAYDIUM_LAUNCHLAB'
@@ -85,6 +85,8 @@ export const SOLANA_FLOW_V2_CONFIG = deepFreeze({
   maxPrimaryLagSlots: 8,
   maxQuoteAgeSlots: 1,
   maxPrimaryEventAgeMs: 5_000,
+  /** Paid fills (C confirmation) are refused when discovery→fill exceeds this. */
+  maxPaidEntryLatencyMs: 5_000,
   confirmationStartMs: 20_000,
   confirmationEndMs: 10 * 60_000,
   confirmationWindows: [
@@ -119,9 +121,14 @@ export const SOLANA_FLOW_V2_CONFIG = deepFreeze({
   ],
 } as const);
 
+/**
+ * Finish-line capital policy: A/B stay in the paired experiment as $0 shadow
+ * arms (still created for coverage). Only C deploys paid size after flow
+ * confirmation passes.
+ */
 export const SOLANA_EXPERIMENT_ARMS: readonly SolanaExperimentArmDefinition[] = deepFreeze([
-  { code: 'A_IMMEDIATE_20', immediateUsd: 20, confirmationUsd: 0 },
-  { code: 'B_PROBE_4_ADD_16', immediateUsd: 4, confirmationUsd: 16 },
+  { code: 'A_IMMEDIATE_20', immediateUsd: 0, confirmationUsd: 0 },
+  { code: 'B_PROBE_4_ADD_16', immediateUsd: 0, confirmationUsd: 0 },
   { code: 'C_CONFIRM_20', immediateUsd: 0, confirmationUsd: 20 },
 ]);
 

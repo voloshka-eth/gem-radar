@@ -10,15 +10,16 @@ import {
 describe('Solana flow v2', () => {
   it('freezes the preregistered config and three paired arms', () => {
     expect(Object.isFrozen(SOLANA_FLOW_V2_CONFIG)).toBe(true);
-    expect(SOLANA_FLOW_V2_CONFIG.version).toBe('solana_multi_launch_flow_v2_2');
+    expect(SOLANA_FLOW_V2_CONFIG.version).toBe('solana_multi_launch_flow_v2_3');
     expect(SOLANA_FLOW_V2_CONFIG.timeExitMs).toBe(8 * 60 * 60_000);
+    expect(SOLANA_FLOW_V2_CONFIG.maxPaidEntryLatencyMs).toBe(5_000);
     expect(SOLANA_FLOW_V2_CONFIG.confirmationWindows.map((window) => window.code)).toEqual([
       'EARLY', 'RECOVERY_1', 'RECOVERY_2',
     ]);
     expect(SOLANA_FLOW_V2_CONFIG_HASH).toMatch(/^[0-9a-f]{64}$/);
     expect(SOLANA_EXPERIMENT_ARMS.map((arm) => [arm.code, arm.immediateUsd, arm.confirmationUsd])).toEqual([
-      ['A_IMMEDIATE_20', 20, 0],
-      ['B_PROBE_4_ADD_16', 4, 16],
+      ['A_IMMEDIATE_20', 0, 0],
+      ['B_PROBE_4_ADD_16', 0, 0],
       ['C_CONFIRM_20', 0, 20],
     ]);
   });

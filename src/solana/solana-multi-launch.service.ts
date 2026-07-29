@@ -29,6 +29,8 @@ type AnyRow = Record<string, any>;
 type QueueMeta = {
   slot: number;
   source: 'STREAM' | 'BACKFILL';
+  priority: 'P1' | 'P2' | 'P3';
+  queuedAtMs: number;
   cursorProgramIds: Set<string>;
   watchIds: Set<string>;
   attempts: number;
@@ -62,7 +64,9 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
   private readonly admissionsInFlight = new Set<string>();
   private readonly pendingAdmissions = new Set<string>();
   private readonly queued = new Map<string, QueueMeta>();
+  private readonly p0ExitQueue = new Map<string, number>();
   private draining = false;
+  private p0Draining = false;
   private backfillBusy = false;
   private lifecycleBusy = false;
   private confirmationSweepBusy = false;
@@ -82,6 +86,11 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
   private swaps = 0;
   private signals = 0;
   private confirmations = 0;
+  private queueWaitTotalMs = 0;
+  private queueWaitSamples = 0;
+  private droppedOrExpiredJobs = 0;
+  private p0ExitDelayTotalMs = 0;
+  private p0ExitDelaySamples = 0;
   private entries = 0;
   private exits = 0;
   private rpcFailures = 0;
@@ -187,7 +196,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         const potentialLaunch = isPotentialLaunchLog(venue, event.logs);
         void this.updateLiveCursor(programId, context.slot, potentialLaunch ? null : event.signature);
         if (!potentialLaunch) return;
-        this.enqueue(event.signature, context.slot, 'STREAM', programId, null);
+    this.enqueue(event.signature, context.slot, 'STREAM', programId, null, 'P2');
         void this.drainQueue();
       },
       'confirmed',
@@ -272,7 +281,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       try {
         const latest = await this.quotes.runRpc(() => this.quotes.connection.getSignaturesForAddress(
           new PublicKey(descriptor.programId), { limit: 1 }, 'confirmed',
-        ));
+        ), 'P2');
         await (this.prisma as any).solanaProgramCursor.update({
           where: { programId: descriptor.programId },
           data: {
@@ -328,7 +337,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       (event, context) => {
         if (event.err) return;
         this.latestHeadSlot = Math.max(this.latestHeadSlot, context.slot);
-        this.enqueue(event.signature, context.slot, 'STREAM', null, watch.id);
+        this.enqueue(event.signature, context.slot, 'STREAM', null, watch.id, 'P1');
         void this.drainQueue();
       },
       'confirmed',
@@ -377,7 +386,9 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         const [signature, meta] = this.nextQueuedTransaction();
         this.queued.delete(signature);
         try {
-          await this.processSignature(signature, meta.source, meta.slot);
+          this.queueWaitTotalMs += Math.max(0, Date.now() - meta.queuedAtMs);
+          this.queueWaitSamples++;
+          await this.processSignature(signature, meta.source, meta.slot, meta.priority);
           await this.markQueueProcessed(meta, signature);
         } catch (error) {
           this.rpcFailures++;
@@ -388,6 +399,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
             meta.attempts++;
             this.queued.set(signature, meta);
           } else {
+            this.droppedOrExpiredJobs++;
             await this.markQueueGap(meta, error);
           }
           if (meta.attempts <= 1 || meta.attempts >= 5) {
@@ -415,16 +427,20 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     source: 'STREAM' | 'BACKFILL',
     cursorProgramId: string | null,
     watchId: string | null,
+    priority: QueueMeta['priority'] = watchId ? 'P1' : source === 'BACKFILL' ? 'P3' : 'P2',
   ): void {
     const existing = this.queued.get(signature);
     if (existing) {
       if (cursorProgramId) existing.cursorProgramIds.add(cursorProgramId);
       if (watchId) existing.watchIds.add(watchId);
+      if (queuePriority(priority) < queuePriority(existing.priority)) existing.priority = priority;
       return;
     }
     const meta: QueueMeta = {
       slot,
       source,
+      priority,
+      queuedAtMs: Date.now(),
       cursorProgramIds: new Set(cursorProgramId ? [cursorProgramId] : []),
       watchIds: new Set(watchId ? [watchId] : []),
       attempts: 0,
@@ -436,10 +452,12 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         ? entries.find(([, queuedMeta]) => queuedMeta.cursorProgramIds.size === 0) ?? entries[0]
         : entries.find(([, queuedMeta]) => queuedMeta.cursorProgramIds.size === 0);
       if (!victim) {
+        this.droppedOrExpiredJobs++;
         void this.markQueueGap(meta, new Error('local_queue_overflow_pool_event_dropped'));
         return;
       }
       this.queued.delete(victim[0]);
+      this.droppedOrExpiredJobs++;
       void this.markQueueGap(victim[1], new Error('local_queue_overflow'));
     }
     this.queued.set(signature, meta);
@@ -447,13 +465,15 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
 
   private nextQueuedTransaction(): [string, QueueMeta] {
     const entries = [...this.queued.entries()];
-    return entries.find(([, meta]) => meta.cursorProgramIds.size > 0)
-      ?? entries.find(([, meta]) => meta.source === 'STREAM')
-      ?? entries[0];
+    // P1 is watched-pool / confirmation flow. It must outrun discovery and
+    // backfill; active exits use their independent fallback (P0) below.
+    return entries.sort(([, left], [, right]) =>
+      queuePriority(left.priority) - queuePriority(right.priority) || left.queuedAtMs - right.queuedAtMs,
+    )[0];
   }
 
   private hasQueuedLaunches(): boolean {
-    return [...this.queued.values()].some((meta) => meta.cursorProgramIds.size > 0);
+    return [...this.queued.values()].some((meta) => meta.priority === 'P2');
   }
 
   private async runNextAdmission(): Promise<void> {
@@ -497,8 +517,13 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     ]);
   }
 
-  private async processSignature(signature: string, source: 'STREAM' | 'BACKFILL', expectedSlot: number): Promise<void> {
-    const transaction = await this.fetchTransaction(signature);
+  private async processSignature(
+    signature: string,
+    source: 'STREAM' | 'BACKFILL',
+    expectedSlot: number,
+    priority: QueueMeta['priority'] = source === 'BACKFILL' ? 'P3' : 'P2',
+  ): Promise<void> {
+    const transaction = await this.fetchTransaction(signature, priority);
     if (!transaction) throw new Error('confirmed_transaction_unavailable');
     const decoded = decodeSolanaVenueTransaction(transaction, signature);
     for (const launch of decoded.launches) await this.handleLaunch(launch, source);
@@ -508,11 +533,11 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async fetchTransaction(signature: string) {
+  private async fetchTransaction(signature: string, priority: QueueMeta['priority']) {
     for (let attempt = 0; attempt < 3; attempt++) {
       const transaction = await this.quotes.runRpc(() => this.quotes.connection.getParsedTransaction(signature, {
         commitment: 'confirmed', maxSupportedTransactionVersion: 0,
-      }));
+      }), priority);
       if (transaction) return transaction;
       await delay(250 * (attempt + 1));
     }
@@ -521,20 +546,8 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
 
   private async handleLaunch(event: SolanaLaunchEvent, source: 'STREAM' | 'BACKFILL'): Promise<void> {
     if (event.kind === 'MIGRATION') {
-      const existing = await (this.prisma as any).solanaLaunchWatch.findFirst({
-        where: { mintAddress: event.mintAddress, invalidatedAt: null }, orderBy: { launchedAt: 'asc' },
-      });
-      if (existing) {
-        const migrated = await (this.prisma as any).solanaLaunchWatch.update({
-          where: { id: existing.id },
-          data: {
-            venue: event.venue, poolAddress: event.poolAddress, quoteMint: event.quoteMint,
-            latestSlot: BigInt(event.slot), latestEventAt: new Date(event.blockTimeMs),
-          },
-        });
-        if (this.poolSubscriptions.has(existing.id)) await this.subscribeWatchPool(migrated);
-        return;
-      }
+      await this.handleMigration(event);
+      return;
     }
 
     const migratedWatch = await (this.prisma as any).solanaLaunchWatch.findFirst({
@@ -582,11 +595,20 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         poolAddress: event.poolAddress, quoteMint: event.quoteMint, creatorAddress: event.creatorAddress,
         launchedAt: new Date(event.blockTimeMs), discoverySlot: BigInt(event.slot),
         discoverySignature: event.signature, discoveryInstructionIndex: event.instructionIndex,
+        launchId: `${event.programId}:${event.signature}:${event.instructionIndex}`,
         latestSlot: BigInt(event.slot), latestEventAt: new Date(event.blockTimeMs),
         discoveryCohort: degraded ? 'DEGRADED_SHADOW' : 'PROGRAM_STREAM',
         benchmarkEligible: false, healthSnapshot: json(health),
       },
       update: { latestSlot: BigInt(event.slot), latestEventAt: new Date(event.blockTimeMs), healthSnapshot: json(health) },
+    });
+    await this.ensurePoolEra(watch, {
+      venue: event.venue,
+      programId: event.programId,
+      poolAddress: event.poolAddress,
+      quoteMint: event.quoteMint,
+      migrationId: null,
+      startedAt: new Date(event.blockTimeMs),
     });
     if (!existing) {
       this.discovered++;
@@ -596,6 +618,117 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       );
     }
     this.pendingAdmissions.add(watch.id);
+  }
+
+  private async handleMigration(event: SolanaLaunchEvent): Promise<void> {
+    const destinationProgramId = this.programForVenue(event.venue);
+    if (!destinationProgramId) {
+      await this.recordAttributionIssue(event, 'MIGRATION_DESTINATION_PROGRAM_UNKNOWN');
+      return;
+    }
+    const migrationId = `${destinationProgramId}:${event.signature}:${event.instructionIndex}`;
+    const existingDestination = await (this.prisma as any).solanaPoolEra.findUnique({
+      where: {
+        programId_poolAddress: {
+          programId: destinationProgramId,
+          poolAddress: event.poolAddress,
+        },
+      },
+      include: { watch: true },
+    });
+    if (existingDestination) {
+      if (
+        existingDestination.watch.mintAddress === event.mintAddress &&
+        existingDestination.migrationId === migrationId
+      ) {
+        return;
+      }
+      await this.recordAttributionIssue(
+        event,
+        'MIGRATION_DESTINATION_IDENTITY_CONFLICT',
+        [existingDestination.watchId],
+      );
+      return;
+    }
+
+    const sourcePoolAddress = event.sourcePoolAddress ?? null;
+    const sourceEra = sourcePoolAddress
+      ? await (this.prisma as any).solanaPoolEra.findUnique({
+        where: { programId_poolAddress: { programId: event.programId, poolAddress: sourcePoolAddress } },
+        include: { watch: true },
+      })
+      : null;
+    let resolvedSource = sourceEra;
+    if (!resolvedSource && sourcePoolAddress) {
+      // Compatibility bridge for a pre-era watch. This is exact pool identity,
+      // never a mint + oldest fallback.
+      const legacy = await (this.prisma as any).solanaLaunchWatch.findMany({
+        where: {
+          mintAddress: event.mintAddress, poolAddress: sourcePoolAddress,
+          programId: event.programId, invalidatedAt: null,
+        },
+        take: 2,
+      });
+      if (legacy.length === 1) {
+        const era = await this.ensurePoolEra(legacy[0], {
+          venue: legacy[0].venue,
+          programId: legacy[0].programId,
+          poolAddress: legacy[0].poolAddress,
+          quoteMint: legacy[0].quoteMint,
+          migrationId: legacy[0].migrationId ?? null,
+          startedAt: legacy[0].launchedAt,
+        });
+        resolvedSource = { ...era, watch: legacy[0] };
+      }
+    }
+    if (!resolvedSource || resolvedSource.watch.mintAddress !== event.mintAddress || !resolvedSource.active) {
+      await this.recordAttributionIssue(event, 'MIGRATION_ATTRIBUTION_UNKNOWN');
+      return;
+    }
+    const now = new Date(event.blockTimeMs);
+    await (this.prisma as any).$transaction([
+      (this.prisma as any).solanaPoolEra.update({
+        where: { id: resolvedSource.id }, data: { active: false, endedAt: now },
+      }),
+      (this.prisma as any).solanaPoolEra.create({
+        data: {
+          watchId: resolvedSource.watch.id, venue: event.venue, programId: destinationProgramId,
+          poolAddress: event.poolAddress, quoteMint: event.quoteMint, migrationId, startedAt: now,
+        },
+      }),
+      (this.prisma as any).solanaLaunchWatch.update({
+        where: { id: resolvedSource.watch.id },
+        data: {
+          venue: event.venue, programId: destinationProgramId, poolAddress: event.poolAddress, quoteMint: event.quoteMint,
+          migrationId, latestSlot: BigInt(event.slot), latestEventAt: now,
+        },
+      }),
+    ]);
+    const migrated = { ...resolvedSource.watch, venue: event.venue, programId: destinationProgramId,
+      poolAddress: event.poolAddress, quoteMint: event.quoteMint, migrationId };
+    if (this.poolSubscriptions.has(migrated.id)) await this.subscribeWatchPool(migrated);
+  }
+
+  private async ensurePoolEra(watch: AnyRow, era: {
+    venue: string; programId: string; poolAddress: string; quoteMint: string; migrationId: string | null; startedAt: Date;
+  }): Promise<AnyRow> {
+    const existing = await (this.prisma as any).solanaPoolEra.findUnique({
+      where: { programId_poolAddress: { programId: era.programId, poolAddress: era.poolAddress } },
+    });
+    if (existing) {
+      if (existing.watchId !== watch.id) {
+        throw new Error(`pool era identity conflict for ${era.programId}:${era.poolAddress}`);
+      }
+      return (this.prisma as any).solanaPoolEra.update({
+        where: { id: existing.id },
+        data: { active: true, endedAt: null, quoteMint: era.quoteMint },
+      });
+    }
+    return (this.prisma as any).solanaPoolEra.create({ data: { watchId: watch.id, ...era } });
+  }
+
+  private programForVenue(venue: SolanaVenue): string | null {
+    return solanaProgramDescriptors().find((descriptor) => descriptor.venue === venue)?.programId ?? null;
   }
 
   private async runAdmission(watchId: string): Promise<void> {
@@ -710,6 +843,22 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     benchmarkEligible: boolean,
   ): Promise<void> {
     const now = new Date();
+    const depthMeasurement = await this.quoteDepthMatrix(watch);
+    const depthMatrix = depthMeasurement?.snapshot ?? null;
+    const entryQuote = depthMeasurement?.quotes.get(20) ?? quote;
+    const latestSlot = this.latestHeadSlot || Number(watch.latestSlot ?? entryQuote.quoteSlot);
+    const measuredDecision = classifySolanaExecution(
+      entryQuote,
+      latestSlot,
+      Math.max(0, now.getTime() - new Date(watch.latestEventAt ?? watch.launchedAt).getTime()),
+      Boolean(watch.unresolvedGap),
+    );
+    // Route aggregators do not quote every size from one immutable venue
+    // state. They remain executable shadow data until an atomic adapter exists.
+    const measuredBenchmarkEligible = benchmarkEligible &&
+      depthMeasurement?.benchmarkEligible === true &&
+      measuredDecision.benchmarkEligible;
+    const measuredRiskCohort = measuredBenchmarkEligible ? riskCohort : 'EXECUTABLE_SHADOW';
     const signal = await (this.prisma as any).solanaExperimentSignal.upsert({
       where: { watchId_strategyVersion_configHash: {
         watchId: watch.id, strategyVersion: SOLANA_MULTI_LAUNCH_STRATEGY, configHash: SOLANA_FLOW_V2_CONFIG_HASH,
@@ -719,7 +868,12 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         t0: now, t0Slot: BigInt(quote.quoteSlot),
         confirmationDueAt: new Date(now.getTime() + SOLANA_FLOW_V2_CONFIG.confirmationEndMs),
         horizonAt: new Date(now.getTime() + SOLANA_FLOW_V2_CONFIG.timeExitMs),
-        riskCohort, benchmarkEligible, executionSnapshot: json(quote),
+        riskCohort: measuredRiskCohort, benchmarkEligible: measuredBenchmarkEligible,
+        featureSchemaVersion: 'solana_measurement_v3',
+        executionSnapshot: json({
+          ...entryQuote,
+          depthMatrix: depthMatrix ?? { depthSource: 'UNKNOWN', depthConfidence: 'UNKNOWN' },
+        }),
         healthSnapshot: watch.healthSnapshot ?? json({}), firstEligibleAt: now,
         arms: { create: SOLANA_EXPERIMENT_ARMS.map((arm) => ({
           armCode: arm.code, budgetUsd: SOLANA_FLOW_V2_CONFIG.positionBudgetUsd,
@@ -732,21 +886,18 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     for (const arm of signal.arms) {
       const definition = SOLANA_EXPERIMENT_ARMS.find((item) => item.code === arm.armCode)!;
       if (definition.immediateUsd > 0 && Number(arm.committedUsd) === 0) {
-        const armQuote = definition.immediateUsd === 20
-          ? quote
+        const armQuote = depthMeasurement?.quotes.get(definition.immediateUsd) ?? (definition.immediateUsd === 20
+          ? entryQuote
           : await this.quotes.quoteRoundTrip(
             watch.venue as SolanaVenue, watch.poolAddress, watch.mintAddress, watch.quoteMint, definition.immediateUsd,
-          );
+          ));
         if (armQuote) await this.fillEntry(signal, arm, armQuote, definition.immediateUsd, 'IMMEDIATE_ENTRY');
       }
     }
   }
 
   private async handleTrade(trade: SolanaDecodedTrade): Promise<void> {
-    const watch = await (this.prisma as any).solanaLaunchWatch.findFirst({
-      where: { mintAddress: trade.mintAddress, invalidatedAt: null },
-      orderBy: { launchedAt: 'asc' },
-    });
+    const watch = await this.resolveTradeWatch(trade);
     if (!watch) return;
     const quoteUsd = trade.quoteAmountRaw
       ? await this.quotes.quoteRawToUsd(trade.quoteMint, trade.quoteAmountRaw).catch(() => null)
@@ -758,6 +909,10 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       } },
       create: {
         watchId: watch.id, venue: trade.venue, programId: trade.programId, signature: trade.signature,
+        poolEraId: watch.poolEraId,
+        poolAddress: trade.poolAddress, tokenMint: trade.mintAddress,
+        launchId: watch.launchId ?? `${watch.programId}:${watch.discoverySignature}:${watch.discoveryInstructionIndex}`,
+        migrationId: watch.migrationId,
         instructionIndex: trade.instructionIndex, slot: BigInt(trade.slot), ts: new Date(trade.blockTimeMs),
         wallet: trade.wallet, direction: trade.direction, baseAmountRaw: trade.baseAmountRaw,
         quoteAmountRaw: trade.quoteAmountRaw, quoteUsd, creatorTrade, rawSnapshot: json(trade),
@@ -774,6 +929,154 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     });
     this.swaps++;
     if (creatorTrade && trade.direction === 'SELL') await this.closeWatchArms(watch.id, 'CREATOR_SELL');
+    // P0 is deliberately separate from transaction decoding: a slow quote can
+    // never block newer swaps, confirmations or discovery from being decoded.
+    this.scheduleP0ExitEvaluation(watch.id);
+  }
+
+  private async resolveTradeWatch(trade: SolanaDecodedTrade): Promise<AnyRow | null> {
+    const matchingEras = await (this.prisma as any).solanaPoolEra.findMany({
+      where: {
+        venue: trade.venue, programId: trade.programId, poolAddress: trade.poolAddress,
+        watch: { mintAddress: trade.mintAddress, invalidatedAt: null },
+      },
+      include: { watch: true },
+      take: 2,
+    });
+    const exactEras = matchingEras.filter((era: AnyRow) => era.active);
+    if (exactEras.length === 1) return { ...exactEras[0].watch, poolEraId: exactEras[0].id };
+    // Trades from a closed bonding-curve era are valid chain activity but no
+    // longer belong to the active migrated execution route.
+    if (exactEras.length === 0 && matchingEras.length === 1) return null;
+
+    // Pre-era history remains readable only through the same exact identity.
+    const legacy = matchingEras.length === 0 ? await (this.prisma as any).solanaLaunchWatch.findMany({
+      where: {
+        venue: trade.venue, programId: trade.programId, poolAddress: trade.poolAddress,
+        mintAddress: trade.mintAddress, invalidatedAt: null,
+        poolEras: { none: {} },
+      },
+      take: 2,
+    }) : [];
+    if (legacy.length === 1) return { ...legacy[0], poolEraId: null };
+
+    const mintCandidates = matchingEras.length === 0 && legacy.length === 0
+      ? await (this.prisma as any).solanaLaunchWatch.findMany({
+        where: { mintAddress: trade.mintAddress, invalidatedAt: null },
+        select: { id: true },
+        take: 2,
+      })
+      : [];
+    const candidates = [
+      ...matchingEras.map((era: AnyRow) => era.watch.id),
+      ...legacy.map((watch: AnyRow) => watch.id),
+      ...mintCandidates.map((watch: AnyRow) => watch.id),
+    ];
+    if (candidates.length === 0) return null;
+    await this.recordAttributionIssue(trade, 'TRADE_ATTRIBUTION_UNKNOWN', candidates);
+    this.logger.warn(
+      `TRADE_ATTRIBUTION_UNKNOWN venue=${trade.venue} pool=${trade.poolAddress ?? 'none'} ` +
+      `mint=${trade.mintAddress} candidates=${candidates.length}`,
+    );
+    return null;
+  }
+
+  private async recordAttributionIssue(
+    event: SolanaDecodedTrade | SolanaLaunchEvent,
+    reason: string,
+    candidateWatchIds: readonly string[] = [],
+  ): Promise<void> {
+    await (this.prisma as any).solanaTradeAttributionIssue.upsert({
+      where: { programId_signature_instructionIndex: {
+        programId: event.programId, signature: event.signature, instructionIndex: event.instructionIndex,
+      } },
+      create: {
+        venue: event.venue, programId: event.programId, poolAddress: event.poolAddress ?? null,
+        tokenMint: event.mintAddress, signature: event.signature, instructionIndex: event.instructionIndex,
+        slot: BigInt(event.slot), reason, candidateWatchIds: [...candidateWatchIds], rawSnapshot: json(event),
+      },
+      update: {},
+    });
+  }
+
+  private scheduleP0ExitEvaluation(watchId: string): void {
+    this.p0ExitQueue.set(watchId, this.p0ExitQueue.get(watchId) ?? Date.now());
+    void this.drainP0ExitQueue();
+  }
+
+  private async drainP0ExitQueue(): Promise<void> {
+    if (this.p0Draining) return;
+    this.p0Draining = true;
+    try {
+      const limit = Math.max(1, this.config.get<number>('solanaLaunch.p0ExitBatchSize') ?? 3);
+      for (let processed = 0; processed < limit && this.p0ExitQueue.size; processed++) {
+        const [watchId, queuedAtMs] = this.p0ExitQueue.entries().next().value as [string, number];
+        this.p0ExitQueue.delete(watchId);
+        const delayMs = Math.max(0, Date.now() - queuedAtMs);
+        this.p0ExitDelayTotalMs += delayMs;
+        this.p0ExitDelaySamples++;
+        if (delayMs > this.executionTimelinessMs()) {
+          await (this.prisma as any).solanaExperimentSignal.updateMany({
+            where: { watchId, status: { in: ['ACTIVE', 'CONFIRMED', 'EXPIRED'] } },
+            data: { benchmarkEligible: false },
+          });
+        }
+        await this.evaluateOpenArmsForWatch(watchId);
+      }
+    } finally {
+      this.p0Draining = false;
+      if (this.p0ExitQueue.size) void this.drainP0ExitQueue();
+    }
+  }
+
+  private async evaluateOpenArmsForWatch(watchId: string): Promise<void> {
+    const arms = await (this.prisma as any).solanaPaperArm.findMany({
+      where: { status: 'OPEN', signal: { watchId } },
+      include: { signal: { include: { watch: true } } },
+      take: 20,
+    });
+    const quotes = new Map<string, Promise<Awaited<ReturnType<SolanaProtocolQuoteService['sellQuote']>>>>();
+    for (const arm of arms) await this.evaluateArm(arm, quotes);
+  }
+
+  private async quoteDepthMatrix(watch: AnyRow): Promise<{
+    snapshot: Record<string, unknown>;
+    quotes: Map<number, SolanaRoundTripQuote>;
+    benchmarkEligible: boolean;
+  } | null> {
+    const sizes = [4, 20, 50, 100];
+    const matrix = await this.quotes.quoteSizeMatrix(
+      watch.venue as SolanaVenue, watch.poolAddress, watch.mintAddress, watch.quoteMint, sizes,
+      'P2',
+    ).catch(() => null);
+    if (!matrix) return null;
+    const rows = matrix.quotes.map((quoted) => ({
+      sizeUsd: quoted.entryUsd,
+      buyImpactPct: quoted.buySlippagePct,
+      sellImpactPct: quoted.sellSlippagePct,
+      roundTripMultiple: quoted.roundTripMultiple,
+      quoteSlot: quoted.quoteSlot,
+    }));
+    const maxAt = (threshold: number) => Math.max(0, ...rows
+      .filter((row) => Math.max(row.buyImpactPct ?? Infinity, row.sellImpactPct ?? Infinity) <= threshold)
+      .map((row) => row.sizeUsd));
+    return {
+      quotes: new Map(matrix.quotes.map((quoted) => [quoted.entryUsd, quoted])),
+      benchmarkEligible: matrix.depthConfidence === 'REAL_EXECUTABLE_ATOMIC' &&
+        maxAt(0.05) >= SOLANA_FLOW_V2_CONFIG.minExecutableDepthUsd,
+      snapshot: {
+      depthSource: matrix.depthConfidence === 'REAL_EXECUTABLE_ATOMIC'
+        ? 'VENUE_STATE_QUOTE_MATRIX'
+        : 'ROUTE_AGGREGATOR_QUOTE_MATRIX',
+      depthConfidence: matrix.depthConfidence,
+      observedAt: matrix.observedAt.toISOString(),
+      bySize: rows,
+      maxSizeAt1pctImpact: maxAt(0.01),
+      maxSizeAt3pctImpact: maxAt(0.03),
+      maxSizeAt5pctImpact: maxAt(0.05),
+      zeroMoveRoundTripBySize: Object.fromEntries(rows.map((row) => [String(row.sizeUsd), row.roundTripMultiple])),
+      },
+    };
   }
 
   private async lifecycle(): Promise<void> {
@@ -1083,6 +1386,15 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     legType: string,
     flowSnapshot?: AnyRow | null,
   ): Promise<void> {
+    if (sizeUsd > 0) {
+      const block = await this.paidFillBlockReason(signal, arm, sizeUsd, legType, flowSnapshot);
+      if (block) {
+        this.logger.warn(
+          `SOLANA V2.3 PAID FILL BLOCKED arm=${arm.armCode} type=${legType} reason=${block}`,
+        );
+        return;
+      }
+    }
     const idempotencyKey = `${signal.id}:${arm.armCode}:${legType}`;
     const existingLeg = await (this.prisma as any).solanaExecutionLeg.findUnique({ where: { idempotencyKey } });
     if (existingLeg) return;
@@ -1125,7 +1437,10 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     this.logEntry(signal, updated, quote, sizeUsd, legType, executedAt, flow);
   }
 
-  private async evaluateArm(arm: AnyRow): Promise<void> {
+  private async evaluateArm(
+    arm: AnyRow,
+    quoteCache?: Map<string, Promise<Awaited<ReturnType<SolanaProtocolQuoteService['sellQuote']>>>>,
+  ): Promise<void> {
     const watch = arm.signal.watch;
     const remaining = BigInt(arm.remainingTokensRaw ?? '0');
     if (remaining <= 0n) return;
@@ -1136,10 +1451,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     const evaluationGapMs = Math.max(0, Date.now() - lastEvaluatedAtMs);
     const staleEvaluation = evaluationGapMs > Math.max(3 * this.openArmEvalIntervalMs(), this.executionTimelinessMs());
     const degradedReason = staleEvaluation ? 'stale_evaluation_window' : null;
-    const sellQuote = await this.quotes.sellQuote({
-      venue: watch.venue as SolanaVenue, poolAddress: watch.poolAddress,
-      mintAddress: watch.mintAddress, quoteMint: watch.quoteMint, tokensRaw: remaining.toString(),
-    }).catch(() => null);
+    const sellQuote = await this.cachedSellQuote(watch, remaining.toString(), quoteCache);
     if (!sellQuote) {
       await (this.prisma as any).solanaPaperArm.update({
         where: { id: arm.id }, data: { currentMultiple: arm.currentMultiple },
@@ -1168,10 +1480,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       const original = BigInt(arm.tokensBoughtRaw);
       const target = original * BigInt(Math.round(rung.fraction * 100)) / 100n;
       const amount = target < remaining ? target : remaining;
-      const quote = amount === remaining ? sellQuote : await this.quotes.sellQuote({
-        venue: watch.venue, poolAddress: watch.poolAddress, mintAddress: watch.mintAddress,
-        quoteMint: watch.quoteMint, tokensRaw: amount.toString(),
-      });
+      const quote = amount === remaining ? sellQuote : await this.cachedSellQuote(watch, amount.toString(), quoteCache);
       if (quote) {
         executed.add(rung.multiple);
         await this.sellArm(arm, watch, amount, quote, 'LADDER_SELL', multiple, amount === remaining, executed, { degradedReason });
@@ -1184,6 +1493,23 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         degradedReason,
       });
     }
+  }
+
+  private async cachedSellQuote(
+    watch: AnyRow,
+    tokensRaw: string,
+    cache?: Map<string, Promise<Awaited<ReturnType<SolanaProtocolQuoteService['sellQuote']>>>>,
+  ): Promise<Awaited<ReturnType<SolanaProtocolQuoteService['sellQuote']>>> {
+    const key = `${watch.venue}:${watch.poolAddress}:${tokensRaw}`;
+    let pending = cache?.get(key);
+    if (!pending) {
+      pending = this.quotes.sellQuote({
+        venue: watch.venue as SolanaVenue, poolAddress: watch.poolAddress,
+        mintAddress: watch.mintAddress, quoteMint: watch.quoteMint, tokensRaw,
+      }).catch(() => null);
+      cache?.set(key, pending);
+    }
+    return pending;
   }
 
   private async closeWatchArms(watchId: string, reason: string): Promise<void> {
@@ -1311,10 +1637,12 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     const reasons: string[] = [];
     const blocked = new Set(this.config.get<string[]>('solanaLaunch.blockedCreators') ?? []);
     if (watch.creatorAddress && blocked.has(watch.creatorAddress)) reasons.push('blocked_creator');
+    const serial = await this.serialCreatorBlockReason(watch.creatorAddress ?? null);
+    if (serial) reasons.push(serial);
     try {
       const account = await this.quotes.runRpc(() => this.quotes.connection.getParsedAccountInfo(
         new PublicKey(watch.mintAddress), 'confirmed',
-      ));
+      ), 'P2');
       const info: any = (account.value?.data as any)?.parsed?.info;
       if (!info) return [...reasons, 'mint_state_unavailable'];
       if (info.mintAuthority && PublicKey.isOnCurve(new PublicKey(info.mintAuthority))) {
@@ -1339,6 +1667,57 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     return reasons;
   }
 
+  /**
+   * Finish-line paid-capital gate. Only C confirmation size should reach here
+   * with sizeUsd>0; still defend against latency, empty flow, and serial rugs.
+   */
+  private async paidFillBlockReason(
+    signal: AnyRow,
+    arm: AnyRow,
+    sizeUsd: number,
+    legType: string,
+    flowSnapshot?: AnyRow | null,
+  ): Promise<string | null> {
+    if (arm.armCode !== 'C_CONFIRM_20' || legType !== 'CONFIRMATION_ADD') {
+      return `non_confirmation_paid_arm:${arm.armCode}:${legType}`;
+    }
+    if (sizeUsd <= 0) return null;
+    const watch = signal.watch ?? {};
+    const eventAt = watch.latestEventAt ?? signal.t0;
+    const eventAgeMs = Math.max(0, Date.now() - new Date(eventAt).getTime());
+    if (eventAgeMs > SOLANA_FLOW_V2_CONFIG.maxPaidEntryLatencyMs) {
+      return `stale_market_event_${eventAgeMs}ms`;
+    }
+    const flow = flowSnapshot
+      ?? (signal.flowSnapshot as AnyRow | null)
+      ?? (signal.confirmationSnapshot as AnyRow | null);
+    const buyers = Number(flow?.latestWindowBuyers ?? 0);
+    const buyVolume = Number(flow?.buyVolumeUsd ?? 0);
+    const slots = Number(flow?.distinctSlots ?? 0);
+    if (!(buyers > 0 && buyVolume > 0 && slots >= SOLANA_FLOW_V2_CONFIG.minDistinctSlots)) {
+      return 'empty_or_thin_flow';
+    }
+    if (flow?.topThreeBuyerShare != null &&
+      Number(flow.topThreeBuyerShare) > SOLANA_FLOW_V2_CONFIG.maxTopThreeBuyerShare) {
+      return 'concentrated_buyers';
+    }
+    if (flow?.creatorSell) return 'creator_sell';
+    return this.serialCreatorBlockReason(signal.watch?.creatorAddress ?? null);
+  }
+
+  /** Block paid capital when this creator already dumped on a prior watched launch. */
+  private async serialCreatorBlockReason(creatorAddress: string | null): Promise<string | null> {
+    if (!creatorAddress) return null;
+    const prior = await (this.prisma as any).solanaPaperArm.findFirst({
+      where: {
+        outcomeClass: 'CREATOR_EXIT',
+        signal: { watch: { creatorAddress } },
+      },
+      select: { id: true },
+    });
+    return prior ? 'prior_creator_exit' : null;
+  }
+
   private async backfill(): Promise<void> {
     if (Date.now() < this.rpcBackoffUntil) return;
     if (this.backfillBusy || this.draining || this.lifecycleBusy || this.queued.size > 0) return;
@@ -1360,7 +1739,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
             new PublicKey(descriptor.programId),
             { until: cursor.lastBackfillSignature, limit: maximum + 1 },
             'confirmed',
-          ));
+          ), 'P3');
         if (rows.length > maximum) {
           const liveLag = cursor.lastSeenSlot == null || this.latestHeadSlot <= 0
             ? Number.POSITIVE_INFINITY
@@ -1390,7 +1769,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
           let rateLimited = false;
           for (const row of [...rows].reverse()) {
             try {
-              await this.processSignature(row.signature, 'BACKFILL', row.slot);
+              await this.processSignature(row.signature, 'BACKFILL', row.slot, 'P3');
               if (requestDelayMs > 0) await delay(requestDelayMs);
             } catch (error) {
               failed = true;
@@ -1469,7 +1848,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         if (!watch.lastObservedSignature) {
           const latest = await this.quotes.runRpc(() => this.quotes.connection.getSignaturesForAddress(
             new PublicKey(watch.poolAddress), { limit: 1 }, 'confirmed',
-          ));
+          ), 'P1');
           await (this.prisma as any).solanaLaunchWatch.update({
             where: { id: watch.id }, data: { lastObservedSignature: latest[0]?.signature ?? null },
           });
@@ -1479,7 +1858,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
           new PublicKey(watch.poolAddress),
           { until: watch.lastObservedSignature, limit: maximum + 1 },
           'confirmed',
-        ));
+        ), 'P1');
         if (!rows.length) {
           await (this.prisma as any).solanaLaunchWatch.update({ where: { id: watch.id }, data: {} });
           continue;
@@ -1495,7 +1874,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
         let failed = false;
         for (const row of [...rows].reverse()) {
           try {
-            await this.processSignature(row.signature, 'BACKFILL', row.slot);
+            await this.processSignature(row.signature, 'BACKFILL', row.slot, 'P1');
             if (requestDelayMs > 0) await delay(requestDelayMs);
           } catch (error) {
             failed = true;
@@ -1548,7 +1927,7 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     const statuses = await this.quotes.runRpc(() => this.quotes.connection.getSignatureStatuses(
       watches.map((watch: AnyRow) => watch.discoverySignature),
       { searchTransactionHistory: true },
-    ));
+    ), 'P3');
     for (let index = 0; index < watches.length; index++) {
       const watch = watches[index];
       const status = statuses.value[index];
@@ -1677,6 +2056,9 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `SOLANA V2.2 HEALTH mode=${mode} head=${head} queueLag=${queueLag} ` +
       `streams=${healthyStreams}/${cursors.length} reconnecting=${reconnecting} gaps=${gaps} queued=${this.queued.size} ` +
+      `queueWaitMsAvg=${this.queueWaitSamples ? Math.round(this.queueWaitTotalMs / this.queueWaitSamples) : 0} ` +
+      `p0ExitQueue=${this.p0ExitQueue.size} p0ExitDelayMsAvg=${this.p0ExitDelaySamples ? Math.round(this.p0ExitDelayTotalMs / this.p0ExitDelaySamples) : 0} ` +
+      `droppedOrExpiredJobs=${this.droppedOrExpiredJobs} ` +
       `watching=${watching} signals=${active} pendingConfirmations=${pendingConfirmations} ` +
       `overdueConfirmations=${overdueConfirmations} openArms=${open} ` +
       `poolStreams=${this.poolSubscriptions.size}/${this.maxPoolSubscriptions()} ` +
@@ -1724,6 +2106,13 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       flow_snapshot: JSON.stringify(flow ?? signal.flowSnapshot ?? {}),
       data_health: JSON.stringify(signal.healthSnapshot ?? {}),
       signal_latency_ms: String(executedAt.getTime() - signal.t0.getTime()),
+      note: [
+        `leg=${legType}`,
+        `venue=${watch.venue}`,
+        `cohort=${signal.riskCohort}`,
+        `benchmark=${String(signal.benchmarkEligible)}`,
+        `quote=${quote.quoteModel}`,
+      ].join(';'),
     } as any);
   }
 
@@ -1753,7 +2142,8 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       pool_address: watch.poolAddress, event_type: eventType, status: arm.status,
       price_usd: '', multiple: String(multiple), fraction: String(fraction), tokens: amountRaw.toString(),
       net_usd: String(quote.netUsd), slip_pct: String(quote.slippagePct),
-      realized_multiple_total: String(arm.realizedMultiple ?? ''), note: '',
+      realized_multiple_total: String(arm.realizedMultiple ?? ''),
+      note: this.exitNote(eventType, outcome, multiple, executionHealth),
       deployer_address: watch.creatorAddress ?? '', deployer_deployments_count: '', deployer_rug_count: '',
       outcome_class: outcome ?? '', strategy_version: signal.strategyVersion ?? SOLANA_MULTI_LAUNCH_STRATEGY,
       risk_cohort: signal.riskCohort ?? '', exit_policy: 'SOLANA_V2_80_15_5_LADDER',
@@ -1779,6 +2169,23 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
       }
       this.logger.warn(`Solana v2 ${name} failed: ${this.describe(error)}`);
     }
+  }
+
+  private exitNote(
+    eventType: string,
+    outcome: string | null,
+    multiple: number,
+    executionHealth?: AnyRow | null,
+  ): string {
+    const fragments = [
+      `event=${eventType}`,
+      `outcome=${outcome ?? 'PARTIAL'}`,
+      `executable_multiple=${Number.isFinite(multiple) ? multiple.toFixed(4) : 'unknown'}`,
+    ];
+    if (executionHealth?.executionDelayMs != null) fragments.push(`execution_delay_ms=${executionHealth.executionDelayMs}`);
+    if (executionHealth?.delayReason) fragments.push(`delay_reason=${executionHealth.delayReason}`);
+    if (executionHealth?.degraded) fragments.push('data_health=DEGRADED');
+    return fragments.join(';');
   }
 
   private describe(error: unknown): string {
@@ -1859,6 +2266,10 @@ export class SolanaMultiLaunchService implements OnModuleInit, OnModuleDestroy {
 
 function json(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value, (_key, child) => typeof child === 'bigint' ? child.toString() : child));
+}
+
+function queuePriority(priority: QueueMeta['priority']): number {
+  return priority === 'P1' ? 1 : priority === 'P2' ? 2 : 3;
 }
 
 function rawToNumber(raw: bigint, decimals: number): number {

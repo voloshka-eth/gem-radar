@@ -47,6 +47,7 @@ import type {
   PersistedCandidate,
 } from './flow.types';
 import { RobinhoodEntryExperimentService } from './robinhood-entry-experiment.service';
+import type { RobinhoodExperimentTick } from './robinhood-experiment.types';
 
 const FLOW_CHAINS = ['ethereum', 'base', 'robinhood'] as const;
 type FlowChain = typeof FLOW_CHAINS[number];
@@ -119,6 +120,19 @@ interface DecodeTradeResult {
   failedBlocks: Set<string>;
 }
 
+interface JsonRpcBatchResponse<T = unknown> {
+  id: number;
+  result?: T;
+  error?: { code?: number; message?: string };
+}
+
+interface RobinhoodExperimentJob {
+  state: WatchState;
+  tick: RobinhoodExperimentTick;
+  enqueuedAtMs: number;
+  priority: number;
+}
+
 @Injectable()
 export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(EvmFlowService.name);
@@ -131,6 +145,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   private evalBusy = false;
   private readonly latestHead = new Map<SupportedChain, bigint>();
   private readonly latestHttpHead = new Map<SupportedChain, bigint>();
+  private readonly lastStreamHeadAt = new Map<SupportedChain, number>();
   private readonly lastHttpHeadCheckAt = new Map<SupportedChain, number>();
   private readonly rpcFailures = new Map<SupportedChain, number>();
   private readonly headPollBusy = new Set<SupportedChain>();
@@ -138,6 +153,9 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   private readonly headPollConsecutiveFailures = new Map<SupportedChain, number>();
   private readonly initialHeadRequests = new Map<FlowChain, Promise<bigint>>();
   private readonly processingHeads = new Set<SupportedChain>();
+  private readonly outcomeFallbackBusy = new Set<SupportedChain>();
+  private readonly outcomeFallbackLastRunAt = new Map<SupportedChain, number>();
+  private readonly outcomeFallbackProcessed = new Map<SupportedChain, number>();
   private readonly pendingHeads = new Map<SupportedChain, { number: bigint; hash: string | null }>();
   private readonly latestHeadHash = new Map<SupportedChain, string>();
   private readonly swapCount = new Map<SupportedChain, number>();
@@ -145,6 +163,13 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   private readonly signalCount = new Map<SupportedChain, number>();
   private readonly addressBatchSizes = new Map<string, number>();
   private readonly readStats = new Map<SupportedChain, { totalShards: number; failedShards: number; coverageRatio: number }>();
+  private readonly pendingRobinhoodExperimentJobs = new Map<string, RobinhoodExperimentJob>();
+  private readonly activeRobinhoodExperimentWatches = new Set<string>();
+  private robinhoodExperimentWorkers = 0;
+  private robinhoodExperimentNextDiscoveryAtMs = 0;
+  private robinhoodExperimentDrainTimer: ReturnType<typeof setTimeout> | null = null;
+  private robinhoodExperimentQueueWaitTotalMs = 0;
+  private robinhoodExperimentJobsStarted = 0;
 
   constructor(
     private readonly config: ConfigService,
@@ -188,6 +213,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy(): void {
     if (this.factoryTimer) clearInterval(this.factoryTimer);
     if (this.healthTimer) clearInterval(this.healthTimer);
+    if (this.robinhoodExperimentDrainTimer) clearTimeout(this.robinhoodExperimentDrainTimer);
     for (const stop of this.unwatch) stop();
   }
 
@@ -217,11 +243,15 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const client = this.streamClients.get(chain);
-    if (!client) return;
+    if (!client) {
+      this.startHttpHeadPoller(chain);
+      return;
+    }
     const stop = client.watchBlocks({
       emitOnBegin: true,
       onBlock: (block) => {
         if (block.number == null) return;
+        this.lastStreamHeadAt.set(chain, Date.now());
         void this.enqueueHead(chain, block.number, block.hash ?? null);
       },
       onError: (error) => {
@@ -230,13 +260,18 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       },
     });
     this.unwatch.push(stop);
+    this.startHttpHeadPoller(chain, true);
   }
 
-  private startHttpHeadPoller(chain: FlowChain): void {
+  private startHttpHeadPoller(chain: FlowChain, staleStreamFallback = false): void {
     const intervalKey = chain === 'ethereum' ? 'evmFlow.httpPollMsEthereum'
       : chain === 'base' ? 'evmFlow.httpPollMsBase' : 'evmFlow.httpPollMsRobinhood';
     const intervalMs = Math.max(2_000, this.config.get<number>(intervalKey) ?? (chain === 'ethereum' ? 12_000 : 4_000));
     const poll = async () => {
+      if (
+        staleStreamFallback &&
+        Date.now() - (this.lastStreamHeadAt.get(chain) ?? 0) <= Math.max(10_000, intervalMs * 2)
+      ) return;
       if (this.headPollBusy.has(chain) || Date.now() < (this.headPollBackoffUntil.get(chain) ?? 0)) return;
       const client = this.clients.get(chain);
       if (!client) return;
@@ -246,7 +281,11 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         this.latestHttpHead.set(chain, head);
         this.lastHttpHeadCheckAt.set(chain, Date.now());
         this.headPollConsecutiveFailures.set(chain, 0);
-        await this.enqueueHead(chain, head, null);
+        // Keep head discovery independent from slower log/transaction decoding.
+        // enqueueHead coalesces newer heads while one chain is being processed.
+        void this.enqueueHead(chain, head, null).catch((error) => {
+          this.logger.warn(`Flow head processing failed ${chain}: ${(error as Error).message}`);
+        });
       } catch (error) {
         const failures = (this.headPollConsecutiveFailures.get(chain) ?? 0) + 1;
         this.headPollConsecutiveFailures.set(chain, failures);
@@ -497,22 +536,27 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       const now = Date.now();
       const states = [...this.watches.values()].filter(
         (state) => state.candidate.pool.chain === chain && state.outcomeDueAtMs > now &&
-          state.lastProcessedBlock < head &&
-          (state.swapTrackingUntilMs > now || now - state.lastOutcomeQuoteAtMs >= 30_000),
+          state.lastProcessedBlock < head && state.swapTrackingUntilMs > now,
       );
+      void this.runOutcomeFallback(chain, httpHead);
       if (!states.length) return;
-      const swapStates = states.filter((state) => state.swapTrackingUntilMs > now);
-      const read = await this.readSwapLogs(client, chain, swapStates, head);
-      const decoded = await this.decodeTrades(client, swapStates, read.logs);
+      const read = await this.readSwapLogs(client, chain, states, head);
+      const relevantLogs = this.logsAfterWatchCursor(states, read.logs);
+      const decoded = await this.decodeTrades(client, states, relevantLogs);
       for (const failedBlock of decoded.failedBlocks) {
-        for (const log of read.logs.filter((item) => item.blockNumber?.toString() === failedBlock)) {
-          const state = this.stateForLog(swapStates, log);
+        for (const log of relevantLogs.filter((item) => item.blockNumber?.toString() === failedBlock)) {
+          const state = this.stateForLog(states, log);
           if (!state) continue;
           read.failedWatchIds.add(state.id);
           const rewindTo = BigInt(failedBlock) > 0n ? BigInt(failedBlock) - 1n : 0n;
           const covered = read.coveredToByWatchId.get(state.id);
           if (covered != null && covered > rewindTo) read.coveredToByWatchId.set(state.id, rewindTo);
-          await this.persistBackfill(state, BigInt(failedBlock), covered ?? BigInt(failedBlock), 'block_transaction_read_failed');
+          await this.persistBackfill(
+            state,
+            BigInt(failedBlock),
+            covered ?? BigInt(failedBlock),
+            'block_transaction_read_failed',
+          );
         }
       }
       if (decoded.failedBlocks.size > 0) {
@@ -545,7 +589,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
           skipDuplicates: true,
         });
       }
-      for (const state of states) {
+      for (const state of this.prioritizeEvaluation(states, now)) {
         const coveredTo = read.coveredToByWatchId.get(state.id);
         if (coveredTo != null && coveredTo > state.lastProcessedBlock) {
           state.lastProcessedBlock = coveredTo;
@@ -555,29 +599,32 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
           (!read.failedWatchIds.has(state.id) && state.lastProcessedBlock >= head);
         state.latestSwapAtMs = state.trades.at(-1)?.occurredAtMs ?? state.latestSwapAtMs;
         if (chain === 'robinhood') {
+          const evaluationNow = Date.now();
           const lag = httpHead > state.lastProcessedBlock ? Number(httpHead - state.lastProcessedBlock) : 0;
-          const latestSwapAgeMs = state.latestSwapAtMs == null ? Number.POSITIVE_INFINITY : now - state.latestSwapAtMs;
-          const dataHealthy = lag <= (this.config.get<number>('evmFlow.maxHeadLagBlocks') ?? 2) &&
-            state.coverageComplete && !state.pendingBackfill &&
+          const latestSwapAgeMs = state.latestSwapAtMs == null
+            ? Number.POSITIVE_INFINITY
+            : evaluationNow - state.latestSwapAtMs;
+          const coverageHealthy = lag <= (this.config.get<number>('evmFlow.maxHeadLagBlocks') ?? 2) &&
+            state.coverageComplete && !state.pendingBackfill;
+          const dataHealthy = coverageHealthy &&
             latestSwapAgeMs <= (this.config.get<number>('evmFlow.maxLatestSwapAgeMs') ?? 15_000);
-          const pipelineHealthy = state.swapTrackingUntilMs <= now || (
-            lag <= (this.config.get<number>('evmFlow.maxHeadLagBlocks') ?? 2) &&
-            state.coverageComplete && !state.pendingBackfill
-          );
+          // Quiet market (coverage fine, just no recent swaps) must not stall the
+          // experiment pipeline; only genuine coverage gaps mark it unhealthy.
+          const pipelineHealthy = state.swapTrackingUntilMs <= now || coverageHealthy;
           const v2 = strategiesFor(state.watchType, 'robinhood')
             .find((strategy) => strategy.version === 'robinhood_flow_precision_v2');
           const v2ShadowDecision = v2
-            ? evaluateFlowStrategy(v2, state.trades, now, state.discoveredAtMs, state.flowCreatorAddress)
+            ? evaluateFlowStrategy(v2, state.trades, evaluationNow, state.discoveredAtMs, state.flowCreatorAddress)
             : null;
-          const experimentTrackingUntilMs = await this.robinhoodExperiment.handleTick({
+          this.enqueueRobinhoodExperimentTick(state, {
             watchId: state.id,
             candidate: state.candidate,
             watchType: state.watchType,
             liquidityModel: state.model,
-            trades: state.trades,
+            trades: [...state.trades],
             discoveredAtMs: state.discoveredAtMs,
             latestBlock: state.lastProcessedBlock,
-            observedAtMs: now,
+            observedAtMs: evaluationNow,
             gemDecimals: state.gemDecimals,
             creatorAddress: state.flowCreatorAddress,
             creatorAttributable: state.creatorAttributable,
@@ -589,13 +636,12 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
               coverageComplete: state.coverageComplete,
               unresolvedBackfill: state.pendingBackfill,
               latestSwapAgeMs: Number.isFinite(latestSwapAgeMs) ? latestSwapAgeMs : null,
+              coverageHealthy,
+              quietMarket: coverageHealthy && !dataHealthy,
               streamMode: this.streamMode(chain),
             },
             v2ShadowDecision,
           });
-          if (experimentTrackingUntilMs != null) {
-            state.swapTrackingUntilMs = Math.max(state.swapTrackingUntilMs, experimentTrackingUntilMs);
-          }
         }
         await this.evaluateStrategies(state, state.lastProcessedBlock, httpHead);
         await this.updateWatchState(state);
@@ -605,12 +651,163 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         void this.eventDrivenEval(chain, pools);
       }
       const continuing = states.some((state) =>
-        !read.failedWatchIds.has(state.id) && state.swapTrackingUntilMs > now && state.lastProcessedBlock < head,
+        !read.failedWatchIds.has(state.id) && state.lastProcessedBlock < head,
       );
       if (continuing) this.pendingHeads.set(chain, { number: head, hash: headHash });
     } catch (error) {
       this.rpcFailures.set(chain, (this.rpcFailures.get(chain) ?? 0) + 1);
       this.logger.warn(`Flow block processing failed ${chain}:${head}: ${(error as Error).message}`);
+    }
+  }
+
+  private prioritizeEvaluation(states: WatchState[], nowMs: number): WatchState[] {
+    const priority = (state: WatchState): number => {
+      const trackingSwaps = state.swapTrackingUntilMs > nowMs;
+      const experiment = this.robinhoodExperiment.getAttemptSnapshot(state.id);
+      if (
+        state.candidate.pool.chain === 'robinhood' &&
+        experiment != null &&
+        ['CREATED', 'ACTIVE'].includes(experiment.outcome)
+      ) return 0;
+      if (
+        state.candidate.pool.chain === 'robinhood' &&
+        state.watchType === 'FRESH' &&
+        trackingSwaps
+      ) return 1;
+      if (trackingSwaps) return 2;
+      return 3;
+    };
+    return [...states].sort((left, right) => {
+      const rank = priority(left) - priority(right);
+      if (rank !== 0) return rank;
+      const latestSwap = (right.latestSwapAtMs ?? 0) - (left.latestSwapAtMs ?? 0);
+      if (latestSwap !== 0) return latestSwap;
+      return right.discoveredAtMs - left.discoveredAtMs;
+    });
+  }
+
+  private enqueueRobinhoodExperimentTick(
+    state: WatchState,
+    tick: RobinhoodExperimentTick,
+  ): void {
+    const activeExperiment = state.swapTrackingUntilMs > state.expiresAtMs ||
+      this.robinhoodExperiment.getAttemptSnapshot(state.id)?.outcome === 'ACTIVE';
+    this.pendingRobinhoodExperimentJobs.set(state.id, {
+      state,
+      tick,
+      enqueuedAtMs: Date.now(),
+      priority: activeExperiment ? 0 : 1,
+    });
+    this.drainRobinhoodExperimentQueue();
+  }
+
+  private drainRobinhoodExperimentQueue(): void {
+    const concurrency = Math.max(
+      1,
+      this.config.get<number>('evmFlow.robinhoodExperimentConcurrency') ?? 1,
+    );
+    while (this.robinhoodExperimentWorkers < concurrency) {
+      const next = [...this.pendingRobinhoodExperimentJobs.entries()]
+        .filter(([watchId]) => !this.activeRobinhoodExperimentWatches.has(watchId))
+        .sort(([, left], [, right]) =>
+          left.priority - right.priority ||
+          (right.state.candidate.pool.poolCreatedAt?.getTime() ?? 0) -
+            (left.state.candidate.pool.poolCreatedAt?.getTime() ?? 0) ||
+          left.enqueuedAtMs - right.enqueuedAtMs,
+        )[0];
+      if (!next) return;
+      const [watchId, job] = next;
+      if (job.priority > 0 && Date.now() < this.robinhoodExperimentNextDiscoveryAtMs) {
+        if (!this.robinhoodExperimentDrainTimer) {
+          this.robinhoodExperimentDrainTimer = setTimeout(() => {
+            this.robinhoodExperimentDrainTimer = null;
+            this.drainRobinhoodExperimentQueue();
+          }, Math.max(1, this.robinhoodExperimentNextDiscoveryAtMs - Date.now()));
+        }
+        return;
+      }
+      this.pendingRobinhoodExperimentJobs.delete(watchId);
+      this.activeRobinhoodExperimentWatches.add(watchId);
+      this.robinhoodExperimentWorkers += 1;
+      if (job.priority > 0) {
+        const intervalMs = Math.max(
+          0,
+          this.config.get<number>('evmFlow.robinhoodExperimentDiscoveryMinIntervalMs') ?? 7_500,
+        );
+        this.robinhoodExperimentNextDiscoveryAtMs = Date.now() + intervalMs;
+      }
+      this.robinhoodExperimentJobsStarted += 1;
+      this.robinhoodExperimentQueueWaitTotalMs += Math.max(0, Date.now() - job.enqueuedAtMs);
+      void this.runRobinhoodExperimentJob(job).finally(() => {
+        this.activeRobinhoodExperimentWatches.delete(watchId);
+        this.robinhoodExperimentWorkers -= 1;
+        this.drainRobinhoodExperimentQueue();
+      });
+    }
+  }
+
+  private async runRobinhoodExperimentJob(job: RobinhoodExperimentJob): Promise<void> {
+    try {
+      const trackingUntilMs = await this.robinhoodExperiment.handleTick(job.tick);
+      if (trackingUntilMs != null) {
+        job.state.swapTrackingUntilMs = Math.max(job.state.swapTrackingUntilMs, trackingUntilMs);
+        await this.updateWatchState(job.state);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Robinhood experiment job failed ${job.tick.candidate.token.tokenAddress}: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Outcome marking is intentionally outside the head path. Hundreds of 24h
+   * research watches must not delay active swap reads or experiment exits.
+   */
+  private async runOutcomeFallback(chain: FlowChain, head: bigint): Promise<void> {
+    if (this.outcomeFallbackBusy.has(chain)) return;
+    const startedAt = Date.now();
+    const intervalMs = Math.max(
+      1_000,
+      this.config.get<number>('evmFlow.outcomeFallbackIntervalMs') ?? 5_000,
+    );
+    if (startedAt - (this.outcomeFallbackLastRunAt.get(chain) ?? 0) < intervalMs) return;
+    this.outcomeFallbackLastRunAt.set(chain, startedAt);
+    this.outcomeFallbackBusy.add(chain);
+    try {
+      const now = startedAt;
+      const limit = Math.max(
+        1,
+        this.config.get<number>('evmFlow.outcomeFallbackBatchSize') ?? 8,
+      );
+      const due = [...this.watches.values()]
+        .filter((state) =>
+          state.candidate.pool.chain === chain &&
+          state.outcomeDueAtMs > now &&
+          state.swapTrackingUntilMs <= now &&
+          now - state.lastOutcomeQuoteAtMs >= 30_000,
+        )
+        .sort((left, right) =>
+          left.lastOutcomeQuoteAtMs - right.lastOutcomeQuoteAtMs ||
+          left.outcomeDueAtMs - right.outcomeDueAtMs,
+        )
+        .slice(0, limit);
+      for (const state of due) {
+        state.lastProcessedBlock = head;
+        state.lastProcessedBlockHash = null;
+        state.coverageComplete = true;
+        await this.updateWatchState(state);
+      }
+      if (due.length > 0) {
+        this.outcomeFallbackProcessed.set(
+          chain,
+          (this.outcomeFallbackProcessed.get(chain) ?? 0) + due.length,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(`Flow outcome fallback failed ${chain}: ${(error as Error).message}`);
+    } finally {
+      this.outcomeFallbackBusy.delete(chain);
     }
   }
 
@@ -644,7 +841,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
           (min, state) => state.lastProcessedBlock + 1n < min ? state.lastProcessedBlock + 1n : min,
           head,
         );
-        const maxBatchBlocks = chain === 'ethereum' ? 64n : 400n;
+        const maxBatchBlocks = this.maxLogRangeBlocks(chain);
         const toBlock = fromBlock + maxBatchBlocks - 1n < head ? fromBlock + maxBatchBlocks - 1n : head;
         const addresses = [...new Set(batch.map((state) => state.candidate.pool.poolAddress.toLowerCase()))] as Address[];
         const logs = await client.getLogs({
@@ -656,10 +853,12 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         successfulShards++;
         for (const state of batch) {
           coveredToByWatchId.set(state.id, toBlock);
-          if (state.pendingBackfill) await this.resolveBackfill(state, state.lastProcessedBlock + 1n, toBlock);
+          if (state.pendingBackfill && toBlock >= state.lastProcessedBlock + 1n) {
+            await this.resolveBackfill(state, state.lastProcessedBlock + 1n, toBlock);
+          }
         }
         return logs;
-      });
+      }, (error) => this.shouldSplitLogBatch(error));
       results.push(...adaptive.results);
       totalShards += successfulShards + adaptive.failures.length;
       failedShards += adaptive.failures.length;
@@ -670,7 +869,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         for (const state of failure.values) {
           failedWatchIds.add(state.id);
           const fromBlock = state.lastProcessedBlock + 1n;
-          const maxBatchBlocks = chain === 'ethereum' ? 64n : 400n;
+          const maxBatchBlocks = this.maxLogRangeBlocks(chain);
           const toBlock = fromBlock + maxBatchBlocks - 1n < head ? fromBlock + maxBatchBlocks - 1n : head;
           await this.persistBackfill(state, fromBlock, toBlock, failure.error.message);
         }
@@ -689,7 +888,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         (min, state) => state.lastProcessedBlock + 1n < min ? state.lastProcessedBlock + 1n : min,
         head,
       );
-      const maxBatchBlocks = chain === 'ethereum' ? 64n : 400n;
+      const maxBatchBlocks = this.maxLogRangeBlocks(chain);
       const toBlock = fromBlock + maxBatchBlocks - 1n < head ? fromBlock + maxBatchBlocks - 1n : head;
       totalShards++;
       if (manager) {
@@ -699,7 +898,9 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
           } as any) as unknown as RawSwapLog[]);
           for (const state of v4) {
             coveredToByWatchId.set(state.id, toBlock);
-            if (state.pendingBackfill) await this.resolveBackfill(state, state.lastProcessedBlock + 1n, toBlock);
+            if (state.pendingBackfill && toBlock >= state.lastProcessedBlock + 1n) {
+              await this.resolveBackfill(state, state.lastProcessedBlock + 1n, toBlock);
+            }
           }
         } catch (cause) {
           failedShards++;
@@ -722,39 +923,134 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private maxLogRangeBlocks(chain: FlowChain): bigint {
+    if (chain === 'ethereum') return 64n;
+    if (chain === 'robinhood') {
+      return BigInt(Math.max(
+        1,
+        this.config.get<number>('evmFlow.maxLogRangeBlocksRobinhood') ?? 2_000,
+      ));
+    }
+    return 400n;
+  }
+
+  private logsAfterWatchCursor(states: WatchState[], logs: RawSwapLog[]): RawSwapLog[] {
+    return logs.filter((log) => {
+      if (log.blockNumber == null) return false;
+      const state = this.stateForLog(states, log);
+      return state != null && log.blockNumber > state.lastProcessedBlock;
+    });
+  }
+
+  private shouldSplitLogBatch(error: Error): boolean {
+    const message = error.message.toLowerCase();
+    if (
+      message.includes('429') ||
+      message.includes('rate limit') ||
+      message.includes('timeout') ||
+      message.includes('timed out') ||
+      message.includes('econn') ||
+      message.includes('socket') ||
+      message.includes('network')
+    ) {
+      return false;
+    }
+    return message.includes('address') ||
+      message.includes('invalid params') ||
+      message.includes('response size') ||
+      message.includes('too many results') ||
+      message.includes('query returned more than');
+  }
+
   private async decodeTrades(client: PublicClient, states: WatchState[], logs: RawSwapLog[]): Promise<DecodeTradeResult> {
     const blockNumbers = [...new Set(logs.map((log) => log.blockNumber!.toString()))];
-    const blockData = new Map<string, { timestampMs: number; fromByHash: Map<string, string> }>();
-    const reads = await Promise.allSettled(blockNumbers.map(async (number) => {
-      const block = await client.getBlock({ blockNumber: BigInt(number), includeTransactions: false });
-      blockData.set(number, { timestampMs: Number(block.timestamp) * 1000, fromByHash: new Map() });
-    }));
+    const transactionHashes = [...new Set(logs.map((log) => log.transactionHash!.toLowerCase()))];
+    const timestampByBlock = new Map<string, number>();
+    const fromByHash = new Map<string, string>();
     const failedBlocks = new Set<string>();
-    reads.forEach((result, index) => {
-      if (result.status === 'rejected') failedBlocks.add(blockNumbers[index]);
-    });
-    const txLogs = [...new Map(
-      logs
-        .filter((log) => !failedBlocks.has(log.blockNumber!.toString()))
-        .map((log) => [log.transactionHash!.toLowerCase(), log]),
-    ).entries()];
-    const transactionChunkSize = 8;
-    for (let offset = 0; offset < txLogs.length; offset += transactionChunkSize) {
-      const chunk = txLogs.slice(offset, offset + transactionChunkSize);
-      const transactions = await Promise.allSettled(
-        chunk.map(([hash]) => client.getTransaction({ hash: hash as `0x${string}` })),
-      );
-      transactions.forEach((result, index) => {
-        const [hash, log] = chunk[index];
-        if (result.status === 'rejected') {
-          failedBlocks.add(log.blockNumber!.toString());
-          return;
-        }
-        blockData.get(log.blockNumber!.toString())?.fromByHash.set(
-          hash,
-          result.value.from.toLowerCase(),
+    const chain = states[0]?.candidate.pool.chain as FlowChain | undefined;
+    const blockChunkSize = chain === 'robinhood'
+      ? Math.min(
+          this.blockReadConcurrency(chain),
+          Math.max(1, this.config.get<number>('chain.robinhoodRpcBatchSize') ?? 10),
+        )
+      : this.blockReadConcurrency(chain);
+    const rawBatchUrl = chain === 'robinhood'
+      ? this.config.get<string>('chain.robinhoodRpcUrl')
+      : undefined;
+    let rawBatchSucceeded = false;
+    if (rawBatchUrl && (blockNumbers.length > 0 || transactionHashes.length > 0)) {
+      try {
+        const blockResults = await this.jsonRpcBatch<{ timestamp?: string }>(
+          rawBatchUrl,
+          'eth_getBlockByNumber',
+          blockNumbers.map((number) => [`0x${BigInt(number).toString(16)}`, false]),
+          blockChunkSize,
         );
-      });
+        blockNumbers.forEach((number, index) => {
+          const timestamp = blockResults.get(index)?.timestamp;
+          if (timestamp) timestampByBlock.set(number, Number(BigInt(timestamp)) * 1000);
+          else failedBlocks.add(number);
+        });
+
+        const transactionResults = await this.jsonRpcBatch<{ from?: string }>(
+          rawBatchUrl,
+          'eth_getTransactionByHash',
+          transactionHashes.map((hash) => [hash]),
+          blockChunkSize,
+        );
+        transactionHashes.forEach((hash, index) => {
+          const from = transactionResults.get(index)?.from;
+          if (from) {
+            fromByHash.set(hash, from.toLowerCase());
+            return;
+          }
+          for (const log of logs) {
+            if (log.transactionHash?.toLowerCase() === hash) {
+              failedBlocks.add(log.blockNumber!.toString());
+            }
+          }
+        });
+        rawBatchSucceeded = true;
+      } catch (error) {
+        this.logger.warn(
+          `Robinhood flow metadata batch failed; deferring affected blocks without single-call burst: ` +
+          `${(error as Error).message}`,
+        );
+        timestampByBlock.clear();
+        fromByHash.clear();
+        for (const number of blockNumbers) failedBlocks.add(number);
+      }
+    }
+    if (!rawBatchUrl && !rawBatchSucceeded) {
+      for (let offset = 0; offset < blockNumbers.length; offset += blockChunkSize) {
+        const chunk = blockNumbers.slice(offset, offset + blockChunkSize);
+        const reads = await Promise.allSettled(chunk.map(async (number) => {
+          const block = await client.getBlock({
+            blockNumber: BigInt(number),
+            includeTransactions: false,
+          });
+          timestampByBlock.set(number, Number(block.timestamp) * 1000);
+        }));
+        reads.forEach((result, index) => {
+          if (result.status === 'rejected') failedBlocks.add(chunk[index]);
+        });
+      }
+      for (let offset = 0; offset < transactionHashes.length; offset += blockChunkSize) {
+        const chunk = transactionHashes.slice(offset, offset + blockChunkSize);
+        const reads = await Promise.allSettled(chunk.map(async (hash) => {
+          const transaction = await client.getTransaction({ hash: hash as Hash });
+          fromByHash.set(hash, transaction.from.toLowerCase());
+        }));
+        reads.forEach((result, index) => {
+          if (result.status !== 'rejected') return;
+          for (const log of logs) {
+            if (log.transactionHash?.toLowerCase() === chunk[index]) {
+              failedBlocks.add(log.blockNumber!.toString());
+            }
+          }
+        });
+      }
     }
     const quotePriceCache = new Map<string, number>();
     const output: FlowTrade[] = [];
@@ -762,8 +1058,8 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       if (failedBlocks.has(log.blockNumber!.toString())) continue;
       const state = this.stateForLog(states, log);
       if (!state) continue;
-      const block = blockData.get(log.blockNumber!.toString());
-      const trader = block?.fromByHash.get(log.transactionHash!.toLowerCase()) ?? '';
+      const timestampMs = timestampByBlock.get(log.blockNumber!.toString());
+      const trader = fromByHash.get(log.transactionHash!.toLowerCase()) ?? '';
       if (!trader) continue;
       const quotePriceKey = `${state.candidate.pool.chain}:${state.candidate.pool.quoteAssetAddress}`;
       let quotePriceUsd = quotePriceCache.get(quotePriceKey);
@@ -800,13 +1096,52 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         tokenAddress: state.candidate.token.tokenAddress,
         blockNumber: log.blockNumber!.toString(), blockHash: log.blockHash ?? null,
         txHash: log.transactionHash!.toLowerCase(), logIndex: log.logIndex!,
-        occurredAtMs: block?.timestampMs ?? Date.now(), trader, ...decoded,
+        occurredAtMs: timestampMs ?? Date.now(), trader, ...decoded,
       });
     }
     return {
       trades: output.sort((a, b) => a.occurredAtMs - b.occurredAtMs || a.logIndex - b.logIndex),
       failedBlocks,
     };
+  }
+
+  private async jsonRpcBatch<T>(
+    url: string,
+    method: string,
+    params: unknown[][],
+    batchSize: number,
+  ): Promise<Map<number, T>> {
+    const output = new Map<number, T>();
+    for (let offset = 0; offset < params.length; offset += batchSize) {
+      const chunk = params.slice(offset, offset + batchSize);
+      const requests = chunk.map((item, index) => ({
+        jsonrpc: '2.0',
+        id: offset + index,
+        method,
+        params: item,
+      }));
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(requests),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`${method} HTTP ${response.status}`);
+      const body = await response.json() as JsonRpcBatchResponse<T>[] | JsonRpcBatchResponse<T>;
+      if (!Array.isArray(body)) throw new Error(`${method} returned a non-batch response`);
+      for (const item of body) {
+        if (item.error || item.result == null) continue;
+        output.set(item.id, item.result);
+      }
+    }
+    return output;
+  }
+
+  private blockReadConcurrency(chain?: FlowChain): number {
+    const configured = chain === 'robinhood'
+      ? this.config.get<number>('evmFlow.blockReadConcurrencyRobinhood')
+      : this.config.get<number>('evmFlow.blockReadConcurrency');
+    return Math.max(1, configured ?? (chain === 'robinhood' ? 4 : 2));
   }
 
   private async evaluateStrategies(state: WatchState, head: bigint, httpHead: bigint): Promise<void> {
@@ -821,19 +1156,26 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       const latestSwapAgeMs = decision.snapshot.latestSwapAtMs == null
         ? Number.POSITIVE_INFINITY
         : Date.now() - decision.snapshot.latestSwapAtMs;
+      // Split "quiet market" from "bad coverage": a fully covered pool with a
+      // low head lag and no pending backfill is trustworthy even when the last
+      // swap is old — no swaps happened, the data is not broken. Only genuine
+      // coverage gaps degrade the signal to shadow.
+      const coverageHealthy =
+        lag <= (this.config.get<number>('evmFlow.maxHeadLagBlocks') ?? 2) &&
+        state.coverageComplete &&
+        !state.pendingBackfill;
+      const quietMarket = coverageHealthy &&
+        latestSwapAgeMs > (this.config.get<number>('evmFlow.maxLatestSwapAgeMs') ?? 15_000);
       const health = {
         lagBlocks: lag,
         coverageComplete: state.coverageComplete,
         unresolvedBackfill: state.pendingBackfill,
         latestSwapAgeMs: Number.isFinite(latestSwapAgeMs) ? latestSwapAgeMs : null,
+        coverageHealthy,
+        quietMarket,
         streamMode: this.streamMode(state.candidate.pool.chain as FlowChain),
       };
-      if (
-        lag > (this.config.get<number>('evmFlow.maxHeadLagBlocks') ?? 2) ||
-        !state.coverageComplete ||
-        state.pendingBackfill ||
-        latestSwapAgeMs > (this.config.get<number>('evmFlow.maxLatestSwapAgeMs') ?? 15_000)
-      ) {
+      if (!coverageHealthy) {
         await this.persistLateSignal(state, strategy.version, head, decision.snapshot, health);
         continue;
       }
@@ -1220,10 +1562,16 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
     const spotMaxMultiple = state.firstPriceUsd && state.maxPriceUsd
       ? state.maxPriceUsd / state.firstPriceUsd
       : null;
-    if (now - state.lastOutcomeQuoteAtMs >= 30_000 && state.trades.length > 0) {
+    if (now - state.lastOutcomeQuoteAtMs >= 30_000) {
       state.lastOutcomeQuoteAtMs = now;
-      const liq = await this.liquidity.verify(state.candidate.pool, state.gemDecimals);
-      if (liq.spotPriceUsd && liq.slip50 != null) {
+      const canMarkExecutableOutcome =
+        state.trades.length > 0 ||
+        state.benchmarkTokensBought != null ||
+        state.firstPriceUsd != null;
+      const liq = canMarkExecutableOutcome
+        ? await this.liquidity.verify(state.candidate.pool, state.gemDecimals)
+        : null;
+      if (liq?.spotPriceUsd && liq.slip50 != null) {
         const sizeUsd = this.config.get<number>('paper.positionSizeUsd') ?? 20;
         const sandwichPct = this.config.get<number>('paper.sandwichPct') ?? 0.01;
         const gasUsd = await this.gasModel.estimateUsd(state.candidate.pool.chain, state.model);
@@ -1274,6 +1622,9 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
       cursorLagBlocks: cursorLag,
       latestSwapAgeMs: state.latestSwapAtMs == null ? null : Math.max(0, now - state.latestSwapAtMs),
       streamMode: this.streamMode(state.candidate.pool.chain as FlowChain),
+      ...(state.candidate.pool.chain === 'robinhood'
+        ? { robinhoodExperiment: this.robinhoodExperiment.getAttemptSnapshot(state.id) }
+        : {}),
     };
     await (this.prisma as any).evmPoolWatch.update({
       where: { id: state.id },
@@ -1331,6 +1682,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async restoreWatches(activeChains = this.flowChains()): Promise<void> {
+    await this.resolveCorruptBackfillRanges(activeChains);
     const restoreHeads = new Map<FlowChain, bigint>();
     await Promise.all(activeChains.map(async (chain) => {
       const client = this.clients.get(chain);
@@ -1428,6 +1780,32 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
     if (rows.length) this.logger.log(`Restored ${rows.length} EVM flow watch(es)`);
   }
 
+  private async resolveCorruptBackfillRanges(activeChains: readonly FlowChain[]): Promise<void> {
+    const delegate = (this.prisma as any).evmFlowBackfillRange;
+    if (!delegate?.findMany || !delegate?.updateMany) return;
+    const pending = await delegate.findMany({
+      where: { chain: { in: activeChains }, status: 'PENDING' },
+      select: { id: true, fromBlock: true, toBlock: true },
+    }).catch(() => []);
+    const invalidIds = pending.flatMap((row: any) => {
+      try {
+        return BigInt(row.fromBlock) > BigInt(row.toBlock) ? [row.id] : [];
+      } catch {
+        return [row.id];
+      }
+    });
+    if (!invalidIds.length) return;
+    await delegate.updateMany({
+      where: { id: { in: invalidIds } },
+      data: {
+        status: 'RESOLVED',
+        resolvedAt: new Date(),
+        lastError: 'invalid_backfill_range_repaired',
+      },
+    });
+    this.logger.warn(`Resolved ${invalidIds.length} corrupt EVM backfill range(s)`);
+  }
+
   private async eventDrivenEval(chain: SupportedChain, poolAddresses: readonly string[]): Promise<void> {
     if (this.evalBusy) return;
     this.evalBusy = true;
@@ -1454,7 +1832,12 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         where: { chain, status: 'PENDING', watch: { expiresAt: { gt: new Date(now) } } },
       }).catch(() => 0);
       const stats = this.readStats.get(chain) ?? { totalShards: 0, failedShards: 0, coverageRatio: 1 };
+      const headKnown = (http ?? head) != null;
+      const headAgeMs = Date.now() - (this.lastHttpHeadCheckAt.get(chain) ?? 0);
+      const headFresh = headKnown &&
+        headAgeMs <= (this.config.get<number>('evmFlow.maxHeadAgeMs') ?? 15_000);
       const signalEligible = lag <= (this.config.get<number>('evmFlow.maxHeadLagBlocks') ?? 2) &&
+        headFresh &&
         unresolvedRanges === 0 && stats.coverageRatio >= (this.config.get<number>('evmFlow.minBlockCoverage') ?? 0.995);
       const open = await this.prisma.paperPosition.count({
         where: {
@@ -1486,7 +1869,14 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
             ? experimentDelegate.count({ where: { status: 'RESOLVED' } }).catch(() => 0)
             : 0,
         ]);
-        experimentHealth = ` experimentSignals=${activeExperiments} experimentArms=${activeArms} experimentResolved=${resolvedExperiments}`;
+        const queueWaitAvg = this.robinhoodExperimentJobsStarted > 0
+          ? Math.round(this.robinhoodExperimentQueueWaitTotalMs / this.robinhoodExperimentJobsStarted)
+          : 0;
+        experimentHealth =
+          ` experimentSignals=${activeExperiments} experimentArms=${activeArms} experimentResolved=${resolvedExperiments}` +
+          ` experimentQueue=${this.pendingRobinhoodExperimentJobs.size}` +
+          ` experimentWorkers=${this.robinhoodExperimentWorkers}` +
+          ` experimentQueueWaitMsAvg=${queueWaitAvg}`;
       }
       await (this.prisma as any).evmRpcHealthSample.create({
         data: {
@@ -1500,7 +1890,9 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
         `Flow health ${chain}: head=${http ?? head ?? '?'} lag=${lag} watching=${entryEligibleWatches.length} ` +
         `outcomeTracking=${chainWatches.length} swaps=${this.swapCount.get(chain) ?? 0} invalidSwaps=${this.invalidSwapCount.get(chain) ?? 0} ` +
         `signals=${this.signalCount.get(chain) ?? 0} open=${open ?? '?'} rpcErrors=${this.rpcFailures.get(chain) ?? 0} ` +
-        `coverage=${(stats.coverageRatio * 100).toFixed(2)}% unresolved=${unresolvedRanges} eligible=${signalEligible}${experimentHealth}`,
+        `coverage=${(stats.coverageRatio * 100).toFixed(2)}% unresolved=${unresolvedRanges} ` +
+        `outcomeFallback=${this.outcomeFallbackProcessed.get(chain) ?? 0} ` +
+        `eligible=${signalEligible}${experimentHealth}`,
       );
     }
   }
@@ -1697,6 +2089,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async persistBackfill(state: WatchState, fromBlock: bigint, toBlock: bigint, error: string): Promise<void> {
+    if (fromBlock > toBlock) return;
     const idempotencyKey = `${state.candidate.pool.chain}:${state.id}:${fromBlock}:${toBlock}`;
     await (this.prisma as any).evmFlowBackfillRange.upsert({
       where: { idempotencyKey },

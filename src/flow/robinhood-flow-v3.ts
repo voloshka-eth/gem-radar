@@ -3,12 +3,13 @@ import type { FlowTrade } from './flow.types';
 import type {
   RobinhoodArmDefinition,
   RobinhoodExecutionScenario,
+  RobinhoodFrictionDetailCohort,
   RobinhoodFlowV3Config,
   RobinhoodFlowV3Snapshot,
 } from './robinhood-experiment.types';
 
-export const ROBINHOOD_FLOW_V3_CONFIG: Readonly<RobinhoodFlowV3Config> = Object.freeze({
-  version: 'robinhood_flow_v3_entry_experiment_v1',
+export const ROBINHOOD_FLOW_V3_LEGACY_CONFIG: Readonly<RobinhoodFlowV3Config> = Object.freeze({
+  version: 'robinhood_flow_v3_entry_experiment_v3',
   confirmationStartMs: 20_000,
   confirmationEndMs: 60_000,
   rollingWindowMs: 10_000,
@@ -28,26 +29,100 @@ export const ROBINHOOD_FLOW_V3_CONFIG: Readonly<RobinhoodFlowV3Config> = Object.
   flowReversalBuySellRatio: 0.75,
   flowReversalDrawdown: 0.15,
   horizonMs: 60 * 60_000,
+  /** Paid CONFIRM_ADD fills refused when target→execute exceeds this. */
+  maxPaidEntryLatencyMs: 5_000,
 });
 
+export const ROBINHOOD_FLOW_V3_CONFIG: Readonly<RobinhoodFlowV3Config> = Object.freeze({
+  ...ROBINHOOD_FLOW_V3_LEGACY_CONFIG,
+  version: 'robinhood_low_friction_2x_v1',
+  primaryMaxEntrySlippagePct: 0.01,
+  primaryMaxSellSlippagePct: 0.01,
+  maxSellSlippagePct: 0.03,
+  maxQuoteAgeMs: 5_000,
+});
+
+/** Legacy Flow v3 confirmation arms remain as shadow diagnostics. */
 export const ROBINHOOD_EXPERIMENT_ARMS: readonly RobinhoodArmDefinition[] = Object.freeze([
-  { code: 'A_IMMEDIATE_20', immediateUsd: 20, addUsd: 0, confirmatory: true, exploratory: false },
-  { code: 'B_PROBE_4_ADD_16', immediateUsd: 4, addUsd: 16, confirmatory: true, exploratory: false },
+  { code: 'A_IMMEDIATE_20', immediateUsd: 0, addUsd: 0, confirmatory: true, exploratory: false },
+  { code: 'B_PROBE_4_ADD_16', immediateUsd: 0, addUsd: 0, confirmatory: true, exploratory: false },
   { code: 'C_CONFIRM_20', immediateUsd: 0, addUsd: 20, confirmatory: true, exploratory: false },
-  { code: 'D_PROBE_2_ADD_18', immediateUsd: 2, addUsd: 18, confirmatory: false, exploratory: true },
-  { code: 'E_PROBE_10_ADD_10', immediateUsd: 10, addUsd: 10, confirmatory: false, exploratory: true },
+  { code: 'D_PROBE_2_ADD_18', immediateUsd: 0, addUsd: 0, confirmatory: false, exploratory: true },
+  { code: 'E_PROBE_10_ADD_10', immediateUsd: 0, addUsd: 0, confirmatory: false, exploratory: true },
 ]);
+
+/** Same entry signal and quote; only the take-profit policy differs. */
+export const ROBINHOOD_PAIRED_EXIT_ARMS: readonly RobinhoodArmDefinition[] = Object.freeze([
+  { code: 'EXIT_A_FULL_2X', immediateUsd: 20, addUsd: 0, confirmatory: true, exploratory: false },
+  { code: 'EXIT_B_LADDER_80_15_5', immediateUsd: 20, addUsd: 0, confirmatory: true, exploratory: false },
+  { code: 'EXIT_C_90_10', immediateUsd: 20, addUsd: 0, confirmatory: true, exploratory: false },
+]);
+
+export const ROBINHOOD_EXIT_EXPERIMENT_LEGACY_CONFIG = Object.freeze({
+  version: 'robinhood_low_friction_paired_exits_v1',
+  arms: ROBINHOOD_PAIRED_EXIT_ARMS.map((arm) => arm.code),
+  full2x: '100%@2x', ladder: '80%@2x,15%@10x,5%@1000x', protected: '90%@2x,10%@time_or_flow_reversal',
+  horizonMs: ROBINHOOD_FLOW_V3_CONFIG.horizonMs,
+  executionScenario: 'OBSERVED_ENTRY',
+  stressExecutionScenario: 'STRESS_1_BLOCK:+1000ms,+30%gas',
+  maxBenchmarkEntryLatencyMs: 5_000,
+});
+
+export const ROBINHOOD_EXIT_EXPERIMENT_CONFIG = Object.freeze({
+  ...ROBINHOOD_EXIT_EXPERIMENT_LEGACY_CONFIG,
+  version: 'robinhood_low_friction_paired_exits_v3',
+  observedEntryExecution: 'ATOMIC_T0_SNAPSHOT_FILL',
+  delayedSellMinOutDeteriorationPct: 0.01,
+  delayedSellRule: 'FAILED_WITH_GAS_IF_EXECUTABLE_NET_PROCEEDS_BELOW_TRIGGER_MIN_OUT',
+});
+
+export const ROBINHOOD_FRICTION_FEATURE_SCHEMA = Object.freeze({
+  version: 'robinhood_execution_friction_features_v3',
+  quoteModel: 'single_venue_depth_snapshot_exact_20_bidirectional',
+  observedFillModel: 'atomic_t0_snapshot',
+  maxPrimaryImpactPct: 0.01,
+  ultraLowImpactPct: 0.005,
+  maxShadowImpactPct: 0.03,
+  cohorts: [
+    'BOTH_LE_0_5',
+    'BOTH_LE_1',
+    'SELL_LE_1_BUY_1_3',
+    'BUY_LE_1_SELL_1_3',
+    'BOTH_1_3',
+    'OUT_OF_RANGE',
+  ],
+});
 
 export const ROBINHOOD_EXECUTION_SCENARIOS: readonly RobinhoodExecutionScenario[] = Object.freeze([
-  { code: 'LATENCY_0S', latencyMs: 0, gasMultiplier: 1, primary: false, stress: false },
-  { code: 'LATENCY_1S', latencyMs: 1_000, gasMultiplier: 1, primary: false, stress: false },
-  { code: 'PRIMARY_2S', latencyMs: 2_000, gasMultiplier: 1, primary: true, stress: false },
-  // Stress adds one additional Robinhood block on top of the primary two-second execution.
-  { code: 'STRESS_5S', latencyMs: 5_000, gasMultiplier: 1.30, primary: false, stress: true },
+  { code: 'OBSERVED_ENTRY', latencyMs: 0, gasMultiplier: 1, primary: true, stress: false },
+  { code: 'STRESS_1_BLOCK', latencyMs: 1_000, gasMultiplier: 1.3, primary: false, stress: true },
 ]);
 
+export const ROBINHOOD_REGISTERED_EXPERIMENT_CONFIG = Object.freeze({
+  flow: ROBINHOOD_FLOW_V3_CONFIG,
+  entryArms: ROBINHOOD_EXPERIMENT_ARMS,
+  exitArms: ROBINHOOD_PAIRED_EXIT_ARMS,
+  executionScenarios: ROBINHOOD_EXECUTION_SCENARIOS,
+});
+
+export const ROBINHOOD_FLOW_V3_LEGACY_CONFIG_HASH = createHash('sha256')
+  .update(canonicalJson(ROBINHOOD_FLOW_V3_LEGACY_CONFIG))
+  .digest('hex');
+
 export const ROBINHOOD_FLOW_V3_CONFIG_HASH = createHash('sha256')
-  .update(canonicalJson(ROBINHOOD_FLOW_V3_CONFIG))
+  .update(canonicalJson(ROBINHOOD_REGISTERED_EXPERIMENT_CONFIG))
+  .digest('hex');
+
+export const ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH = createHash('sha256')
+  .update(canonicalJson(ROBINHOOD_EXIT_EXPERIMENT_CONFIG))
+  .digest('hex');
+
+export const ROBINHOOD_EXIT_EXPERIMENT_LEGACY_CONFIG_HASH = createHash('sha256')
+  .update(canonicalJson(ROBINHOOD_EXIT_EXPERIMENT_LEGACY_CONFIG))
+  .digest('hex');
+
+export const ROBINHOOD_FRICTION_FEATURE_SCHEMA_HASH = createHash('sha256')
+  .update(canonicalJson(ROBINHOOD_FRICTION_FEATURE_SCHEMA))
   .digest('hex');
 
 export interface RobinhoodFlowV3Input {
@@ -60,6 +135,33 @@ export interface RobinhoodFlowV3Input {
   currentDepthUsd: number;
   creatorAddress: string | null;
   hardRisk: boolean;
+}
+
+/**
+ * Disjoint execution-friction cohorts. BOTH_LE_1 excludes BOTH_LE_0_5 so a
+ * signal contributes to exactly one forward sample.
+ */
+export function classifyRobinhoodFriction(
+  buyImpactPct: number,
+  sellImpactPct: number,
+): RobinhoodFrictionDetailCohort {
+  if (
+    !Number.isFinite(buyImpactPct) ||
+    !Number.isFinite(sellImpactPct) ||
+    buyImpactPct < 0 ||
+    sellImpactPct < 0 ||
+    buyImpactPct > ROBINHOOD_FRICTION_FEATURE_SCHEMA.maxShadowImpactPct ||
+    sellImpactPct > ROBINHOOD_FRICTION_FEATURE_SCHEMA.maxShadowImpactPct
+  ) {
+    return 'OUT_OF_RANGE';
+  }
+  const ultraLow = ROBINHOOD_FRICTION_FEATURE_SCHEMA.ultraLowImpactPct;
+  const primary = ROBINHOOD_FRICTION_FEATURE_SCHEMA.maxPrimaryImpactPct;
+  if (buyImpactPct <= ultraLow && sellImpactPct <= ultraLow) return 'BOTH_LE_0_5';
+  if (buyImpactPct <= primary && sellImpactPct <= primary) return 'BOTH_LE_1';
+  if (sellImpactPct <= primary && buyImpactPct > primary) return 'SELL_LE_1_BUY_1_3';
+  if (buyImpactPct <= primary && sellImpactPct > primary) return 'BUY_LE_1_SELL_1_3';
+  return 'BOTH_1_3';
 }
 
 export function evaluateRobinhoodFlowV3(
@@ -194,4 +296,3 @@ function ratio(current: number, previous: number): number {
   if (previous <= 0) return current > 0 ? Number.POSITIVE_INFINITY : 0;
   return current / previous;
 }
-

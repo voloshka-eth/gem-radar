@@ -3,7 +3,8 @@ dist/
 .env
 .env.local
 logs/
-prisma/migrations/
+# Schema migrations are reproducible research infrastructure and must ship with
+# the code. Database data itself remains outside Git.
 *.js.map
 dev.bat
 logs_old_pre_fix
@@ -13,4 +14,5 @@ docs/research/*
 !docs/research/robinhood-stages-v1-2026-07-20.md
 !docs/research/gem-radar-research-timeline-2026-07-20.md
 !docs/research/evm-flow-strategy-v2-2026-07-20.md
+!docs/research/robinhood-low-friction-2x-v1-2026-07-27.md
 

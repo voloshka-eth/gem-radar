@@ -56,6 +56,23 @@ export interface SolanaRoundTripQuote extends SolanaExecutionSnapshot {
   raw: Record<string, unknown>;
 }
 
+export interface SolanaQuoteSizeMatrix {
+  quoteSlot: number;
+  observedAt: Date;
+  quotes: SolanaRoundTripQuote[];
+  depthConfidence: 'REAL_EXECUTABLE_ATOMIC' | 'ROUTE_AGGREGATOR_NON_ATOMIC';
+}
+
+export type SolanaRpcPriority = 'P0' | 'P1' | 'P2' | 'P3';
+
+interface QueuedRpcOperation {
+  priority: SolanaRpcPriority;
+  sequence: number;
+  operation: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
+}
+
 @Injectable()
 export class SolanaProtocolQuoteService {
   readonly connection: Connection;
@@ -65,7 +82,9 @@ export class SolanaProtocolQuoteService {
   private raydiumPromise: Promise<Raydium> | null = null;
   private readonly mintDecimals = new Map<string, number>();
   private readonly stateCache = new Map<string, { expiresAt: number; value: Promise<any> }>();
-  private rpcTail: Promise<void> = Promise.resolve();
+  private readonly rpcQueue: QueuedRpcOperation[] = [];
+  private rpcQueueRunning = false;
+  private rpcSequence = 0;
   private nextRpcAt = 0;
 
   constructor(private readonly config: ConfigService) {
@@ -90,59 +109,76 @@ export class SolanaProtocolQuoteService {
     mintAddress: string,
     quoteMintHint: string,
     entryUsd = 20,
+    priority: SolanaRpcPriority = 'P1',
   ): Promise<SolanaRoundTripQuote | null> {
-    const quoteSlot = await this.cached('slot', 250, () => this.runRpc(() => this.connection.getSlot('confirmed')));
-    const adapter = await this.adapterFor(venue, poolAddress, mintAddress, quoteMintHint, quoteSlot);
-    if (!adapter) return null;
-    const baselineUsd = Math.min(0.05, entryUsd / 100);
-    const [baseline, entry, depth] = await Promise.all([
-      adapter.buy(baselineUsd), adapter.buy(entryUsd), adapter.buy(100),
-    ]);
-    if (!baseline || !entry || !depth) return null;
-    const entryTokens = rawToNumber(entry.outputRaw, adapter.tokenDecimals);
-    const baselineTokens = rawToNumber(baseline.outputRaw, adapter.tokenDecimals);
-    if (!(entryTokens > 0) || !(baselineTokens > 0)) return null;
-    const sell = await adapter.sell(entry.outputRaw);
-    if (!sell || !(sell.outputUsd != null)) return null;
+    // A single entry quote still needs a real capacity probe. Returning depth
+    // from the $20 leg alone made every otherwise-valid entry look depthless.
+    const sizes = entryUsd === 100 ? [100] : [entryUsd, 100];
+    const matrix = await this.quoteSizeMatrix(venue, poolAddress, mintAddress, quoteMintHint, sizes, priority);
+    return matrix?.quotes.find((quote) => quote.entryUsd === entryUsd) ?? null;
+  }
 
+  async quoteSizeMatrix(
+    venue: SolanaVenue,
+    poolAddress: string,
+    mintAddress: string,
+    quoteMintHint: string,
+    sizesUsd: readonly number[],
+    priority: SolanaRpcPriority = 'P1',
+  ): Promise<SolanaQuoteSizeMatrix | null> {
+    const sizes = [...new Set(sizesUsd)].filter((size) => Number.isFinite(size) && size > 0).sort((left, right) => left - right);
+    if (!sizes.length) return null;
+    const quoteSlot = await this.cached('slot', 250, () => this.runRpc(
+      () => this.connection.getSlot('confirmed'),
+      priority,
+    ));
+    const adapter = await this.adapterFor(venue, poolAddress, mintAddress, quoteMintHint, quoteSlot, priority);
+    if (!adapter) return null;
+    const baselineUsd = Math.min(0.05, sizes[0] / 100);
+    const baseline = await adapter.buy(baselineUsd);
+    if (!baseline) return null;
+    const baselineTokens = rawToNumber(baseline.outputRaw, adapter.tokenDecimals);
+    if (!(baselineTokens > 0)) return null;
     const spotPriceUsd = spotPriceFromProbe(baselineUsd, baselineTokens);
-    const buySlippagePct = executionPriceImpact(baselineUsd, baselineTokens, entryUsd, entryTokens);
-    const sellGrossAtSpot = entryTokens * spotPriceUsd;
-    const sellSlippagePct = clampSlip(1 - sell.outputUsd / sellGrossAtSpot);
-    const depthTokens = rawToNumber(depth.outputRaw, adapter.tokenDecimals);
-    const depthSlip = executionPriceImpact(baselineUsd, baselineTokens, 100, depthTokens);
     const gasUsd = this.config.get<number>('solanaLaunch.gasUsd') ?? 0.01;
-    const sellUsd = Math.max(0, sell.outputUsd - gasUsd);
-    const totalSupplyRaw = await this.tokenSupply(new PublicKey(mintAddress))
+    const totalSupplyRaw = await this.tokenSupply(new PublicKey(mintAddress), priority)
       .then((result) => result.value.amount)
       .catch(() => null);
     const fdvUsd = totalSupplyRaw == null
       ? null
       : rawToNumber(totalSupplyRaw, adapter.tokenDecimals) * spotPriceUsd;
+    const entries = await Promise.all(sizes.map((size) => adapter.buy(size)));
+    const sells = await Promise.all(entries.map((entry) => entry ? adapter.sell(entry.outputRaw) : null));
+    const quoteRows = sizes.flatMap((entryUsd, index) => {
+      const entry = entries[index];
+      const sell = sells[index];
+      if (!entry || !sell || sell.outputUsd == null) return [];
+      const entryTokens = rawToNumber(entry.outputRaw, adapter.tokenDecimals);
+      if (!(entryTokens > 0)) return [];
+      const buySlippagePct = executionPriceImpact(baselineUsd, baselineTokens, entryUsd, entryTokens);
+      const sellSlippagePct = clampSlip(1 - sell.outputUsd / (entryTokens * spotPriceUsd));
+      const sellUsd = Math.max(0, sell.outputUsd - gasUsd);
+      return [{
+        venue, poolAddress, mintAddress, quoteMint: adapter.quoteMint,
+        tokenDecimals: adapter.tokenDecimals, quoteDecimals: adapter.quoteDecimals,
+        executable: true, buySlippagePct, sellSlippagePct, roundTripMultiple: sellUsd / entryUsd,
+        executableDepthUsd: 0,
+        quoteSlot, quoteModel: adapter.model, spotPriceUsd, fdvUsd, entryTokensRaw: entry.outputRaw,
+        entryTokens, entryUsd, sellUsd, gasUsd,
+        raw: { baseline, baselineUsd, entry, sell, matrixSizes: sizes },
+      } satisfies SolanaRoundTripQuote];
+    });
+    if (quoteRows.length !== sizes.length) return null;
+    // Depth is executable in both directions. A cheap buy followed by an
+    // expensive sell is not usable capacity for a paper position.
+    const executableDepthUsd = measuredExecutableDepth(quoteRows);
     return {
-      venue,
-      poolAddress,
-      mintAddress,
-      quoteMint: adapter.quoteMint,
-      tokenDecimals: adapter.tokenDecimals,
-      quoteDecimals: adapter.quoteDecimals,
-      executable: true,
-      buySlippagePct,
-      sellSlippagePct,
-      roundTripMultiple: sellUsd / entryUsd,
-      executableDepthUsd: depthSlip <= 0.10 ? 100 : 0,
       quoteSlot,
-      quoteModel: adapter.model,
-      spotPriceUsd,
-      fdvUsd,
-      entryTokensRaw: entry.outputRaw,
-      entryTokens,
-      entryUsd,
-      sellUsd,
-      gasUsd,
-      raw: {
-        baseline, baselineUsd, entry, depth, sell, depthSlippagePct: depthSlip,
-      },
+      observedAt: new Date(),
+      quotes: quoteRows.map((quote) => ({ ...quote, executableDepthUsd })),
+      depthConfidence: adapter.model === 'RAYDIUM_ROUTE_API'
+        ? 'ROUTE_AGGREGATOR_NON_ATOMIC'
+        : 'REAL_EXECUTABLE_ATOMIC',
     };
   }
 
@@ -152,10 +188,19 @@ export class SolanaProtocolQuoteService {
     mintAddress: string;
     quoteMint: string;
     tokensRaw: string;
-  }): Promise<{ netUsd: number; grossUsd: number; slippagePct: number; quoteSlot: number; raw: unknown } | null> {
-    const quoteSlot = await this.cached('slot', 250, () => this.runRpc(() => this.connection.getSlot('confirmed')));
+  }, priority: SolanaRpcPriority = 'P0'): Promise<{
+    netUsd: number;
+    grossUsd: number;
+    slippagePct: number;
+    quoteSlot: number;
+    raw: unknown;
+  } | null> {
+    const quoteSlot = await this.cached('slot', 250, () => this.runRpc(
+      () => this.connection.getSlot('confirmed'),
+      priority,
+    ));
     const adapter = await this.adapterFor(
-      position.venue, position.poolAddress, position.mintAddress, position.quoteMint, quoteSlot,
+      position.venue, position.poolAddress, position.mintAddress, position.quoteMint, quoteSlot, priority,
     );
     if (!adapter) return null;
     const sell = await adapter.sell(position.tokensRaw);
@@ -185,19 +230,43 @@ export class SolanaProtocolQuoteService {
     return route ? rawToNumber(route.outputAmount, 6) : null;
   }
 
-  async runRpc<T>(operation: () => Promise<T>): Promise<T> {
+  async runRpc<T>(operation: () => Promise<T>, priority: SolanaRpcPriority = 'P1'): Promise<T> {
     if (!this.isPublicRpc()) return operation();
-    const task = this.rpcTail.then(async () => {
-      const waitMs = Math.max(0, this.nextRpcAt - Date.now());
-      if (waitMs > 0) await delay(waitMs);
-      try {
-        return await operation();
-      } finally {
-        this.nextRpcAt = Date.now() + this.rpcIntervalMs();
-      }
+    return new Promise<T>((resolve, reject) => {
+      this.rpcQueue.push({
+        priority,
+        sequence: this.rpcSequence++,
+        operation,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      });
+      this.rpcQueue.sort((left, right) =>
+        rpcPriorityRank(left.priority) - rpcPriorityRank(right.priority) ||
+        left.sequence - right.sequence);
+      void this.drainRpcQueue();
     });
-    this.rpcTail = task.then(() => undefined, () => undefined);
-    return task;
+  }
+
+  private async drainRpcQueue(): Promise<void> {
+    if (this.rpcQueueRunning) return;
+    this.rpcQueueRunning = true;
+    try {
+      while (this.rpcQueue.length) {
+        const next = this.rpcQueue.shift()!;
+        const waitMs = Math.max(0, this.nextRpcAt - Date.now());
+        if (waitMs > 0) await delay(waitMs);
+        try {
+          next.resolve(await next.operation());
+        } catch (error) {
+          next.reject(error);
+        } finally {
+          this.nextRpcAt = Date.now() + this.rpcIntervalMs();
+        }
+      }
+    } finally {
+      this.rpcQueueRunning = false;
+      if (this.rpcQueue.length) void this.drainRpcQueue();
+    }
   }
 
   private async adapterFor(
@@ -206,6 +275,7 @@ export class SolanaProtocolQuoteService {
     mintAddress: string,
     quoteMintHint: string,
     slot: number,
+    priority: SolanaRpcPriority,
   ): Promise<{
     model: string;
     quoteMint: string;
@@ -214,31 +284,31 @@ export class SolanaProtocolQuoteService {
     buy: (usd: number) => Promise<ProtocolQuote | null>;
     sell: (tokensRaw: string) => Promise<ProtocolQuote | null>;
   } | null> {
-    if (venue === 'PUMP_BONDING_CURVE') return this.pumpAdapter(mintAddress);
-    if (venue === 'PUMPSWAP') return this.pumpSwapAdapter(poolAddress);
-    if (venue === 'RAYDIUM_LAUNCHLAB') return this.raydiumLaunchAdapter(poolAddress, slot);
-    if (venue === 'METEORA_DBC') return this.meteoraAdapter(poolAddress);
-    return this.routeAdapter(mintAddress, quoteMintHint);
+    if (venue === 'PUMP_BONDING_CURVE') return this.pumpAdapter(mintAddress, priority);
+    if (venue === 'PUMPSWAP') return this.pumpSwapAdapter(poolAddress, priority);
+    if (venue === 'RAYDIUM_LAUNCHLAB') return this.raydiumLaunchAdapter(poolAddress, slot, priority);
+    if (venue === 'METEORA_DBC') return this.meteoraAdapter(poolAddress, priority);
+    return this.routeAdapter(mintAddress, quoteMintHint, priority);
   }
 
-  private async pumpAdapter(mintAddress: string) {
+  private async pumpAdapter(mintAddress: string, priority: SolanaRpcPriority) {
     const mint = new PublicKey(mintAddress);
-    const global = await this.cached('pump:global', 60_000, () => this.runRpc(() => this.pump.fetchGlobal()));
+    const global = await this.cached('pump:global', 60_000, () => this.runRpc(() => this.pump.fetchGlobal(), priority));
     const feeConfig = await this.cached(
       'pump:fee-config',
       60_000,
-      () => this.runRpc(() => this.pump.fetchFeeConfig()).catch(() => null),
+      () => this.runRpc(() => this.pump.fetchFeeConfig(), priority).catch(() => null),
     );
     const bondingCurve = await this.cached(
       `pump:curve:${mintAddress}`,
       500,
-      () => this.runRpc(() => this.pump.fetchBondingCurve(mint)),
+      () => this.runRpc(() => this.pump.fetchBondingCurve(mint), priority),
     );
-    const supply = await this.tokenSupply(mint);
+    const supply = await this.tokenSupply(mint, priority);
     if (bondingCurve.complete) return null;
     const quoteMint = bondingCurve.quoteMint.equals(PublicKey.default) ? WSOL_MINT : bondingCurve.quoteMint.toBase58();
     const tokenDecimals = supply.value.decimals;
-    const quoteDecimals = await this.decimals(quoteMint);
+    const quoteDecimals = await this.decimals(quoteMint, priority);
     const mintSupply = new BN(supply.value.amount);
     return {
       model: 'PUMP_BONDING_CURVE_SDK', quoteMint, tokenDecimals, quoteDecimals,
@@ -260,15 +330,18 @@ export class SolanaProtocolQuoteService {
     };
   }
 
-  private async pumpSwapAdapter(poolAddress: string) {
+  private async pumpSwapAdapter(poolAddress: string, priority: SolanaRpcPriority) {
     const state = await this.cached(
       `pumpswap:${poolAddress}`,
       500,
-      () => this.runRpc(() => this.pumpSwap.swapSolanaState(new PublicKey(poolAddress), PAPER_OWNER)),
+      () => this.runRpc(
+        () => this.pumpSwap.swapSolanaState(new PublicKey(poolAddress), PAPER_OWNER),
+        priority,
+      ),
     );
     const quoteMint = state.pool.quoteMint.toBase58();
     const tokenDecimals = state.baseMintAccount.decimals;
-    const quoteDecimals = await this.decimals(quoteMint);
+    const quoteDecimals = await this.decimals(quoteMint, priority);
     return {
       model: 'PUMPSWAP_SDK', quoteMint, tokenDecimals, quoteDecimals,
       buy: async (usd: number) => {
@@ -297,18 +370,21 @@ export class SolanaProtocolQuoteService {
     };
   }
 
-  private async raydiumLaunchAdapter(poolAddress: string, slot: number) {
-    const raydium = await this.raydium();
+  private async raydiumLaunchAdapter(poolAddress: string, slot: number, priority: SolanaRpcPriority) {
+    const raydium = await this.raydium(priority);
     const poolInfo: any = await this.cached(
       `raydium-launch:${poolAddress}`,
       500,
-      () => this.runRpc(() => raydium.launchpad.getRpcPoolInfo({ poolId: new PublicKey(poolAddress) })),
+      () => this.runRpc(
+        () => raydium.launchpad.getRpcPoolInfo({ poolId: new PublicKey(poolAddress) }),
+        priority,
+      ),
     );
     if (Number(poolInfo.status) !== 0) return null;
     const platformAccount = await this.cached(
       `raydium-platform:${poolInfo.platformId.toBase58()}`,
       60_000,
-      () => this.runRpc(() => this.connection.getAccountInfo(poolInfo.platformId, 'confirmed')),
+      () => this.runRpc(() => this.connection.getAccountInfo(poolInfo.platformId, 'confirmed'), priority),
     );
     const platformInfo: any = platformAccount ? PlatformConfig.decode(platformAccount.data) : null;
     const quoteMint = poolInfo.mintB.toBase58();
@@ -340,29 +416,29 @@ export class SolanaProtocolQuoteService {
     };
   }
 
-  private async meteoraAdapter(poolAddress: string) {
+  private async meteoraAdapter(poolAddress: string, priority: SolanaRpcPriority) {
     const sdk: any = await import('@meteora-ag/dynamic-bonding-curve-sdk');
     const client = sdk.DynamicBondingCurveClient.create(this.connection, 'confirmed');
     const pool: any = await this.cached(
       `meteora-pool:${poolAddress}`,
       500,
-      () => this.runRpc(() => client.state.getPool(poolAddress)),
+      () => this.runRpc(() => client.state.getPool(poolAddress), priority),
     );
     if (!pool) return null;
     const configKey = new PublicKey(pool.config).toBase58();
     const config: any = await this.cached(
       `meteora-config:${configKey}`,
       60_000,
-      () => this.runRpc(() => client.state.getPoolConfig(pool.config)),
+      () => this.runRpc(() => client.state.getPoolConfig(pool.config), priority),
     );
     if (!config) return null;
     const quoteMint = new PublicKey(config.quoteMint).toBase58();
     const tokenDecimals = Number(config.tokenDecimal ?? config.tokenBaseDecimal ?? 6);
-    const quoteDecimals = await this.decimals(quoteMint);
+    const quoteDecimals = await this.decimals(quoteMint, priority);
     const currentPoint = await this.cached(
       `meteora-point:${String(config.activationType)}`,
       500,
-      () => this.runRpc(() => sdk.getCurrentPoint(this.connection, config.activationType)),
+      () => this.runRpc(() => sdk.getCurrentPoint(this.connection, config.activationType), priority),
     );
     return {
       model: 'METEORA_DBC_SDK', quoteMint, tokenDecimals, quoteDecimals,
@@ -380,8 +456,12 @@ export class SolanaProtocolQuoteService {
     };
   }
 
-  private async routeAdapter(mintAddress: string, _quoteMintHint: string) {
-    const tokenDecimals = await this.decimals(mintAddress);
+  private async routeAdapter(
+    mintAddress: string,
+    _quoteMintHint: string,
+    priority: SolanaRpcPriority,
+  ) {
+    const tokenDecimals = await this.decimals(mintAddress, priority);
     return {
       model: 'RAYDIUM_ROUTE_API', quoteMint: USDC_MINT, tokenDecimals, quoteDecimals: 6,
       buy: async (usd: number) => {
@@ -413,30 +493,32 @@ export class SolanaProtocolQuoteService {
     return response.status >= 200 && response.status < 300 && response.data?.success === true && data ? data : null;
   }
 
-  private async decimals(mint: string): Promise<number> {
+  private async decimals(mint: string, priority: SolanaRpcPriority): Promise<number> {
     const cached = this.mintDecimals.get(mint);
     if (cached != null) return cached;
-    const decimals = mint === USDC_MINT ? 6 : (await this.tokenSupply(new PublicKey(mint))).value.decimals;
+    const decimals = mint === USDC_MINT
+      ? 6
+      : (await this.tokenSupply(new PublicKey(mint), priority)).value.decimals;
     this.mintDecimals.set(mint, decimals);
     return decimals;
   }
 
-  private raydium(): Promise<Raydium> {
+  private raydium(priority: SolanaRpcPriority): Promise<Raydium> {
     this.raydiumPromise ??= this.runRpc(() => Raydium.load({
       connection: this.connection,
       owner: PAPER_OWNER,
       disableFeatureCheck: true,
       disableLoadToken: true,
       blockhashCommitment: 'confirmed',
-    }));
+    }), priority);
     return this.raydiumPromise;
   }
 
-  private tokenSupply(mint: PublicKey) {
+  private tokenSupply(mint: PublicKey, priority: SolanaRpcPriority) {
     return this.cached(
       `supply:${mint.toBase58()}`,
       2_000,
-      () => this.runRpc(() => this.connection.getTokenSupply(mint, 'confirmed')),
+      () => this.runRpc(() => this.connection.getTokenSupply(mint, 'confirmed'), priority),
     );
   }
 
@@ -488,6 +570,22 @@ export function executionPriceImpact(
     : 1;
 }
 
+export function measuredExecutableDepth(
+  quotes: readonly Pick<SolanaRoundTripQuote, 'entryUsd' | 'buySlippagePct' | 'sellSlippagePct'>[],
+  maxImpactPct = 0.05,
+): number {
+  return Math.max(0, ...quotes
+    .filter((quote) => Math.max(
+      quote.buySlippagePct ?? Infinity,
+      quote.sellSlippagePct ?? Infinity,
+    ) <= maxImpactPct)
+    .map((quote) => quote.entryUsd));
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function rpcPriorityRank(priority: SolanaRpcPriority): number {
+  return ({ P0: 0, P1: 1, P2: 2, P3: 3 } as const)[priority];
 }

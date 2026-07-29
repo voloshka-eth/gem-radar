@@ -6,9 +6,22 @@ export type RobinhoodExperimentArmCode =
   | 'B_PROBE_4_ADD_16'
   | 'C_CONFIRM_20'
   | 'D_PROBE_2_ADD_18'
-  | 'E_PROBE_10_ADD_10';
+  | 'E_PROBE_10_ADD_10'
+  | 'EXIT_A_FULL_2X'
+  | 'EXIT_B_LADDER_80_15_5'
+  | 'EXIT_C_90_10'
+  /** Parallel easy-profit lane; not part of frozen low-friction registered config. */
+  | 'EASY_EXIT_LADDER_65_25_10';
 
-export type RobinhoodExecutionScenarioCode = 'LATENCY_0S' | 'LATENCY_1S' | 'PRIMARY_2S' | 'STRESS_5S';
+export type RobinhoodExecutionScenarioCode = 'OBSERVED_ENTRY' | 'STRESS_1_BLOCK';
+
+export type RobinhoodFrictionDetailCohort =
+  | 'BOTH_LE_0_5'
+  | 'BOTH_LE_1'
+  | 'SELL_LE_1_BUY_1_3'
+  | 'BUY_LE_1_SELL_1_3'
+  | 'BOTH_1_3'
+  | 'OUT_OF_RANGE';
 
 export interface RobinhoodArmDefinition {
   code: RobinhoodExperimentArmCode;
@@ -42,11 +55,16 @@ export interface RobinhoodFlowV3Config {
   minDistinctBlocks: number;
   minExecutableDepthUsd: number;
   maxEntrySlippagePct: number;
+  primaryMaxEntrySlippagePct?: number;
+  primaryMaxSellSlippagePct?: number;
+  maxSellSlippagePct?: number;
+  maxQuoteAgeMs?: number;
   minZeroMoveRoundTrip: number;
   hardStopMultiple: number;
   flowReversalBuySellRatio: number;
   flowReversalDrawdown: number;
   horizonMs: number;
+  maxPaidEntryLatencyMs: number;
 }
 
 export interface RobinhoodFlowV3Snapshot {

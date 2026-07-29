@@ -12,6 +12,7 @@ function harness(overrides: Record<string, any> = {}, configValues: Record<strin
       update: jest.fn().mockResolvedValue({}),
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
     },
     solanaProgramCursor: {
@@ -28,6 +29,13 @@ function harness(overrides: Record<string, any> = {}, configValues: Record<strin
       findUnique: jest.fn().mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
     },
+    solanaPoolEra: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]),
+      upsert: jest.fn().mockResolvedValue({ id: 'era', active: true }),
+      create: jest.fn().mockResolvedValue({ id: 'era', active: true }),
+      update: jest.fn().mockResolvedValue({}),
+    },
     solanaExperimentSignal: {
       update: jest.fn().mockResolvedValue({}),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -40,6 +48,9 @@ function harness(overrides: Record<string, any> = {}, configValues: Record<strin
       findMany: jest.fn().mockResolvedValue([]),
       upsert: jest.fn().mockResolvedValue({}),
       count: jest.fn().mockResolvedValue(0),
+    },
+    solanaTradeAttributionIssue: {
+      upsert: jest.fn().mockResolvedValue({}),
     },
     ...overrides,
   };
@@ -79,17 +90,39 @@ describe('SolanaMultiLaunchService lifecycle safety', () => {
   it('does not apply an entry leg twice when the idempotency key already exists', async () => {
     const { service, prisma } = harness();
     prisma.solanaExecutionLeg.findUnique.mockResolvedValue({ id: 'existing-leg' });
+    const now = Date.now();
 
     await (service as any).fillEntry(
-      { id: 'signal', watch: {} },
-      { id: 'arm', armCode: 'A_IMMEDIATE_20' },
+      {
+        id: 'signal',
+        t0: new Date(now - 30_000),
+        flowSnapshot: { latestWindowBuyers: 5, buyVolumeUsd: 20, distinctSlots: 3, topThreeBuyerShare: 0.2 },
+        watch: { latestEventAt: new Date(now - 500), creatorAddress: null },
+      },
+      { id: 'arm', armCode: 'C_CONFIRM_20' },
       {},
       20,
-      'IMMEDIATE_ENTRY',
+      'CONFIRMATION_ADD',
+      { latestWindowBuyers: 5, buyVolumeUsd: 20, distinctSlots: 3, topThreeBuyerShare: 0.2 },
     );
 
     expect(prisma.solanaExecutionLeg.create).not.toHaveBeenCalled();
     expect(prisma.solanaPaperArm.update).not.toHaveBeenCalled();
+  });
+
+  it('blocks non-confirmation paid fills under the finish-line C-only policy', async () => {
+    const { service, prisma, files } = harness();
+
+    await (service as any).fillEntry(
+      { id: 'signal', watch: { latestEventAt: new Date() } },
+      { id: 'arm', armCode: 'A_IMMEDIATE_20' },
+      { entryTokensRaw: '1', entryTokens: 1, gasUsd: 0, tokenDecimals: 6 },
+      20,
+      'IMMEDIATE_ENTRY',
+    );
+
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(files.logPaperEntry).not.toHaveBeenCalled();
   });
 
   it('demotes every affected signal when a watched-pool transaction cannot be recovered', async () => {
@@ -191,16 +224,18 @@ describe('SolanaMultiLaunchService lifecycle safety', () => {
     expect(cycle).not.toHaveBeenCalled();
   });
 
-  it('processes launch-program events before ordinary watched-pool swaps', () => {
+  it('processes watched-pool flow before discovery so confirmation cannot starve', () => {
     const { service } = harness();
     (service as any).queued.set('pool-swap', {
-      slot: 100, source: 'STREAM', cursorProgramIds: new Set(), watchIds: new Set(['watch']), attempts: 0,
+      slot: 100, source: 'STREAM', priority: 'P1', queuedAtMs: 1,
+      cursorProgramIds: new Set(), watchIds: new Set(['watch']), attempts: 0,
     });
     (service as any).queued.set('launch', {
-      slot: 101, source: 'STREAM', cursorProgramIds: new Set(['program']), watchIds: new Set(), attempts: 0,
+      slot: 101, source: 'STREAM', priority: 'P2', queuedAtMs: 2,
+      cursorProgramIds: new Set(['program']), watchIds: new Set(), attempts: 0,
     });
 
-    expect((service as any).nextQueuedTransaction()[0]).toBe('launch');
+    expect((service as any).nextQueuedTransaction()[0]).toBe('pool-swap');
   });
 
   it('preserves launch coverage by evicting a pool event when the local queue is full', () => {
@@ -255,7 +290,7 @@ describe('SolanaMultiLaunchService lifecycle safety', () => {
     await expect((service as any).hasShadowCapacity()).resolves.toBe(false);
     expect(prisma.solanaExperimentSignal.count).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
-        strategyVersion: 'solana_multi_launch_flow_v2_2',
+        strategyVersion: 'solana_multi_launch_flow_v2_3',
         status: 'ACTIVE',
       }),
     }));
@@ -299,6 +334,109 @@ describe('SolanaMultiLaunchService lifecycle safety', () => {
     expect(files.logPaperExit).toHaveBeenCalledWith(expect.objectContaining({
       strategy_version: 'solana_multi_launch_flow_v2',
       config_hash: 'old-hash',
+      note: expect.stringContaining('event=TIME_SELL'),
+    }));
+  });
+
+  it('attributes a trade by exact venue/program/pool identity before mint', async () => {
+    const { service, prisma, quotes } = harness();
+    const exact = {
+      id: 'pumpswap-watch', venue: 'PUMPSWAP', programId: 'pump-program', poolAddress: 'new-pool',
+      mintAddress: 'mint', creatorAddress: null, launchId: 'launch', migrationId: 'migration',
+      discoverySignature: 'discovery', discoveryInstructionIndex: 0,
+    };
+    prisma.solanaPoolEra.findMany.mockResolvedValue([{ id: 'pumpswap-era', active: true, watch: exact }]);
+    prisma.solanaSwapObservation.upsert.mockResolvedValue({});
+    prisma.solanaLaunchWatch.update.mockResolvedValue({});
+    quotes.quoteRawToUsd.mockResolvedValue(1);
+    jest.spyOn(service as any, 'evaluateOpenArmsForWatch').mockResolvedValue(undefined);
+
+    await (service as any).handleTrade({
+      venue: 'PUMPSWAP', programId: 'pump-program', poolAddress: 'new-pool', mintAddress: 'mint',
+      quoteMint: 'quote', signature: 'swap', instructionIndex: 1, slot: 10, blockTimeMs: Date.now(),
+      wallet: 'buyer', direction: 'BUY', baseAmountRaw: '1', quoteAmountRaw: '1',
+    });
+
+    expect(prisma.solanaSwapObservation.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ watchId: 'pumpswap-watch', poolEraId: 'pumpswap-era', poolAddress: 'new-pool', migrationId: 'migration' }),
+    }));
+  });
+
+  it('routes post-migration PumpSwap swaps through the destination era', async () => {
+    const { service, prisma, quotes } = harness();
+    const watch = {
+      id: 'watch', mintAddress: 'mint', creatorAddress: null, launchId: 'launch', migrationId: 'migration',
+      discoverySignature: 'discovery', discoveryInstructionIndex: 0,
+    };
+    prisma.solanaPoolEra.findMany.mockResolvedValue([{ id: 'pumpswap-era', active: true, watch }]);
+    quotes.quoteRawToUsd.mockResolvedValue(1);
+
+    await (service as any).handleTrade({
+      venue: 'PUMPSWAP', programId: solanaProgramDescriptors().find((item) => item.venue === 'PUMPSWAP')!.programId,
+      poolAddress: 'migrated-pool', mintAddress: 'mint', quoteMint: 'quote', signature: 'post-migration-swap',
+      instructionIndex: 0, slot: 20, blockTimeMs: Date.now(), wallet: 'buyer', direction: 'BUY', baseAmountRaw: '1', quoteAmountRaw: '1',
+    });
+
+    expect(prisma.solanaSwapObservation.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ watchId: 'watch', poolEraId: 'pumpswap-era', venue: 'PUMPSWAP' }),
+    }));
+    expect(prisma.solanaTradeAttributionIssue.upsert).not.toHaveBeenCalled();
+  });
+
+  it('does not migrate a mint when the source bonding-curve identity is ambiguous', async () => {
+    const { service, prisma } = harness();
+    prisma.solanaPoolEra.findUnique.mockResolvedValue(null);
+    prisma.solanaLaunchWatch.findMany.mockResolvedValue([{ id: 'one' }, { id: 'two' }]);
+
+    await (service as any).handleMigration({
+      kind: 'MIGRATION', venue: 'PUMPSWAP', programId: solanaProgramDescriptors().find((item) => item.venue === 'PUMP_BONDING_CURVE')!.programId,
+      poolAddress: 'destination', sourcePoolAddress: 'source', mintAddress: 'mint', quoteMint: 'quote', creatorAddress: null,
+      slot: 12, signature: 'migration', instructionIndex: 3, blockTimeMs: Date.now(),
+    });
+
+    expect(prisma.solanaLaunchWatch.update).not.toHaveBeenCalled();
+    expect(prisma.solanaTradeAttributionIssue.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ reason: 'MIGRATION_ATTRIBUTION_UNKNOWN' }),
+    }));
+  });
+
+  it('treats an already applied migration replay as an idempotent no-op', async () => {
+    const { service, prisma } = harness();
+    const destinationProgram = solanaProgramDescriptors().find((item) => item.venue === 'PUMPSWAP')!.programId;
+    prisma.solanaPoolEra.findUnique.mockResolvedValue({
+      id: 'destination-era',
+      watchId: 'watch',
+      migrationId: `${destinationProgram}:migration:3`,
+      watch: { id: 'watch', mintAddress: 'mint' },
+    });
+
+    await (service as any).handleMigration({
+      kind: 'MIGRATION', venue: 'PUMPSWAP',
+      programId: solanaProgramDescriptors().find((item) => item.venue === 'PUMP_BONDING_CURVE')!.programId,
+      poolAddress: 'destination', sourcePoolAddress: 'source', mintAddress: 'mint', quoteMint: 'quote',
+      creatorAddress: null, slot: 12, signature: 'migration', instructionIndex: 3, blockTimeMs: Date.now(),
+    });
+
+    expect(prisma.solanaTradeAttributionIssue.upsert).not.toHaveBeenCalled();
+    expect(prisma.solanaPoolEra.create).not.toHaveBeenCalled();
+    expect(prisma.solanaLaunchWatch.update).not.toHaveBeenCalled();
+  });
+
+  it('records ambiguous or stale pool observations without attaching them to an arm', async () => {
+    const { service, prisma } = harness();
+    prisma.solanaLaunchWatch.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'mint-candidate' }]);
+
+    await (service as any).handleTrade({
+      venue: 'PUMP_BONDING_CURVE', programId: 'pump-program', poolAddress: 'old-bonding-pool', mintAddress: 'mint',
+      quoteMint: 'quote', signature: 'late-swap', instructionIndex: 2, slot: 10, blockTimeMs: Date.now(),
+      wallet: 'buyer', direction: 'BUY', baseAmountRaw: '1', quoteAmountRaw: '1',
+    });
+
+    expect(prisma.solanaSwapObservation.upsert).not.toHaveBeenCalled();
+    expect(prisma.solanaTradeAttributionIssue.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ reason: 'TRADE_ATTRIBUTION_UNKNOWN' }),
     }));
   });
 
@@ -571,14 +709,15 @@ describe('SolanaMultiLaunchService flow snapshots', () => {
       where: { id: 'signal' },
       data: expect.objectContaining({ status: 'CONFIRMED' }),
     }));
-    // B adds 16, C adds 20; both receive the enriched non-empty snapshot.
-    expect(fill).toHaveBeenCalledTimes(2);
-    for (const call of fill.mock.calls) {
-      const snapshot = call[5] as Record<string, unknown>;
-      expect(snapshot.observationCount).toBe(observations.length);
-      expect(snapshot.latestWindowBuyers).toBe(9);
-      expect(snapshot.confirmationReasons).toEqual([]);
-    }
+    // Finish-line: only C receives confirmation capital.
+    expect(fill).toHaveBeenCalledTimes(1);
+    expect((fill.mock.calls[0][1] as { armCode: string }).armCode).toBe('C_CONFIRM_20');
+    expect(fill.mock.calls[0][3]).toBe(20);
+    expect(fill.mock.calls[0][4]).toBe('CONFIRMATION_ADD');
+    const snapshot = fill.mock.calls[0][5] as Record<string, unknown>;
+    expect(snapshot.observationCount).toBe(observations.length);
+    expect(snapshot.latestWindowBuyers).toBe(9);
+    expect(snapshot.confirmationReasons).toEqual([]);
   });
 
   it('serializes the computed flow snapshot into the paper entry CSV row', async () => {
@@ -586,18 +725,25 @@ describe('SolanaMultiLaunchService flow snapshots', () => {
     const now = Date.now();
     prisma.solanaSwapObservation.findMany.mockResolvedValue([
       { ts: new Date(now - 3_000), slot: 10n, wallet: 'w1', direction: 'BUY', quoteUsd: 5, creatorTrade: false },
+      { ts: new Date(now - 2_500), slot: 11n, wallet: 'w2', direction: 'BUY', quoteUsd: 5, creatorTrade: false },
+      { ts: new Date(now - 2_000), slot: 12n, wallet: 'w3', direction: 'BUY', quoteUsd: 5, creatorTrade: false },
     ]);
+    const flow = {
+      latestWindowBuyers: 3, buyVolumeUsd: 15, distinctSlots: 3, topThreeBuyerShare: 0.4,
+      observationCount: 3, creatorSell: false,
+    };
     const signal = {
-      id: 'signal', watchId: 'watch', status: 'ACTIVE', riskCohort: 'EXECUTABLE_SHADOW',
-      strategyVersion: 'solana_multi_launch_flow_v2_2', configHash: 'hash', benchmarkEligible: false,
-      t0: new Date(now - 5_000), flowSnapshot: null, healthSnapshot: { source: 'STREAM' },
+      id: 'signal', watchId: 'watch', status: 'CONFIRMED', riskCohort: 'EXECUTABLE_SHADOW',
+      strategyVersion: 'solana_multi_launch_flow_v2_3', configHash: 'hash', benchmarkEligible: false,
+      t0: new Date(now - 30_000), flowSnapshot: flow, healthSnapshot: { source: 'STREAM' },
       executionSnapshot: { executableDepthUsd: 100 },
       watch: {
-        mintAddress: 'mint', poolAddress: 'pool', launchedAt: new Date(now - 6_000), venue: 'PUMPSWAP',
+        mintAddress: 'mint', poolAddress: 'pool', launchedAt: new Date(now - 40_000), venue: 'PUMPSWAP',
         discoverySlot: 1n, discoverySignature: 'sig', programId: 'program', creatorAddress: null, symbol: 'TKN',
+        latestEventAt: new Date(now - 500),
       },
     };
-    const arm = { id: 'arm', armCode: 'A_IMMEDIATE_20', committedUsd: 0, tokensBoughtRaw: '0', remainingTokensRaw: '0' };
+    const arm = { id: 'arm', armCode: 'C_CONFIRM_20', committedUsd: 0, tokensBoughtRaw: '0', remainingTokensRaw: '0' };
     const quote = {
       entryTokensRaw: '1000000', entryTokens: 1, gasUsd: 0.01, buySlippagePct: 0.01,
       quoteSlot: 100, quoteModel: 'TEST', spotPriceUsd: 1, executableDepthUsd: 100,
@@ -605,20 +751,38 @@ describe('SolanaMultiLaunchService flow snapshots', () => {
     };
     prisma.solanaPaperArm.update.mockResolvedValue({ ...arm, status: 'OPEN' });
 
-    await (service as any).fillEntry(signal, arm, quote, 20, 'IMMEDIATE_ENTRY');
+    await (service as any).fillEntry(signal, arm, quote, 20, 'CONFIRMATION_ADD', flow);
 
     expect(prisma.$transaction).toHaveBeenCalled();
     const row = files.logPaperEntry.mock.calls[0][0];
-    const flow = JSON.parse(row.flow_snapshot);
-    expect(flow.observationCount).toBe(1);
-    expect(row.strategy_version).toBe('solana_multi_launch_flow_v2_2');
-    expect(row.experiment_arm).toBe('A_IMMEDIATE_20');
+    const loggedFlow = JSON.parse(row.flow_snapshot);
+    expect(loggedFlow.latestWindowBuyers).toBe(3);
+    expect(row.strategy_version).toBe('solana_multi_launch_flow_v2_3');
+    expect(row.experiment_arm).toBe('C_CONFIRM_20');
     expect(row.quote_model).toBe('TEST');
-    // The freshly computed snapshot is also persisted on the signal.
-    expect(prisma.solanaExperimentSignal.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: 'signal' },
-      data: { flowSnapshot: expect.objectContaining({ observationCount: 1 }) },
-    }));
+    expect(row.note).toContain('leg=CONFIRMATION_ADD');
+    expect(row.note).toContain('cohort=EXECUTABLE_SHADOW');
+  });
+  it('blocks paid confirmation when the creator already has a CREATOR_EXIT', async () => {
+    const { service, prisma, files } = harness();
+    const now = Date.now();
+    prisma.solanaPaperArm.findFirst.mockResolvedValue({ id: 'prior-rug' });
+
+    await (service as any).fillEntry(
+      {
+        id: 'signal', t0: new Date(now - 30_000),
+        watch: { latestEventAt: new Date(now - 200), creatorAddress: 'creator' },
+      },
+      { id: 'arm', armCode: 'C_CONFIRM_20' },
+      { entryTokensRaw: '1', entryTokens: 1, gasUsd: 0, tokenDecimals: 6 },
+      20,
+      'CONFIRMATION_ADD',
+      { latestWindowBuyers: 5, buyVolumeUsd: 20, distinctSlots: 3, topThreeBuyerShare: 0.2 },
+    );
+
+    expect(prisma.solanaPaperArm.findFirst).toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(files.logPaperEntry).not.toHaveBeenCalled();
   });
 });
 

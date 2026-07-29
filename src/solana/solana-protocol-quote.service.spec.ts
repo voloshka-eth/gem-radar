@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   SolanaProtocolQuoteService,
   executionPriceImpact,
+  measuredExecutableDepth,
   spotPriceFromProbe,
 } from './solana-protocol-quote.service';
 
@@ -51,9 +52,36 @@ describe('SolanaProtocolQuoteService RPC coordination', () => {
     expect(load).toHaveBeenCalledTimes(1);
   });
 
+  it('lets P0 work jump ahead of queued discovery and backfill RPC work', async () => {
+    const quotes = service(0);
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const first = quotes.runRpc(async () => {
+      order.push('running-p3');
+      await firstGate;
+    }, 'P3');
+    await Promise.resolve();
+    const queuedP3 = quotes.runRpc(async () => { order.push('queued-p3'); }, 'P3');
+    const queuedP0 = quotes.runRpc(async () => { order.push('queued-p0'); }, 'P0');
+
+    releaseFirst();
+    await Promise.all([first, queuedP3, queuedP0]);
+
+    expect(order).toEqual(['running-p3', 'queued-p0', 'queued-p3']);
+  });
+
   it('derives marginal price and impact from the actual probe notional', () => {
     expect(spotPriceFromProbe(0.05, 25_000)).toBeCloseTo(0.000002, 12);
     expect(executionPriceImpact(0.05, 25_000, 20, 10_000_000)).toBeCloseTo(0, 12);
     expect(executionPriceImpact(0.05, 25_000, 20, 9_000_000)).toBeCloseTo(0.10, 12);
+  });
+
+  it('requires both buy and immediate-sell impact for executable depth', () => {
+    expect(measuredExecutableDepth([
+      { entryUsd: 20, buySlippagePct: 0.02, sellSlippagePct: 0.03 },
+      { entryUsd: 50, buySlippagePct: 0.03, sellSlippagePct: 0.07 },
+      { entryUsd: 100, buySlippagePct: 0.06, sellSlippagePct: 0.04 },
+    ])).toBe(20);
   });
 });

@@ -1,6 +1,7 @@
 import { registerAs } from '@nestjs/config';
 import tokenSymbolBlocklist from './token-symbol-blocklist.json';
 import blockedCreatorsFile from './blocked-creators.json';
+import { flattenResolved, resolveRpcEndpoints } from './rpc-endpoints';
 
 const activeStrategyMode = (): string =>
   process.env.STRATEGY_MODE ?? 'legacy_contract_radar';
@@ -8,6 +9,30 @@ const activeStrategyMode = (): string =>
 const blockedTokenSymbols = tokenSymbolBlocklist.symbols
   .map((entry) => entry.symbol.trim().replace(/^\$/, '').toLowerCase())
   .filter(Boolean);
+
+const rpc = flattenResolved(resolveRpcEndpoints({
+  alchemyApiKey: process.env.ALCHEMY_API_KEY,
+  alchemyRpcUrl: process.env.ALCHEMY_RPC_URL,
+  infuraApiKey: process.env.INFURA_API_KEY,
+  infuraRpcUrl: process.env.INFURA_RPC_URL,
+  rpcAlchemyChains: process.env.RPC_ALCHEMY_CHAINS,
+  rpcInfuraChains: process.env.RPC_INFURA_CHAINS,
+  rpcPaidChains: process.env.RPC_PAID_CHAINS,
+  rpcPriority: process.env.RPC_PRIORITY,
+  rpcPrimaryTimeoutMs: process.env.RPC_PRIMARY_TIMEOUT_MS,
+  rpcFallbackTimeoutMs: process.env.RPC_FALLBACK_TIMEOUT_MS,
+  ethereumRpcUrl: process.env.ETHEREUM_RPC_URL,
+  ethereumRpcUrlFallback: process.env.ETHEREUM_RPC_URL_FALLBACK,
+  ethereumRpcWsUrl: process.env.ETHEREUM_RPC_WS_URL,
+  baseRpcUrl: process.env.BASE_RPC_URL,
+  baseRpcUrlFallback: process.env.BASE_RPC_URL_FALLBACK,
+  baseRpcWsUrl: process.env.BASE_RPC_WS_URL,
+  robinhoodRpcUrl: process.env.ROBINHOOD_RPC_URL,
+  robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK,
+  robinhoodRpcWsUrl: process.env.ROBINHOOD_RPC_WS_URL,
+  solanaRpcUrl: process.env.SOLANA_RPC_URL,
+  solanaRpcWsUrl: process.env.SOLANA_RPC_WS_URL,
+}));
 
 export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -23,19 +48,33 @@ export const redisConfig = registerAs('redis', () => ({
 }));
 
 export const chainConfig = registerAs('chain', () => ({
-  // drpc.org provides free archive access (required for binary-search token-age).
-  // publicnode.com is the fallback — no archive, but handles latest-state calls on RPC outage.
-  ethereumRpcUrl:         process.env.ETHEREUM_RPC_URL          ?? 'https://eth.drpc.org',
-  ethereumRpcUrlFallback: process.env.ETHEREUM_RPC_URL_FALLBACK ?? 'https://ethereum.publicnode.com',
-  ethereumRpcWsUrl:       process.env.ETHEREUM_RPC_WS_URL || undefined,
-  baseRpcUrl:             process.env.BASE_RPC_URL              ?? 'https://base.drpc.org',
-  baseRpcUrlFallback:     process.env.BASE_RPC_URL_FALLBACK     ?? 'https://base.publicnode.com',
-  baseRpcWsUrl:           process.env.BASE_RPC_WS_URL || undefined,
-  robinhoodRpcUrl:        process.env.ROBINHOOD_RPC_URL         ?? 'https://rpc.mainnet.chain.robinhood.com',
-  robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK || undefined,
-  robinhoodRpcWsUrl:       process.env.ROBINHOOD_RPC_WS_URL || undefined,
-  // Robinhood's public RPC currently rejects historical eth_getCode. Keep token
-  // age unknown rather than issuing one failing archive call per fresh token.
+  // Free public RPC is primary. Alchemy/Infura attach as ordered failovers for
+  // RPC_PAID_CHAINS (default: robinhood). Free must answer within
+  // RPC_PRIMARY_TIMEOUT_MS or the next URL is tried (viem rank disabled).
+  rpcProvider: rpc.providerLabel,
+  alchemyActive: rpc.alchemyActive,
+  infuraActive: rpc.infuraActive,
+  alchemyChains: rpc.alchemyChains,
+  infuraChains: rpc.infuraChains,
+  paidChains: rpc.paidChains,
+  primaryTimeoutMs: rpc.primaryTimeoutMs,
+  fallbackTimeoutMs: rpc.fallbackTimeoutMs,
+  ethereumRpcUrl:         rpc.ethereumRpcUrl,
+  ethereumRpcUrlFallback: rpc.ethereumRpcUrlFallback,
+  ethereumRpcUrls:        rpc.ethereumRpcUrls,
+  ethereumRpcWsUrl:       rpc.ethereumRpcWsUrl,
+  baseRpcUrl:             rpc.baseRpcUrl,
+  baseRpcUrlFallback:     rpc.baseRpcUrlFallback,
+  baseRpcUrls:            rpc.baseRpcUrls,
+  baseRpcWsUrl:           rpc.baseRpcWsUrl,
+  robinhoodRpcUrl:        rpc.robinhoodRpcUrl,
+  robinhoodRpcUrlFallback: rpc.robinhoodRpcUrlFallback,
+  robinhoodRpcUrls:       rpc.robinhoodRpcUrls,
+  robinhoodRpcWsUrl:       rpc.robinhoodRpcWsUrl,
+  // Free-tier safe default: smaller batches than the old 10.
+  robinhoodRpcBatchSize: Math.max(1, parseInt(process.env.ROBINHOOD_RPC_BATCH_SIZE ?? '4', 10)),
+  // Public RH RPC rejects historical eth_getCode. Alchemy archive may support it —
+  // enable explicitly after verifying on your key.
   robinhoodHistoricalCodeEnabled: process.env.ROBINHOOD_HISTORICAL_CODE_ENABLED === 'true',
   enabledChains: (process.env.COLLECTOR_CHAINS ?? 'ethereum,robinhood')
     .split(',')
@@ -49,7 +88,7 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
     .split(',')
     .map((chain) => chain.trim())
     .filter(Boolean),
-  factoryPollMs: parseInt(process.env.EVM_FLOW_FACTORY_POLL_MS ?? '3000', 10),
+  factoryPollMs: parseInt(process.env.EVM_FLOW_FACTORY_POLL_MS ?? '5000', 10),
   healthLogMs: parseInt(process.env.EVM_FLOW_HEALTH_LOG_MS ?? '30000', 10),
   freshWatchMs: parseInt(process.env.EVM_FLOW_FRESH_WATCH_MS ?? '300000', 10),
   matureWatchMs: parseInt(process.env.EVM_FLOW_MATURE_WATCH_MS ?? '900000', 10),
@@ -59,7 +98,12 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
   maxEntrySlipPct: parseFloat(process.env.EVM_FLOW_MAX_ENTRY_SLIP_PCT ?? '0.10'),
   httpPollMsEthereum: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_ETHEREUM ?? '12000', 10),
   httpPollMsBase: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_BASE ?? '4000', 10),
-  httpPollMsRobinhood: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_ROBINHOOD ?? '4000', 10),
+  // Free-tier: slightly slower RH poll to stay under Alchemy/public RPS caps.
+  httpPollMsRobinhood: parseInt(process.env.EVM_FLOW_HTTP_POLL_MS_ROBINHOOD ?? '6000', 10),
+  maxLogRangeBlocksRobinhood: parseInt(
+    process.env.EVM_FLOW_MAX_LOG_RANGE_BLOCKS_ROBINHOOD ?? '2000',
+    10,
+  ),
   matureBackfillBlocksEthereum: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_ETHEREUM ?? '25', 10),
   matureBackfillBlocksBase: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_BASE ?? '150', 10),
   matureBackfillBlocksRobinhood: parseInt(process.env.EVM_FLOW_MATURE_BACKFILL_BLOCKS_ROBINHOOD ?? '150', 10),
@@ -67,7 +111,28 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
   registrationMaxBackfillBlocksBase: parseInt(process.env.EVM_FLOW_REGISTRATION_MAX_BACKFILL_BLOCKS_BASE ?? '300', 10),
   registrationMaxBackfillBlocksRobinhood: parseInt(process.env.EVM_FLOW_REGISTRATION_MAX_BACKFILL_BLOCKS_ROBINHOOD ?? '300', 10),
   maxLatestSwapAgeMs: parseInt(process.env.EVM_FLOW_MAX_LATEST_SWAP_AGE_MS ?? '15000', 10),
-  initialAddressBatchSize: parseInt(process.env.EVM_FLOW_INITIAL_ADDRESS_BATCH_SIZE ?? '32', 10),
+  maxHeadAgeMs: parseInt(process.env.EVM_FLOW_MAX_HEAD_AGE_MS ?? '15000', 10),
+  blockReadConcurrency: parseInt(process.env.EVM_FLOW_BLOCK_READ_CONCURRENCY ?? '2', 10),
+  // Free-tier: was 20 (burns CU / 429s). 4 keeps funnel alive without slamming Alchemy.
+  blockReadConcurrencyRobinhood: parseInt(
+    process.env.EVM_FLOW_BLOCK_READ_CONCURRENCY_ROBINHOOD ?? '4',
+    10,
+  ),
+  robinhoodExperimentConcurrency: parseInt(
+    process.env.EVM_FLOW_ROBINHOOD_EXPERIMENT_CONCURRENCY ?? '1',
+    10,
+  ),
+  robinhoodExperimentAttemptCooldownMs: parseInt(
+    process.env.ROBINHOOD_EXPERIMENT_ATTEMPT_COOLDOWN_MS ?? '30000',
+    10,
+  ),
+  robinhoodExperimentDiscoveryMinIntervalMs: parseInt(
+    process.env.ROBINHOOD_EXPERIMENT_DISCOVERY_MIN_INTERVAL_MS ?? '7500',
+    10,
+  ),
+  outcomeFallbackBatchSize: parseInt(process.env.EVM_FLOW_OUTCOME_FALLBACK_BATCH_SIZE ?? '4', 10),
+  outcomeFallbackIntervalMs: parseInt(process.env.EVM_FLOW_OUTCOME_FALLBACK_INTERVAL_MS ?? '5000', 10),
+  initialAddressBatchSize: parseInt(process.env.EVM_FLOW_INITIAL_ADDRESS_BATCH_SIZE ?? '16', 10),
   minBlockCoverage: parseFloat(process.env.EVM_FLOW_MIN_BLOCK_COVERAGE ?? '0.995'),
   robinhoodExperimentMaxTickAgeMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_MAX_TICK_AGE_MS ?? '10000', 10),
   robinhoodExperimentMaxLegLatenessMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_MAX_LEG_LATENESS_MS ?? '3000', 10),
@@ -76,8 +141,9 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
 export const solanaLaunchConfig = registerAs('solanaLaunch', () => ({
   enabled: process.env.SOLANA_LAUNCH_ENABLED !== 'false',
   multiVenueEnabled: process.env.SOLANA_MULTI_VENUE_ENABLED !== 'false',
-  rpcUrl: process.env.SOLANA_RPC_URL ?? 'https://api.mainnet-beta.solana.com',
-  wsUrl: process.env.SOLANA_RPC_WS_URL || undefined,
+  // Filled from ALCHEMY_API_KEY when SOLANA_RPC_URL is unset.
+  rpcUrl: rpc.solanaRpcUrl,
+  wsUrl: rpc.solanaRpcWsUrl,
   launchApiUrl: process.env.RAYDIUM_LAUNCH_API_URL ?? 'https://launch-mint-v1.raydium.io',
   tradeApiUrl: process.env.RAYDIUM_TRADE_API_URL ?? 'https://transaction-v1.raydium.io',
   pollIntervalMs: parseInt(process.env.SOLANA_LAUNCH_POLL_INTERVAL_MS ?? '10000', 10),
@@ -144,6 +210,14 @@ export const apiConfig = registerAs('api', () => ({
   goplusRetryDelayMs: parseInt(process.env.GOPLUS_RETRY_DELAY_MS ?? '2500', 10),
   goplusCircuitBreakerMs: parseInt(process.env.GOPLUS_CIRCUIT_BREAKER_MS ?? '60000', 10),
   honeypotBaseUrl: process.env.HONEYPOT_BASE_URL ?? 'https://api.honeypot.is',
+  bubblemapsBaseUrl: process.env.BUBBLEMAPS_BASE_URL ?? 'https://api.bubblemaps.io',
+  bubblemapsApiKey: process.env.BUBBLEMAPS_API_KEY,
+  bubblemapsEnabled: process.env.BUBBLEMAPS_ENABLED === 'true',
+  bubblemapsTimeoutMs: parseInt(process.env.BUBBLEMAPS_TIMEOUT_MS ?? '15000', 10),
+  // Free holder concentration via Blockscout (+ GeckoTerminal top_10 fallback).
+  freeHolderGateEnabled: process.env.FREE_HOLDER_GATE_ENABLED !== 'false',
+  freeHolderGateTimeoutMs: parseInt(process.env.FREE_HOLDER_GATE_TIMEOUT_MS ?? '12000', 10),
+  freeHolderGateLimit: parseInt(process.env.FREE_HOLDER_GATE_LIMIT ?? '20', 10),
 }));
 
 export const collectorConfig = registerAs('collector', () => ({
@@ -187,6 +261,8 @@ export const collectorConfig = registerAs('collector', () => ({
   robinhoodPaperEnabled: process.env.ROBINHOOD_PAPER_ENABLED != null
     ? process.env.ROBINHOOD_PAPER_ENABLED !== 'false'
     : process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
+  robinhoodLegacyPaperEnabled: process.env.ROBINHOOD_LEGACY_PAPER_ENABLED === 'true',
+  robinhoodLegacyResearchEnabled: process.env.ROBINHOOD_LEGACY_RESEARCH_ENABLED === 'true',
   robinhoodMinDepthUsd: parseFloat(process.env.ROBINHOOD_MIN_DEPTH_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
   robinhoodMinOnchainTvlUsd: parseFloat(process.env.ROBINHOOD_MIN_ONCHAIN_TVL_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_ONCHAIN_TVL_USD ?? '200'),
   robinhoodMinScore: parseFloat(process.env.ROBINHOOD_MIN_SCORE ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),
@@ -302,6 +378,11 @@ export const paperConfig = registerAs('paper', () => ({
   // configured paper size cannot silently fall back to a different default.
   positionSizeUsd:    parseFloat(process.env.PAPER_POSITION_SIZE_USD ?? process.env.PAPER_TRADE_SIZE_USD ?? '20'),
   detectionDelaySec:  parseInt(  process.env.PAPER_DETECTION_DELAY_SEC ?? '0', 10), // enter as soon as a candidate survives
+  // Legacy enter-all radar is observation-only by default: EV was proven negative
+  // (-0.43 on 611 closed), so its collector entries record as shadow ($0 benchmark
+  // weight) on ALL chains. Set PAPER_LEGACY_SHADOW_ALL=false to restore the old
+  // behaviour where robinhood collector entries counted as a paid book.
+  legacyShadowAll:    process.env.PAPER_LEGACY_SHADOW_ALL !== 'false',
   // Optional survival experiment. The primary paper lane enters at discovery t0;
   // delaying the buy changes the opportunity set and must never be the default.
   takeCohortEnabled: process.env.PAPER_TAKE_COHORT_ENABLED === 'true',

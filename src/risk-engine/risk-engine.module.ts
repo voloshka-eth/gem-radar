@@ -4,6 +4,8 @@ import Redis from 'ioredis';
 import { RiskEngineService } from './risk-engine.service';
 import { GoPlusService } from './providers/goplus.service';
 import { HoneypotService } from './providers/honeypot.service';
+import { BubblemapsService } from './providers/bubblemaps.service';
+import { FreeHolderConcentrationService } from './providers/free-holder-concentration.service';
 import { RISK_REDIS_CLIENT } from './risk-engine.constants';
 
 @Module({
@@ -11,6 +13,8 @@ import { RISK_REDIS_CLIENT } from './risk-engine.constants';
     RiskEngineService,
     GoPlusService,
     HoneypotService,
+    BubblemapsService,
+    FreeHolderConcentrationService,
     {
       provide: RISK_REDIS_CLIENT,
       useFactory: (config: ConfigService) =>
@@ -26,6 +30,6 @@ import { RISK_REDIS_CLIENT } from './risk-engine.constants';
       inject: [ConfigService],
     },
   ],
-  exports: [RiskEngineService],
+  exports: [RiskEngineService, BubblemapsService, FreeHolderConcentrationService],
 })
 export class RiskEngineModule {}

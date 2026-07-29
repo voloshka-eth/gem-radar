@@ -10,6 +10,61 @@ export interface SolanaArmOutcome {
   resolvedAtMs: number;
 }
 
+export interface SolanaExecutionLegLedgerRow {
+  status: string;
+  legType: string;
+  inputUsd: number | null;
+  outputUsd: number | null;
+  gasUsd: number | null;
+}
+
+export interface SolanaLegReconciliation {
+  entryAndAddCostUsd: number;
+  exitProceedsUsd: number;
+  failedGasUsd: number;
+  remainingMarkedValueUsd: number;
+  netPnlUsd: number;
+  recordedNetPnlUsd: number;
+  differenceUsd: number;
+}
+
+export interface SolanaBenchmarkArmState {
+  status: string;
+  committedUsd: number;
+  remainingTokensRaw: string;
+}
+
+/** Canonical accounting comes from immutable execution legs, never labels. */
+export function reconcileSolanaArm(
+  arm: { committedUsd: number; realizedValueUsd: number; remainingMarkedValueUsd?: number | null },
+  legs: readonly SolanaExecutionLegLedgerRow[],
+): SolanaLegReconciliation {
+  const filled = legs.filter((leg) => leg.status === 'FILLED');
+  const entryAndAddCostUsd = sum(filled.map((leg) => Number(leg.inputUsd ?? 0) + (leg.inputUsd != null ? Number(leg.gasUsd ?? 0) : 0)));
+  // Filled exits persist a net quote in outputUsd, so their gas must not be
+  // subtracted a second time. Failed legs are the only standalone gas loss.
+  const exitProceedsUsd = sum(filled.map((leg) => Number(leg.outputUsd ?? 0)));
+  const failedGasUsd = sum(legs.filter((leg) => leg.status === 'FAILED').map((leg) => Number(leg.gasUsd ?? 0)));
+  const remainingMarkedValueUsd = Number(arm.remainingMarkedValueUsd ?? 0);
+  const netPnlUsd = exitProceedsUsd + remainingMarkedValueUsd - entryAndAddCostUsd - failedGasUsd;
+  const recordedNetPnlUsd = Number(arm.realizedValueUsd) + remainingMarkedValueUsd - Number(arm.committedUsd);
+  return { entryAndAddCostUsd, exitProceedsUsd, failedGasUsd, remainingMarkedValueUsd, netPnlUsd, recordedNetPnlUsd,
+    differenceUsd: netPnlUsd - recordedNetPnlUsd };
+}
+
+export function validateSolanaBenchmarkArm(
+  arm: SolanaBenchmarkArmState,
+  ledger: SolanaLegReconciliation,
+  toleranceUsd = 0.0001,
+): string[] {
+  const reasons: string[] = [];
+  if (!['CLOSED', 'FAILED', 'REORG_INVALIDATED'].includes(arm.status)) reasons.push('arm_not_terminal');
+  if (BigInt(arm.remainingTokensRaw || '0') !== 0n) reasons.push('unmarked_token_residual');
+  if (Math.abs(ledger.differenceUsd) > toleranceUsd) reasons.push('execution_ledger_mismatch');
+  if (arm.committedUsd > 0 && ledger.entryAndAddCostUsd <= 0) reasons.push('missing_entry_leg');
+  return reasons;
+}
+
 export interface SolanaArmSummary {
   venue: string;
   cohort: string;
