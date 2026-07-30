@@ -17,12 +17,15 @@ import { contractHardRiskReason } from './flow-risk';
 import { computeBuyerQualityShadow } from './buyer-quality';
 import {
   ROBINHOOD_EXECUTION_SCENARIOS,
-  ROBINHOOD_EXPERIMENT_ARMS,
   ROBINHOOD_PAIRED_EXIT_ARMS,
   ROBINHOOD_EXIT_EXPERIMENT_CONFIG,
   ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH,
+  ROBINHOOD_FRICTION_FEATURE_SCHEMA,
+  ROBINHOOD_FRICTION_FEATURE_SCHEMA_HASH,
   ROBINHOOD_FLOW_V3_CONFIG,
   ROBINHOOD_FLOW_V3_CONFIG_HASH,
+  ROBINHOOD_REGISTERED_EXPERIMENT_CONFIG,
+  classifyRobinhoodFriction,
   evaluateRobinhoodFlowV3,
 } from './robinhood-flow-v3';
 import type { FlowTrade } from './flow.types';
@@ -53,6 +56,7 @@ export class RobinhoodEntryExperimentService {
   private readonly createAttemptAt = new Map<string, number>();
   private readonly dynamicSafetyAt = new Map<string, number>();
   private readonly marketEvaluationAt = new Map<string, number>();
+  private readonly unhealthySinceMs = new Map<string, number>();
 
   constructor(
     private readonly config: ConfigService,
@@ -78,13 +82,25 @@ export class RobinhoodEntryExperimentService {
     }
     if (!ACTIVE_EXPERIMENT_STATUSES.includes(experiment.status)) return null;
     if (experiment.configHash !== ROBINHOOD_FLOW_V3_CONFIG_HASH) {
-      await this.invalidateExperiment(experiment, 'frozen_config_hash_mismatch');
-      return null;
+      // A deploy freezes new exposure, not an already-filled paper position.
+      // Existing exit arms keep their immutable policy until terminal resolution.
+      await this.processFrozenExperiment(experiment, tick);
+      const latest = await this.findExperiment(tick.watchId);
+      return latest && ACTIVE_EXPERIMENT_STATUSES.includes(latest.status)
+        ? latest.horizonAt.getTime()
+        : null;
     }
     if (!tick.pipelineHealthy) {
+      const unhealthySinceMs = this.unhealthySinceMs.get(experiment.id) ?? tick.observedAtMs;
+      this.unhealthySinceMs.set(experiment.id, unhealthySinceMs);
+      const graceMs = this.config.get<number>('evmFlow.robinhoodExperimentHealthGraceMs') ?? 10_000;
+      if (tick.observedAtMs - unhealthySinceMs < graceMs) {
+        return experiment.horizonAt.getTime();
+      }
       await this.invalidateExperiment(experiment, 'unhealthy_paired_signal_period');
       return null;
     }
+    this.unhealthySinceMs.delete(experiment.id);
     await this.processExperiment(experiment, tick);
     const latest = await this.findExperiment(tick.watchId);
     return latest && ACTIVE_EXPERIMENT_STATUSES.includes(latest.status)
@@ -118,6 +134,11 @@ export class RobinhoodEntryExperimentService {
       return null;
     }
     const t0Ms = Date.now();
+    const quoteAgeMs = Math.max(
+      0,
+      t0Ms - Math.min(buyQuote.observedAt.getTime(), sellQuote.observedAt.getTime()),
+    );
+    if (quoteAgeMs > (ROBINHOOD_FLOW_V3_CONFIG.maxQuoteAgeMs ?? 5_000)) return null;
     if (!tick.pipelineHealthy || t0Ms - tick.observedAtMs > maxTickAgeMs) {
       this.logger.warn(
         `Robinhood v3 preflight stale ${tick.candidate.token.tokenAddress}: ` +
@@ -139,13 +160,61 @@ export class RobinhoodEntryExperimentService {
       gasUsd,
       sellTaxPct: safety.sellTaxPct,
     });
-    const roundTrip = exit.netUsd / 20;
-    if (roundTrip < ROBINHOOD_FLOW_V3_CONFIG.minZeroMoveRoundTrip) return null;
+    const sequentialRoundTrip =
+      typeof (this.liquidity as any).simulateSequentialRoundTrip === 'function'
+        ? await this.liquidity.simulateSequentialRoundTrip(pool, liq, {
+            sizeUsd: 20,
+            buyGasUsd: gasUsd,
+            sellGasUsd: gasUsd,
+            sandwichPct,
+            buyTaxPct: safety.buyTaxPct,
+            sellTaxPct: safety.sellTaxPct,
+          })
+        : null;
+    // Preserve the v1.10 eligible universe: its gate used the bidirectional
+    // executable quote, while sequential AMM impact is recorded as a more
+    // conservative research feature. It must not silently erase candidates.
+    const quotedRoundTrip = exit.netUsd / 20;
+    if (quotedRoundTrip < ROBINHOOD_FLOW_V3_CONFIG.minZeroMoveRoundTrip) return null;
+    const sequentialRoundTripMultiple = sequentialRoundTrip?.roundTripMultiple ?? null;
 
+    const buyImpactPct = buyQuote.slippagePct!;
+    const sellImpactPct = sellQuote.slippagePct!;
+    const lowFriction =
+      buyImpactPct <= (ROBINHOOD_FLOW_V3_CONFIG.primaryMaxEntrySlippagePct ?? 0.01) &&
+      sellImpactPct <= (ROBINHOOD_FLOW_V3_CONFIG.primaryMaxSellSlippagePct ?? 0.01);
+    // The cohorts share safety and executable-route requirements, but must never
+    // be pooled in the benchmark. High friction is paper research, not a hidden
+    // extension of the low-friction primary result.
+    const frictionCohort = lowFriction ? 'LOW_FRICTION_PRIMARY' : 'HIGH_FRICTION_PAPER';
+    const paperEligible = true;
+    const frictionDetailCohort = classifyRobinhoodFriction(buyImpactPct, sellImpactPct);
+    const sharedEntryQuoteId = `${tick.watchId}:${tick.latestBlock.toString()}:${t0Ms}`;
     const t0At = new Date(t0Ms);
-    const arms = [...ROBINHOOD_EXPERIMENT_ARMS, ...ROBINHOOD_PAIRED_EXIT_ARMS].flatMap((arm) =>
-      ROBINHOOD_EXECUTION_SCENARIOS.map((scenario) => {
+    const activePaperArms = ROBINHOOD_PAIRED_EXIT_ARMS.filter(
+      (arm) => arm.code === 'EXIT_A_FULL_2X',
+    );
+    const activeExecutionScenarios = ROBINHOOD_EXECUTION_SCENARIOS.filter(
+      (scenario) => scenario.code === 'OBSERVED_ENTRY',
+    );
+    const arms = activePaperArms.flatMap((arm) =>
+      activeExecutionScenarios.map((scenario) => {
         const legType = arm.immediateUsd > 0 ? 'IMMEDIATE_BUY' : 'PROBE_BUY';
+        const pairedExit = this.isPairedExitArmCode(arm.code);
+        const paidExitEligible = pairedExit && paperEligible;
+        const atomicObservedFill =
+          paidExitEligible && scenario.code === 'OBSERVED_ENTRY' && arm.immediateUsd > 0;
+        const pendingStressFill =
+          paidExitEligible && scenario.code === 'STRESS_1_BLOCK' && arm.immediateUsd > 0;
+        const entryArmActive = !pairedExit && paperEligible;
+        const effectiveAddUsd = entryArmActive ? arm.addUsd : 0;
+        const status = atomicObservedFill
+          ? 'OPEN'
+          : pendingStressFill
+            ? 'PENDING_ENTRY'
+            : entryArmActive
+              ? 'WAITING_CONFIRMATION'
+              : 'NO_TRADE';
         return {
           armCode: arm.code,
           scenarioCode: scenario.code,
@@ -155,23 +224,55 @@ export class RobinhoodEntryExperimentService {
           exploratory: arm.exploratory,
           primaryScenario: scenario.primary,
           stressScenario: scenario.stress,
-          immediateUsd: arm.immediateUsd,
-          addUsd: arm.addUsd,
-          status: arm.immediateUsd > 0 ? 'PENDING_ENTRY' : 'WAITING_CONFIRMATION',
+          immediateUsd: paidExitEligible ? arm.immediateUsd : 0,
+          addUsd: effectiveAddUsd,
+          status,
+          ...(atomicObservedFill ? {
+            committedUsd: arm.immediateUsd,
+            tokensBought: entry.tokensBought!,
+            remainingTokens: entry.tokensBought!,
+            gasSpentUsd: gasUsd,
+            blendedCostBasisUsd: arm.immediateUsd / entry.tokensBought!,
+            openedAt: t0At,
+          } : {}),
           stateJson: {
-            lastCapitalAtMs: t0Ms, flowExitScheduled: false,
-            ...(this.isPairedExitArmCode(arm.code)
+            lastCapitalAtMs: t0Ms,
+            flowExitScheduled: false,
+            frictionCohort,
+            frictionDetailCohort,
+            frictionFeatureVersion: ROBINHOOD_FRICTION_FEATURE_SCHEMA.version,
+            frictionFeatureHash: ROBINHOOD_FRICTION_FEATURE_SCHEMA_HASH,
+            frictionQuoteModel: ROBINHOOD_FRICTION_FEATURE_SCHEMA.quoteModel,
+            buyImpactPct,
+            sellImpactPct,
+            quoteAgeMs,
+            sharedEntryQuoteId,
+            benchmarkEntryEligible: atomicObservedFill,
+            atomicT0Fill: atomicObservedFill,
+            ...(pairedExit
               ? { experimentType: 'PAIRED_EXIT', exitConfigHash: ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH }
               : { experimentType: 'ENTRY' }),
           },
-          ...(arm.immediateUsd > 0 ? {
+          ...(atomicObservedFill || pendingStressFill ? {
             legs: { create: [{
               sequence: 1,
               legType,
-              status: 'PENDING',
+              status: atomicObservedFill ? 'FILLED' : 'PENDING',
               intendedAt: t0At,
               targetAt: new Date(t0Ms + scenario.latencyMs),
               notionalUsd: arm.immediateUsd,
+              ...(atomicObservedFill ? {
+                executedAt: t0At,
+                blockNumber: tick.latestBlock.toString(),
+                tokenAmount: entry.tokensBought!,
+                spotPriceUsd: buyQuote.spotPriceUsd,
+                effectivePriceUsd: entry.effectivePriceUsd,
+                slippagePct: buyQuote.slippagePct,
+                gasUsd,
+                taxPct: safety.buyTaxPct,
+                netUsd: -arm.immediateUsd,
+                quoteSnapshot: buyQuote as unknown as Prisma.InputJsonValue,
+              } : {}),
             }] },
           } : {}),
         };
@@ -186,6 +287,7 @@ export class RobinhoodEntryExperimentService {
       buyQuote,
       sellQuote,
       gasUsd,
+      sequentialRoundTrip,
     };
     const created = await (this.prisma as any).robinhoodEntryExperiment.create({
       data: {
@@ -196,18 +298,31 @@ export class RobinhoodEntryExperimentService {
         liquidityModel: tick.liquidityModel,
         configVersion: ROBINHOOD_FLOW_V3_CONFIG.version,
         configHash: ROBINHOOD_FLOW_V3_CONFIG_HASH,
-        configJson: ROBINHOOD_FLOW_V3_CONFIG as unknown as Prisma.InputJsonValue,
+        configJson: ROBINHOOD_REGISTERED_EXPERIMENT_CONFIG as unknown as Prisma.InputJsonValue,
         t0At,
         horizonAt: new Date(t0Ms + ROBINHOOD_FLOW_V3_CONFIG.horizonMs),
         t0Block: tick.latestBlock.toString(),
         t0SpotPriceUsd: buyQuote.spotPriceUsd,
         t0DepthUsd: liq.executableDepthUsd,
-        t0RoundTripMultiple: roundTrip,
+        t0RoundTripMultiple: quotedRoundTrip,
+        frictionCohort,
+        t0BuyImpactPct: buyImpactPct,
+        t0SellImpactPct: sellImpactPct,
+        t0QuoteAgeMs: quoteAgeMs,
+        sharedEntryQuoteId,
         riskSnapshot: riskSnapshot as unknown as Prisma.InputJsonValue,
         dataHealthSnapshot: {
           ...tick.dataHealth,
           sourceTickAt: new Date(tick.observedAtMs).toISOString(),
           preflightLatencyMs: t0Ms - preflightStartedAtMs,
+          frictionDetailCohort,
+          frictionFeatureVersion: ROBINHOOD_FRICTION_FEATURE_SCHEMA.version,
+          frictionFeatureHash: ROBINHOOD_FRICTION_FEATURE_SCHEMA_HASH,
+          roundTripMethod: 'static_bidirectional_executable_quotes_v1_10_compat',
+          roundTripConfidence:
+            sequentialRoundTrip?.confidence ?? 'CONSERVATIVE_FALLBACK',
+          sequentialRoundTripMultiple,
+          sequentialRoundTripMethod: sequentialRoundTrip?.method ?? null,
         } as Prisma.InputJsonValue,
         v2ShadowDecision: tick.v2ShadowDecision?.triggered ? 'TRIGGERED' : 'NOT_TRIGGERED',
         v2ShadowSnapshot: (tick.v2ShadowDecision ?? {}) as unknown as Prisma.InputJsonValue,
@@ -217,9 +332,29 @@ export class RobinhoodEntryExperimentService {
     });
     this.logger.log(
       `ROBINHOOD EXPERIMENT t0 ${tick.candidate.token.tokenAddress} ` +
-      `depth=$${Number(liq.executableDepthUsd).toFixed(0)} roundTrip=${roundTrip.toFixed(3)} ` +
-      `arms=${arms.length} config=${ROBINHOOD_FLOW_V3_CONFIG_HASH.slice(0, 12)}`,
+        `depth=$${Number(liq.executableDepthUsd).toFixed(0)} roundTrip=${quotedRoundTrip.toFixed(3)} ` +
+      `cohort=${frictionCohort}/${frictionDetailCohort} arms=${arms.length} ` +
+      `config=${ROBINHOOD_FLOW_V3_CONFIG_HASH.slice(0, 12)}`,
     );
+    if (Array.isArray(created.arms)) {
+      for (const arm of created.arms as DbArm[]) {
+        const leg = (arm.legs as DbLeg[]).find(
+          (item) => item.status === 'FILLED' && item.legType === 'IMMEDIATE_BUY',
+        );
+        if (!leg) continue;
+        this.logEntry(
+          { ...arm, experiment: created },
+          leg,
+          tick,
+          buyQuote,
+          entry,
+          gasUsd,
+          safety.buyTaxPct,
+          null,
+          t0At,
+        );
+      }
+    }
     return created;
   }
 
@@ -255,6 +390,38 @@ export class RobinhoodEntryExperimentService {
     await this.initializeClassifierReference(current, tick);
     current = await this.findExperiment(experiment.watchId);
     if (!current) return;
+    if (this.shouldEvaluateMarket(current, tick)) {
+      await this.updateClassifierOutcome(current, tick);
+      await this.evaluateArmExits(current, tick, liq);
+    }
+    current = await this.findExperiment(experiment.watchId);
+    if (!current) return;
+    await this.executeDueLegs(current, tick);
+    await this.resolveIfComplete(current, tick.observedAtMs);
+  }
+
+  private async processFrozenExperiment(experiment: DbExperiment, tick: RobinhoodExperimentTick): Promise<void> {
+    let current = await this.findExperiment(experiment.watchId);
+    if (!current) return;
+
+    await this.freezePendingEntries(current, tick);
+    current = await this.findExperiment(experiment.watchId);
+    if (!current || current.status === 'INVALIDATED') return;
+
+    const dynamicHardReason = await this.dynamicHardRiskReason(current, tick);
+    const attributableCreator = tick.creatorAttributable ? tick.creatorAddress : null;
+    const creatorSell = this.creatorSellSince(tick.trades, current.t0At.getTime(), attributableCreator);
+    if (dynamicHardReason || creatorSell > 0) {
+      await this.scheduleFullExits(
+        current,
+        tick,
+        creatorSell > 0 ? 'CREATOR_EXIT_SELL' : 'HARD_RISK_SELL',
+      );
+    }
+
+    current = await this.findExperiment(experiment.watchId);
+    if (!current || current.status === 'INVALIDATED') return;
+    const liq = await this.liquidity.verify(tick.candidate.pool, tick.gemDecimals);
     if (this.shouldEvaluateMarket(current, tick)) {
       await this.updateClassifierOutcome(current, tick);
       await this.evaluateArmExits(current, tick, liq);
@@ -441,7 +608,12 @@ export class RobinhoodEntryExperimentService {
       );
       return;
     }
-    if (sizeUsd > 0 && arm.armCode !== 'C_CONFIRM_20') {
+    const currentFrictionExperiment =
+      arm.experiment?.configHash === ROBINHOOD_FLOW_V3_CONFIG_HASH;
+    const paidArmAllowed =
+      arm.armCode === 'C_CONFIRM_20' ||
+      (currentFrictionExperiment && this.isPairedExitArmCode(String(arm.armCode)));
+    if (sizeUsd > 0 && !paidArmAllowed) {
       const reason = `non_confirmation_paid_arm:${arm.armCode}`;
       await (this.prisma as any).robinhoodExperimentLeg.update({
         where: { id: leg.id }, data: {
@@ -458,6 +630,7 @@ export class RobinhoodEntryExperimentService {
     }
     const quote = await this.cachedQuote(quotes, tick, sizeUsd, 'BUY');
     const executedAt = quote.observedAt;
+    const quoteAgeMs = Math.max(0, nowMs - quote.observedAt.getTime());
     const gasUsd = gasBase * Number(arm.gasMultiplier);
     const risk = arm.experiment.riskSnapshot as any;
     const buyTaxPct = this.taxFraction(risk?.merged?.buyTax);
@@ -468,8 +641,29 @@ export class RobinhoodEntryExperimentService {
       buyTaxPct,
       maxEntrySlipPct: ROBINHOOD_FLOW_V3_CONFIG.maxEntrySlippagePct,
     });
-    if (!quote.executable || !fill.entered || fill.tokensBought == null || fill.effectivePriceUsd == null) {
-      const reason = quote.error ?? fill.reason ?? 'delayed_quote_failed';
+    const quoteFresh = quoteAgeMs <= (ROBINHOOD_FLOW_V3_CONFIG.maxQuoteAgeMs ?? 5_000);
+    const frictionCohort = String(
+      arm.experiment?.frictionCohort ?? (arm.stateJson as Record<string, unknown> | null)?.frictionCohort ?? '',
+    );
+    const maxPairedImpactPct = frictionCohort === 'LOW_FRICTION_PRIMARY'
+      ? (ROBINHOOD_FLOW_V3_CONFIG.primaryMaxEntrySlippagePct ?? 0.01)
+      : (ROBINHOOD_FLOW_V3_CONFIG.maxEntrySlippagePct ?? 0.03);
+    const pairedImpactEligible =
+      !this.isPairedExitArm(arm) ||
+      (quote.slippagePct ?? Number.POSITIVE_INFINITY) <= maxPairedImpactPct;
+    if (
+      !quoteFresh ||
+      !pairedImpactEligible ||
+      !quote.executable ||
+      !fill.entered ||
+      fill.tokensBought == null ||
+      fill.effectivePriceUsd == null
+    ) {
+      const reason = !quoteFresh
+        ? `quote_stale:${quoteAgeMs}ms`
+        : !pairedImpactEligible
+          ? `entry_impact_exceeded:${(maxPairedImpactPct * 100).toFixed(2)}pct`
+          : quote.error ?? fill.reason ?? 'delayed_quote_failed';
       const noTrade = Number(arm.tokensBought) <= 0 &&
         (leg.legType === 'CONFIRM_ADD' || leg.legType === 'IMMEDIATE_BUY');
       await (this.prisma as any).$transaction([
@@ -519,9 +713,11 @@ export class RobinhoodEntryExperimentService {
             ...((arm.stateJson ?? {}) as Record<string, unknown>),
             observedSignalLatencyMs: Math.max(0, executedAt.getTime() - arm.experiment.t0At.getTime()),
             observedEntryLatenessMs: Math.max(0, executedAt.getTime() - leg.targetAt.getTime()),
+            quoteAgeMs,
             benchmarkEntryEligible:
               executedAt.getTime() - leg.targetAt.getTime() <=
-              ROBINHOOD_EXIT_EXPERIMENT_CONFIG.maxBenchmarkEntryLatencyMs,
+              ROBINHOOD_EXIT_EXPERIMENT_CONFIG.maxBenchmarkEntryLatencyMs &&
+              pairedImpactEligible,
           } as Prisma.InputJsonValue,
         },
       }),
@@ -561,6 +757,11 @@ export class RobinhoodEntryExperimentService {
     const sellTaxPct = this.taxFraction(risk?.merged?.sellTax);
     if (!quote.executable || !(quote.spotPriceUsd && quote.spotPriceUsd > 0)) {
       const reason = quote.error ?? 'sell_quote_failed';
+      const terminalFailure = leg.legType === 'TIME_SELL';
+      const committedAfterGas = Number(arm.committedUsd) + gasUsd;
+      const terminalMultiple = committedAfterGas > 0
+        ? Number(arm.realizedValueUsd) / committedAfterGas
+        : 0;
       await (this.prisma as any).$transaction([
         (this.prisma as any).robinhoodExperimentLeg.update({
           where: { id: leg.id }, data: {
@@ -572,10 +773,31 @@ export class RobinhoodEntryExperimentService {
         (this.prisma as any).robinhoodExperimentArm.update({
           where: { id: arm.id }, data: {
             committedUsd: { increment: gasUsd }, gasSpentUsd: { increment: gasUsd },
+            status: terminalFailure ? 'CLOSED' : undefined,
+            remainingTokens: terminalFailure ? 0 : undefined,
+            realizedMultiple: terminalFailure ? terminalMultiple : undefined,
+            closedAt: terminalFailure ? executedAt : undefined,
+            outcomeClass: terminalFailure ? 'UNSELLABLE' : undefined,
+            stateJson: terminalFailure ? {
+              ...((arm.stateJson ?? {}) as Record<string, unknown>),
+              terminalResidualMarkedZero: true,
+              terminalSellFailure: reason,
+            } as Prisma.InputJsonValue : undefined,
           },
         }),
       ]);
-      this.logExit(arm, leg, tick, quote, 0, gasUsd, sellTaxPct, reason, null, executedAt);
+      this.logExit(
+        arm,
+        leg,
+        tick,
+        quote,
+        0,
+        gasUsd,
+        sellTaxPct,
+        reason,
+        terminalFailure ? 'UNSELLABLE' : null,
+        executedAt,
+      );
       return;
     }
     const fill = modelExit(tokensToSell, quote.spotPriceUsd, quote.slippagePct, {
@@ -712,6 +934,7 @@ export class RobinhoodEntryExperimentService {
   private exitRungs(arm: DbArm): readonly { multiple: number; fraction: number }[] {
     switch (arm.armCode) {
       case 'EXIT_A_FULL_2X': return [{ multiple: 2, fraction: 1 }];
+      case 'EXIT_B_FULL_1_5X': return [{ multiple: 1.5, fraction: 1 }];
       case 'EXIT_C_90_10': return [{ multiple: 2, fraction: 0.90 }];
       default: return [
         { multiple: 2, fraction: 0.80 },
@@ -723,12 +946,17 @@ export class RobinhoodEntryExperimentService {
 
   private exitPolicy(arm: DbArm): string {
     if (arm.armCode === 'EXIT_A_FULL_2X') return 'FULL_2X';
+    if (arm.armCode === 'EXIT_B_FULL_1_5X') return 'FULL_1_5X';
     if (arm.armCode === 'EXIT_C_90_10') return 'PROTECTED_90_10';
     return 'LADDER_80_15_5';
   }
 
   private armConfigHash(arm: DbArm): string {
     return this.isPairedExitArm(arm) ? ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH : ROBINHOOD_FLOW_V3_CONFIG_HASH;
+  }
+
+  private isCanonicalCsvArm(arm: DbArm): boolean {
+    return arm.armCode === 'EXIT_A_FULL_2X' && arm.scenarioCode === 'OBSERVED_ENTRY';
   }
 
   private async scheduleFullExits(experiment: DbExperiment, tick: RobinhoodExperimentTick, legType: string): Promise<void> {
@@ -756,6 +984,36 @@ export class RobinhoodEntryExperimentService {
         blockNumber: tick.latestBlock.toString(), failureReason: reason,
       },
     });
+  }
+
+  private async freezePendingEntries(experiment: DbExperiment, tick: RobinhoodExperimentTick): Promise<void> {
+    await this.cancelPendingBuys(experiment, tick, 'frozen_config_no_new_entries');
+    await (this.prisma as any).robinhoodExperimentArm.updateMany({
+      where: {
+        experimentId: experiment.id,
+        status: { in: ['PENDING_ENTRY', 'WAITING_CONFIRMATION'] },
+        remainingTokens: { lte: 0 },
+      },
+      data: {
+        status: 'NO_TRADE',
+        closedAt: new Date(tick.observedAtMs),
+        outcomeClass: 'FROZEN_CONFIG_NO_ENTRY',
+      },
+    });
+    if (experiment.confirmationStatus === 'PENDING') {
+      await (this.prisma as any).robinhoodEntryExperiment.update({
+        where: { id: experiment.id },
+        data: {
+          status: 'EXPIRED',
+          confirmationStatus: 'EXPIRED',
+          resolutionReason: 'frozen_config_exit_only',
+          confirmationAt: new Date(tick.observedAtMs),
+          confirmationBlock: tick.latestBlock.toString(),
+          classifierReferenceStatus: 'SCHEDULED',
+          classifierReferenceTargetAt: new Date(tick.observedAtMs),
+        },
+      });
+    }
   }
 
   private async createSellLeg(
@@ -924,11 +1182,14 @@ export class RobinhoodEntryExperimentService {
 
   private async invalidateExperiment(experiment: DbExperiment, reason: string): Promise<void> {
     const invalidatedAt = new Date();
+    const transitioned = await (this.prisma as any).robinhoodEntryExperiment.updateMany({
+      where: { id: experiment.id, status: { in: [...ACTIVE_EXPERIMENT_STATUSES] } },
+      data: { status: 'INVALIDATED', invalidReason: reason, resolvedAt: invalidatedAt, resolutionReason: reason },
+    });
+    if (transitioned.count !== 1) return;
+
+    this.unhealthySinceMs.delete(experiment.id);
     await (this.prisma as any).$transaction([
-      (this.prisma as any).robinhoodEntryExperiment.update({
-        where: { id: experiment.id },
-        data: { status: 'INVALIDATED', invalidReason: reason, resolvedAt: invalidatedAt, resolutionReason: reason },
-      }),
       (this.prisma as any).robinhoodExperimentArm.updateMany({
         where: { experimentId: experiment.id, status: { in: [...ACTIVE_ARM_STATUSES] } },
         data: { status: 'INVALIDATED', outcomeClass: 'INVALIDATED', closedAt: invalidatedAt },
@@ -938,22 +1199,6 @@ export class RobinhoodEntryExperimentService {
         data: { status: 'SKIPPED', failureReason: reason },
       }),
     ]);
-    for (const arm of experiment.arms as DbArm[]) {
-      this.files.logPaperExit({
-        ts: invalidatedAt.toISOString(), run_id: experiment.id,
-        schema_version: CSV_SCHEMA_VERSION, chain: 'robinhood', token_address: experiment.tokenAddress,
-        symbol: experiment.symbol ?? '', pool_address: experiment.poolAddress,
-        event_type: 'EXPERIMENT_INVALIDATED', status: 'invalidated', price_usd: '',
-        multiple: '', fraction: '0', tokens: '0', net_usd: '0', slip_pct: '',
-        realized_multiple_total: '', note: reason, deployer_address: '',
-        deployer_deployments_count: '', deployer_rug_count: '', outcome_class: 'INVALIDATED',
-        strategy_version: ROBINHOOD_FLOW_V3_CONFIG.version, risk_cohort: 'ROBINHOOD_STATIC_SAFETY',
-        exit_policy: 'ROBINHOOD_EXPERIMENT_LADDER', experiment_id: experiment.id,
-        experiment_arm: arm.armCode, execution_scenario: arm.scenarioCode,
-        execution_leg: 'EXPERIMENT_INVALIDATED', config_hash: ROBINHOOD_FLOW_V3_CONFIG_HASH,
-        target_execution_at: '', executed_at: invalidatedAt.toISOString(),
-      });
-    }
     this.logger.warn(`Robinhood experiment invalidated ${experiment.id}: ${reason}`);
   }
 
@@ -1121,6 +1366,12 @@ export class RobinhoodEntryExperimentService {
     reason: string | null,
     executedAt: Date,
   ): void {
+    if (!this.isCanonicalCsvArm(arm)) return;
+    const experiment = arm.experiment ?? {};
+    const state = (arm.stateJson ?? {}) as Record<string, unknown>;
+    const frictionCohort = String(
+      state.frictionCohort ?? experiment.frictionCohort ?? 'LEGACY_UNCLASSIFIED',
+    );
     this.files.logPaperEntry({
       ts: executedAt.toISOString(),
       run_id: arm.experimentId,
@@ -1138,7 +1389,7 @@ export class RobinhoodEntryExperimentService {
       onchain_liq_entry_usd: '', entered: String(Boolean(fill?.entered)), not_entered_reason: reason ?? '',
       final_score: '', band: '', score_confidence: '', deployer_address: tick.creatorAddress ?? '',
       deployer_deployments_count: '', deployer_rug_count: '', lp_locked: '', lp_lock_source: '', lp_lock_fraction: '',
-      discovery_source: 'evm_flow_rpc', risk_cohort: 'ROBINHOOD_STATIC_SAFETY',
+      discovery_source: 'evm_flow_rpc', risk_cohort: frictionCohort,
       strategy_version: ROBINHOOD_FLOW_V3_CONFIG.version, exit_policy: this.exitPolicy(arm),
       benchmark_eligible: 'true', trigger_unique_buyers: '', trigger_buy_quote_usd: '',
       trigger_buy_sell_ratio: '', trigger_price_momentum: '',
@@ -1146,6 +1397,11 @@ export class RobinhoodEntryExperimentService {
       execution_leg: leg.legType, config_hash: this.armConfigHash(arm),
       target_execution_at: leg.targetAt.toISOString(), executed_at: executedAt.toISOString(),
       confirmation_status: arm.experiment?.confirmationStatus ?? '',
+      friction_cohort: frictionCohort,
+      buy_impact_pct: String(experiment.t0BuyImpactPct ?? state.buyImpactPct ?? ''),
+      sell_impact_pct: String(experiment.t0SellImpactPct ?? state.sellImpactPct ?? ''),
+      quote_age_ms: String(experiment.t0QuoteAgeMs ?? state.quoteAgeMs ?? ''),
+      shared_entry_quote_id: String(experiment.sharedEntryQuoteId ?? state.sharedEntryQuoteId ?? ''),
     });
   }
 
@@ -1161,8 +1417,14 @@ export class RobinhoodEntryExperimentService {
     outcomeClass: string | null,
     executedAt: Date,
   ): void {
+    if (!this.isCanonicalCsvArm(arm)) return;
     const committed = Number(arm.committedUsd);
     const realized = Number(arm.realizedValueUsd) + netUsd;
+    const experiment = arm.experiment ?? {};
+    const state = (arm.stateJson ?? {}) as Record<string, unknown>;
+    const frictionCohort = String(
+      state.frictionCohort ?? experiment.frictionCohort ?? 'LEGACY_UNCLASSIFIED',
+    );
     this.files.logPaperExit({
       ts: executedAt.toISOString(), run_id: arm.experimentId,
       schema_version: CSV_SCHEMA_VERSION, chain: 'robinhood', token_address: tick.candidate.token.tokenAddress,
@@ -1173,11 +1435,16 @@ export class RobinhoodEntryExperimentService {
       realized_multiple_total: String(committed > 0 ? realized / committed : 0),
       note: reason ?? `gas=${gasUsd};sellTax=${sellTaxPct}`, deployer_address: tick.creatorAddress ?? '',
       deployer_deployments_count: '', deployer_rug_count: '', outcome_class: outcomeClass ?? '',
-      strategy_version: ROBINHOOD_FLOW_V3_CONFIG.version, risk_cohort: 'ROBINHOOD_STATIC_SAFETY',
+      strategy_version: ROBINHOOD_FLOW_V3_CONFIG.version, risk_cohort: frictionCohort,
       exit_policy: this.exitPolicy(arm),
       experiment_id: arm.experimentId, experiment_arm: arm.armCode, execution_scenario: arm.scenarioCode,
       execution_leg: leg.legType, config_hash: this.armConfigHash(arm),
       target_execution_at: leg.targetAt.toISOString(), executed_at: executedAt.toISOString(),
+      friction_cohort: frictionCohort,
+      buy_impact_pct: String(experiment.t0BuyImpactPct ?? state.buyImpactPct ?? ''),
+      sell_impact_pct: String(experiment.t0SellImpactPct ?? state.sellImpactPct ?? ''),
+      quote_age_ms: String(experiment.t0QuoteAgeMs ?? state.quoteAgeMs ?? ''),
+      shared_entry_quote_id: String(experiment.sharedEntryQuoteId ?? state.sharedEntryQuoteId ?? ''),
     });
   }
 }

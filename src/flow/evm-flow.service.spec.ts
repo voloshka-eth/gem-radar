@@ -54,6 +54,30 @@ describe('EvmFlowService data-plane guards', () => {
     expect((flow as any).rpcFailures.get('robinhood')).toBe(1);
   });
 
+  it('ignores an empty websocket callback and starts one HTTP fallback after a stream error', () => {
+    let callbacks: any;
+    const streamClient = {
+      watchBlocks: jest.fn((options: any) => {
+        callbacks = options;
+        return jest.fn();
+      }),
+    };
+    const flow = service();
+    (flow as any).streamClients = new Map([['robinhood', streamClient]]);
+    (flow as any).config = {
+      get: jest.fn((key: string) => key === 'chain.robinhoodRpcWsUrl' ? 'wss://example.test' : undefined),
+    };
+    const enqueue = jest.spyOn(flow as any, 'enqueueHead').mockResolvedValue(undefined);
+    const fallback = jest.spyOn(flow as any, 'startHttpHeadPoller').mockImplementation(() => undefined);
+
+    (flow as any).startHeadWatcher('robinhood');
+    expect(() => callbacks.onBlock(undefined)).not.toThrow();
+    expect(enqueue).not.toHaveBeenCalled();
+
+    callbacks.onError(new Error('socket closed'));
+    expect(fallback).toHaveBeenCalledWith('robinhood');
+  });
+
   it('does not let expired outcome watches poison entry health lag', async () => {
     const now = Date.now();
     const flow = service();

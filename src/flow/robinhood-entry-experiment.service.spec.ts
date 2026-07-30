@@ -34,7 +34,10 @@ function tick(observedAtMs = Date.now(), trades: FlowTrade[] = []): any {
 
 describe('RobinhoodEntryExperimentService', () => {
   const prisma = {
-    robinhoodEntryExperiment: { create: jest.fn(), update: jest.fn() },
+    robinhoodEntryExperiment: { create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+    robinhoodExperimentArm: { updateMany: jest.fn() },
+    robinhoodExperimentLeg: { updateMany: jest.fn() },
+    $transaction: jest.fn((operations: Promise<unknown>[]) => Promise.all(operations)),
   } as any;
   const liquidity = {
     verify: jest.fn().mockResolvedValue({
@@ -43,7 +46,7 @@ describe('RobinhoodEntryExperimentService', () => {
     }),
     quoteTrade: jest.fn().mockImplementation((_pool, sizeUsd, direction) => Promise.resolve({
       liquidityModel: 'V2', direction, sizeUsd, spotPriceUsd: 1, slippagePct: 0.01,
-      executable: true, observedAt: new Date(0),
+      executable: true, observedAt: new Date(),
     })),
   } as any;
   const service = new RobinhoodEntryExperimentService(
@@ -57,7 +60,17 @@ describe('RobinhoodEntryExperimentService', () => {
     { logPaperEntry: jest.fn(), logPaperExit: jest.fn() } as any,
   );
 
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    liquidity.quoteTrade.mockImplementation((_pool: unknown, sizeUsd: number, direction: string) => Promise.resolve({
+      liquidityModel: 'V2', direction, sizeUsd, spotPriceUsd: 1, slippagePct: 0.01,
+      executable: true, observedAt: new Date(),
+    }));
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
 
   it('does not turn a stale flow tick into a fictional t0', async () => {
     const result = await (service as any).tryCreateExperiment(tick(Date.now() - 10_001));
@@ -67,7 +80,7 @@ describe('RobinhoodEntryExperimentService', () => {
     expect(prisma.robinhoodEntryExperiment.create).not.toHaveBeenCalled();
   });
 
-  it('creates one market sample with C-only paid capital and one observational exit arm', async () => {
+  it('creates exactly one canonical observed full-2x position per Robinhood signal', async () => {
     (service as any).assessSafety = jest.fn().mockResolvedValue({
       risk: SAFE_RISK, hardReason: null, buyTaxPct: 0, sellTaxPct: 0, staticSnapshot: { passed: true },
     });
@@ -79,17 +92,53 @@ describe('RobinhoodEntryExperimentService', () => {
 
     expect(result.id).toBe('experiment-1');
     expect(create.configHash).toBe(ROBINHOOD_FLOW_V3_CONFIG_HASH);
-    expect(arms).toHaveLength(6);
-    expect(new Set(arms.map((arm: any) => arm.armCode))).toHaveProperty('size', 6);
-    expect(new Set(arms.map((arm: any) => arm.scenarioCode))).toEqual(new Set(['OBSERVED_ENTRY']));
-    expect(arms.filter((arm: any) => arm.primaryScenario)).toHaveLength(6);
-    expect(arms.filter((arm: any) => arm.immediateUsd > 0)).toHaveLength(0);
-    expect(arms.filter((arm: any) => arm.armCode === 'C_CONFIRM_20')).toEqual([
-      expect.objectContaining({ addUsd: 20, immediateUsd: 0, status: 'WAITING_CONFIRMATION' }),
-    ]);
-    expect(arms.filter((arm: any) => arm.armCode === 'EXIT_C_90_10').every((arm: any) =>
-      arm.stateJson.experimentType === 'PAIRED_EXIT' && arm.immediateUsd === 0,
+    expect(arms).toHaveLength(1);
+    expect(arms[0]).toMatchObject({
+      armCode: 'EXIT_A_FULL_2X', scenarioCode: 'OBSERVED_ENTRY',
+      status: 'OPEN', committedUsd: 20,
+      stateJson: { atomicT0Fill: true },
+      legs: { create: [expect.objectContaining({ status: 'FILLED' })] },
+    });
+  });
+
+  it('opens a separate 1-3% high-friction paper cohort without mixing it into low friction', async () => {
+    (service as any).assessSafety = jest.fn().mockResolvedValue({
+      risk: SAFE_RISK, hardReason: null, buyTaxPct: 0, sellTaxPct: 0, staticSnapshot: { passed: true },
+    });
+    liquidity.quoteTrade.mockImplementation((_pool: unknown, sizeUsd: number, direction: string) => Promise.resolve({
+      liquidityModel: 'V2', direction, sizeUsd, spotPriceUsd: 1, slippagePct: 0.02,
+      executable: true, observedAt: new Date(),
+    }));
+    prisma.robinhoodEntryExperiment.create.mockImplementation(({ data }: any) => ({ id: 'shadow', ...data }));
+
+    await (service as any).tryCreateExperiment(tick());
+    const create = prisma.robinhoodEntryExperiment.create.mock.calls[0][0].data;
+
+    expect(create.frictionCohort).toBe('HIGH_FRICTION_PAPER');
+    const observedExits = create.arms.create.filter((arm: any) =>
+      arm.armCode.startsWith('EXIT_') && arm.scenarioCode === 'OBSERVED_ENTRY',
+    );
+    expect(observedExits).toHaveLength(1);
+    expect(observedExits.every((arm: any) =>
+      arm.status === 'OPEN' && arm.committedUsd === 20 && arm.legs.create[0].status === 'FILLED'
     )).toBe(true);
+  });
+
+  it('keeps the v1.10 universe when sell friction is high but the buy route is executable', async () => {
+    (service as any).assessSafety = jest.fn().mockResolvedValue({
+      risk: SAFE_RISK, hardReason: null, buyTaxPct: 0, sellTaxPct: 0, staticSnapshot: { passed: true },
+    });
+    liquidity.quoteTrade.mockImplementation((_pool: unknown, sizeUsd: number, direction: string) => Promise.resolve({
+      liquidityModel: 'V2', direction, sizeUsd, spotPriceUsd: 1,
+      slippagePct: direction === 'BUY' ? 0.02 : 0.12,
+      executable: true, observedAt: new Date(),
+    }));
+    prisma.robinhoodEntryExperiment.create.mockImplementation(({ data }: any) => ({ id: 'wide-universe', ...data }));
+
+    const result = await (service as any).tryCreateExperiment(tick());
+
+    expect(result.id).toBe('wide-universe');
+    expect(prisma.robinhoodEntryExperiment.create).toHaveBeenCalledTimes(1);
   });
 
   it('fires confirmation once and schedules add legs only for C', async () => {
@@ -178,9 +227,39 @@ describe('RobinhoodEntryExperimentService', () => {
     expect(order.slice(0, 2)).toEqual(['execute', 'risk']);
   });
 
+  it('preserves filled exit arms across a config change instead of invalidating them', async () => {
+    const frozen = {
+      id: 'experiment-1', watchId: 'watch-1', status: 'CONFIRMING',
+      configHash: 'previous-frozen-config', horizonAt: new Date(123_456),
+    };
+    jest.spyOn(service as any, 'findExperiment').mockResolvedValue(frozen);
+    const processFrozenExperiment = jest.spyOn(service as any, 'processFrozenExperiment').mockResolvedValue(undefined);
+    const invalidateExperiment = jest.spyOn(service as any, 'invalidateExperiment').mockResolvedValue(undefined);
+
+    const result = await service.handleTick(tick());
+
+    expect(processFrozenExperiment).toHaveBeenCalledWith(frozen, expect.anything());
+    expect(invalidateExperiment).not.toHaveBeenCalled();
+    expect(result).toBe(123_456);
+  });
+
+  it('exports only the canonical observed full-2x arm to the legacy CSV view', () => {
+    expect((service as any).isCanonicalCsvArm({
+      armCode: 'EXIT_A_FULL_2X', scenarioCode: 'OBSERVED_ENTRY',
+    })).toBe(true);
+    expect((service as any).isCanonicalCsvArm({
+      armCode: 'EXIT_B_FULL_1_5X', scenarioCode: 'OBSERVED_ENTRY',
+    })).toBe(false);
+    expect((service as any).isCanonicalCsvArm({
+      armCode: 'EXIT_A_FULL_2X', scenarioCode: 'STRESS_1_BLOCK',
+    })).toBe(false);
+  });
+
   it('changes only take-profit allocation across paired exit arms', () => {
     expect((service as any).exitRungs({ armCode: 'EXIT_A_FULL_2X' })).toEqual([{ multiple: 2, fraction: 1 }]);
+    expect((service as any).exitRungs({ armCode: 'EXIT_B_FULL_1_5X' })).toEqual([{ multiple: 1.5, fraction: 1 }]);
     expect((service as any).exitRungs({ armCode: 'EXIT_C_90_10' })).toEqual([{ multiple: 2, fraction: 0.9 }]);
+    // Historical rows remain interpretable, but this arm is not part of v2.
     expect((service as any).exitRungs({ armCode: 'EXIT_B_LADDER_80_15_5' })).toEqual([
       { multiple: 2, fraction: 0.8 }, { multiple: 10, fraction: 0.15 }, { multiple: 1000, fraction: 0.05 },
     ]);
@@ -259,5 +338,43 @@ describe('RobinhoodEntryExperimentService', () => {
         failureReason: expect.stringContaining('execution_window_missed'),
       }),
     }));
+  });
+
+  it('waits through a short pipeline health miss before invalidating an experiment', async () => {
+    const experiment = {
+      id: 'experiment-health', watchId: 'watch-1', status: 'CONFIRMING',
+      configHash: ROBINHOOD_FLOW_V3_CONFIG_HASH, horizonAt: new Date(100_000),
+    };
+    jest.spyOn(service as any, 'findExperiment').mockResolvedValue(experiment);
+    const invalidate = jest.spyOn(service as any, 'invalidateExperiment').mockResolvedValue(undefined);
+    const unhealthy = { ...tick(10_000), pipelineHealthy: false };
+
+    await expect(service.handleTick(unhealthy)).resolves.toBe(100_000);
+    await expect(service.handleTick({ ...unhealthy, observedAtMs: 19_999 })).resolves.toBe(100_000);
+    expect(invalidate).not.toHaveBeenCalled();
+
+    await service.handleTick({ ...unhealthy, observedAtMs: 20_000 });
+    expect(invalidate).toHaveBeenCalledWith(experiment, 'unhealthy_paired_signal_period');
+  });
+
+  it('keeps technical experiment invalidation out of the market-exit CSV', async () => {
+    const transition = jest.fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    prisma.robinhoodEntryExperiment.updateMany = transition;
+    prisma.robinhoodExperimentArm = { updateMany: jest.fn().mockResolvedValue({ count: 16 }) };
+    prisma.robinhoodExperimentLeg = { updateMany: jest.fn().mockResolvedValue({ count: 8 }) };
+    prisma.$transaction = jest.fn((operations: Promise<unknown>[]) => Promise.all(operations));
+    const logPaperExit = (service as any).files.logPaperExit as jest.Mock;
+    const experiment = {
+      id: 'experiment-once', tokenAddress: '0xtoken', symbol: 'TEST', poolAddress: '0xpool',
+      configHash: ROBINHOOD_FLOW_V3_CONFIG_HASH, frictionCohort: 'LOW_FRICTION_PRIMARY', arms: Array(16).fill({}),
+    };
+
+    await (service as any).invalidateExperiment(experiment, 'unhealthy_paired_signal_period');
+    await (service as any).invalidateExperiment(experiment, 'unhealthy_paired_signal_period');
+
+    expect(transition).toHaveBeenCalledTimes(2);
+    expect(logPaperExit).not.toHaveBeenCalled();
   });
 });

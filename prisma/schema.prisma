@@ -435,6 +435,11 @@ model RobinhoodEntryExperiment {
   t0SpotPriceUsd                 Decimal   @map("t0_spot_price_usd") @db.Decimal(80, 36)
   t0DepthUsd                     Decimal   @map("t0_depth_usd") @db.Decimal(20, 4)
   t0RoundTripMultiple            Decimal   @map("t0_round_trip_multiple") @db.Decimal(16, 6)
+  frictionCohort                 String    @default("LEGACY_UNCLASSIFIED") @map("friction_cohort")
+  t0BuyImpactPct                 Decimal?  @map("t0_buy_impact_pct") @db.Decimal(10, 6)
+  t0SellImpactPct                Decimal?  @map("t0_sell_impact_pct") @db.Decimal(10, 6)
+  t0QuoteAgeMs                   Int?      @map("t0_quote_age_ms")
+  sharedEntryQuoteId             String?   @map("shared_entry_quote_id")
   riskSnapshot                   Json      @map("risk_snapshot")
   dataHealthSnapshot             Json      @map("data_health_snapshot")
   v2ShadowDecision               String?   @map("v2_shadow_decision")
@@ -460,6 +465,7 @@ model RobinhoodEntryExperiment {
   arms  RobinhoodExperimentArm[]
 
   @@index([status, t0At])
+  @@index([configHash, frictionCohort, status])
   @@index([tokenAddress, poolAddress])
   @@map("robinhood_entry_experiments")
 }

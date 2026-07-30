@@ -125,7 +125,7 @@ describe('PaperService', () => {
     expect(fileLoggerMock.logPaperEntry).toHaveBeenCalledTimes(1);
   });
 
-  it('allows parallel strategies on one pool while keeping each signal idempotent', async () => {
+  it('keeps one paper position per chain and token across strategy signals', async () => {
     const config = {
       get: jest.fn((key: string) => key === 'paper.takeCohortEnabled' ? true : undefined),
     } as unknown as ConfigService;
@@ -139,24 +139,21 @@ describe('PaperService', () => {
       flowSnapshot: { uniqueBuyers: 4, buyQuoteUsd: 600, buySellRatio: 3, priceMomentum: 1.05 },
     };
 
+    prismaMock.paperPosition.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'existing-token-position' });
+
     await service.recordEntry(early);
     await service.recordEntry(confirmed);
 
     expect(prismaMock.paperPosition.findFirst.mock.calls.map((call) => call[0].where)).toEqual([
-      { signalId: 'signal-early' },
-      { signalId: 'signal-confirmed' },
+      { chain: 'ethereum', tokenAddress: '0xtoken' },
+      { chain: 'ethereum', tokenAddress: '0xtoken' },
     ]);
-    expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(2);
+    expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.paperPosition.create.mock.calls[0][0].data).toMatchObject({
       strategyVersion: 'fresh_early_v1', signalId: 'signal-early', status: 'OPEN',
     });
-    expect(prismaMock.paperPosition.create.mock.calls[1][0].data).toMatchObject({
-      strategyVersion: 'fresh_confirmed_v1', signalId: 'signal-confirmed', status: 'OPEN',
-    });
-
-    prismaMock.paperPosition.findFirst.mockResolvedValueOnce({ id: 'existing' });
-    await service.recordEntry(early);
-    expect(prismaMock.paperPosition.create).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the v1 control on the historical $50 slip bucket and uses exact $20 only for v2', async () => {

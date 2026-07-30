@@ -1,8 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { CandidatePool } from '../collector/collector.types';
-import type { ExecutionQuoteDirection, ExecutionQuoteResult, LiquidityCheckResult } from './onchain.types';
+import type {
+  ExecutionQuoteDirection,
+  ExecutionQuoteResult,
+  LiquidityCheckResult,
+  SequentialRoundTripResult,
+} from './onchain.types';
 import { DexResolverService } from './dex-resolver.service';
-import { V2LiquidityService } from './v2-liquidity.service';
+import { simulateV2SequentialRoundTrip, V2LiquidityService } from './v2-liquidity.service';
 import { V3LiquidityService } from './v3-liquidity.service';
 import { V4LiquidityService } from './v4-liquidity.service';
 
@@ -135,6 +140,39 @@ export class LiquidityVerificationService {
     if (model === 'V2') return this.v2.quoteTrade(pool, gemDecimals, feeBps ?? 30, sizeUsd, direction);
     if (model === 'V3') return this.v3.quoteTrade(pool, gemDecimals, feeBps ?? 3000, sizeUsd, direction);
     return this.v4.quoteTrade(pool, gemDecimals, sizeUsd, direction);
+  }
+
+  async simulateSequentialRoundTrip(
+    pool: CandidatePool,
+    liquidity: LiquidityCheckResult,
+    params: {
+      sizeUsd: number;
+      buyGasUsd: number;
+      sellGasUsd: number;
+      sandwichPct: number;
+      buyTaxPct: number;
+      sellTaxPct: number;
+    },
+  ): Promise<SequentialRoundTripResult | null> {
+    const { model, feeBps } = await this.resolveModel(pool);
+    if (
+      model !== 'V2' ||
+      liquidity.onchainTvlUsd == null ||
+      liquidity.spotPriceUsd == null
+    ) {
+      return null;
+    }
+    const result = simulateV2SequentialRoundTrip({
+      onchainTvlUsd: liquidity.onchainTvlUsd,
+      spotPriceUsd: liquidity.spotPriceUsd,
+      feeBps: feeBps ?? 30,
+      ...params,
+    });
+    return result == null ? null : {
+      method: 'V2_POST_BUY_RESERVE_SIMULATION',
+      confidence: 'EXACT_AMM_MATH',
+      ...result,
+    };
   }
 
   private async resolveModel(pool: CandidatePool): Promise<Awaited<ReturnType<DexResolverService['resolveModel']>>> {

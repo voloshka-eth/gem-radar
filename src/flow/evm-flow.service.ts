@@ -136,6 +136,7 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
   private readonly lastHttpHeadCheckAt = new Map<SupportedChain, number>();
   private readonly rpcFailures = new Map<SupportedChain, number>();
   private readonly headPollBusy = new Set<SupportedChain>();
+  private readonly httpHeadPollStarted = new Set<FlowChain>();
   private readonly headPollBackoffUntil = new Map<SupportedChain, number>();
   private readonly headPollConsecutiveFailures = new Map<SupportedChain, number>();
   private readonly initialHeadRequests = new Map<FlowChain, Promise<bigint>>();
@@ -225,18 +226,31 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
     const stop = client.watchBlocks({
       emitOnBegin: true,
       onBlock: (block) => {
+        // viem may invoke the callback with no block while a websocket closes or
+        // reconnects. This is a transport event, not a fatal application error.
+        if (!block) {
+          this.logger.debug(`Flow head stream empty block ${chain}; ignoring`);
+          return;
+        }
         if (block.number == null) return;
         void this.enqueueHead(chain, block.number, block.hash ?? null);
       },
       onError: (error) => {
         this.rpcFailures.set(chain, (this.rpcFailures.get(chain) ?? 0) + 1);
-        this.logger.warn(`Flow head stream error ${chain}: ${error.message}`);
+        const message = error instanceof Error ? error.message : String(error ?? 'unknown stream error');
+        this.logger.warn(`Flow head stream error ${chain}: ${message}`);
+        // The websocket client may reconnect on its own. HTTP is started once as
+        // a durable fallback so a transient websocket outage cannot stop cursor
+        // advancement or leave a paired signal permanently unhealthy.
+        this.startHttpHeadPoller(chain);
       },
     });
     this.unwatch.push(stop);
   }
 
   private startHttpHeadPoller(chain: FlowChain): void {
+    if (this.httpHeadPollStarted.has(chain)) return;
+    this.httpHeadPollStarted.add(chain);
     const intervalKey = chain === 'ethereum' ? 'evmFlow.httpPollMsEthereum'
       : chain === 'base' ? 'evmFlow.httpPollMsBase' : 'evmFlow.httpPollMsRobinhood';
     const intervalMs = Math.max(2_000, this.config.get<number>(intervalKey) ?? (chain === 'ethereum' ? 12_000 : 4_000));

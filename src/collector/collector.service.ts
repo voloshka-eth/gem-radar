@@ -76,6 +76,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
   private readonly tokenAgeHardGateEnabled: boolean;
   private readonly promoteCleanUnknownEnabled: boolean;
   private readonly robinhoodPaperEnabled: boolean;
+  private readonly robinhoodLegacyPaperEnabled: boolean;
   private readonly robinhoodMinDepthUsd: number;
   private readonly robinhoodMinOnchainTvlUsd: number;
   private readonly robinhoodMinScore: number;
@@ -158,6 +159,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     this.promoteCleanUnknownEnabled =
       this.config.get<boolean>('collector.promoteCleanUnknownEnabled') ?? false;
     this.robinhoodPaperEnabled = this.config.get<boolean>('collector.robinhoodPaperEnabled') ?? false;
+    this.robinhoodLegacyPaperEnabled =
+      this.config.get<boolean>('collector.robinhoodLegacyPaperEnabled') ?? false;
     this.robinhoodMinDepthUsd = this.config.get<number>('collector.robinhoodMinDepthUsd') ?? 100;
     this.robinhoodMinOnchainTvlUsd = this.config.get<number>('collector.robinhoodMinOnchainTvlUsd') ?? 200;
     this.robinhoodMinScore = this.config.get<number>('collector.robinhoodMinScore') ?? 50;
@@ -927,7 +930,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     runId: string,
     evaluation: ResearchEvaluation | null,
   ): Promise<boolean> {
-    if (!this.robinhoodPaperEnabled || !evaluation) return false;
+    if (!this.robinhoodPaperEnabled || !this.robinhoodLegacyPaperEnabled || !evaluation) return false;
     if (candidate.pool.chain !== 'robinhood') return false;
     const providerStatus = riskResult.providerStatus ?? riskResult.merged.providerStatus;
     const admission = applyRobinhoodAdmissionStages({
@@ -1081,7 +1084,7 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     riskResult: ContractRiskResult,
   ): boolean {
     const providerStatus = riskResult.providerStatus ?? riskResult.merged.providerStatus;
-    return this.robinhoodPaperEnabled &&
+    return this.robinhoodPaperEnabled && this.robinhoodLegacyPaperEnabled &&
       candidate.pool.chain === 'robinhood' &&
       riskResult.decision === 'CONTRACT_UNKNOWN' &&
       riskResult.rejectReasons.length === 0 &&

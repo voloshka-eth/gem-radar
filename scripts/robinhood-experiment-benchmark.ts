@@ -10,12 +10,14 @@ import {
   ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH,
   ROBINHOOD_FLOW_V3_CONFIG_HASH,
 } from '../src/flow/robinhood-flow-v3';
+import { reconcileRobinhoodArm } from '../src/flow/robinhood-experiment-accounting';
 
 type AnyRow = Record<string, any>;
 const prisma = new PrismaClient();
 const CONFIRMATORY = ['A_IMMEDIATE_20', 'B_PROBE_4_ADD_16', 'C_CONFIRM_20'] as const;
 const ALL_ARMS = [...CONFIRMATORY, 'D_PROBE_2_ADD_18', 'E_PROBE_10_ADD_10'] as const;
-const EXIT_ARMS = ['EXIT_A_FULL_2X', 'EXIT_B_LADDER_80_15_5', 'EXIT_C_90_10'] as const;
+const EXIT_ARMS = ['EXIT_A_FULL_2X', 'EXIT_B_FULL_1_5X', 'EXIT_C_90_10'] as const;
+const BENCHMARK_COHORT = process.env.ROBINHOOD_BENCHMARK_COHORT ?? 'LOW_FRICTION_PRIMARY';
 
 function sample(experiment: AnyRow, arm: AnyRow): ResolvedArmSample {
   return {
@@ -50,13 +52,16 @@ function metricLine(label: string, samples: ResolvedArmSample[]): string {
 }
 
 async function main(): Promise<void> {
-  const allExperiments: AnyRow[] = await (prisma as any).robinhoodEntryExperiment.findMany({
+  const allConfigExperiments: AnyRow[] = await (prisma as any).robinhoodEntryExperiment.findMany({
     where: {
       configHash: ROBINHOOD_FLOW_V3_CONFIG_HASH,
     },
-    include: { arms: true },
+    include: { arms: { include: { legs: true } } },
     orderBy: { t0At: 'asc' },
   });
+  const allExperiments = allConfigExperiments.filter((experiment) =>
+    experiment.frictionCohort === BENCHMARK_COHORT,
+  );
   const experiments = allExperiments.filter((experiment) =>
     experiment.status === 'RESOLVED' && experiment.invalidReason == null,
   );
@@ -74,6 +79,8 @@ async function main(): Promise<void> {
   const lines = [
     `ROBINHOOD ENTRY EXPERIMENT V1 ${new Date().toISOString()}`,
     `configHash=${ROBINHOOD_FLOW_V3_CONFIG_HASH}`,
+    `frictionCohort=${BENCHMARK_COHORT} configSamples=${allExperiments.length} ` +
+      `otherCohortsExcluded=${allConfigExperiments.length - allExperiments.length}`,
     `resolvedUniqueSignals=${resolved.length} ` +
       `invalidatedExcluded=${allExperiments.filter((experiment) => experiment.status === 'INVALIDATED').length} ` +
       `activeExcluded=${allExperiments.filter((experiment) => !['RESOLVED', 'INVALIDATED'].includes(experiment.status)).length}`,
@@ -109,13 +116,21 @@ async function main(): Promise<void> {
     );
     return arm?.stateJson?.benchmarkEntryEligible === true &&
       Number(arm.stateJson?.observedEntryLatenessMs ?? Infinity) <=
-        ROBINHOOD_EXIT_EXPERIMENT_CONFIG.maxBenchmarkEntryLatencyMs;
+        ROBINHOOD_EXIT_EXPERIMENT_CONFIG.maxBenchmarkEntryLatencyMs &&
+      reconcileRobinhoodArm(arm).valid;
   }));
   const exitPrimary = new Map<string, ResolvedArmSample[]>();
+  const exitStress = new Map<string, ResolvedArmSample[]>();
   for (const armCode of EXIT_ARMS) {
     exitPrimary.set(armCode, pairedExitSignals.flatMap((experiment) => {
       const arm = experiment.arms.find((item: AnyRow) => item.armCode === armCode && item.scenarioCode === 'OBSERVED_ENTRY');
       return arm ? [sample(experiment, arm)] : [];
+    }));
+    exitStress.set(armCode, pairedExitSignals.flatMap((experiment) => {
+      const arm = experiment.arms.find((item: AnyRow) =>
+        item.armCode === armCode && item.scenarioCode === 'STRESS_1_BLOCK',
+      );
+      return arm && reconcileRobinhoodArm(arm).valid ? [sample(experiment, arm)] : [];
     }));
   }
   lines.push(
@@ -124,16 +139,19 @@ async function main(): Promise<void> {
     `exitConfigHash=${ROBINHOOD_EXIT_EXPERIMENT_CONFIG_HASH}`,
     `resolvedPairedSignals=${pairedExitSignals.length}`,
     `lateExecutionSignalsExcluded=${completeExitSignals.length - pairedExitSignals.length}`,
+    `accountingRule=all resolved arms must reconcile from execution legs with no residual tokens`,
     pairedExitSignals.length < 100 ? 'stage=DIAGNOSTICS_ONLY (<100); no exit-policy selection is permitted'
       : pairedExitSignals.length < 300 ? 'stage=FROZEN_FORWARD_COLLECTION (100-299)'
         : 'stage=CONFIRMATORY_EVALUATION (>=300); fresh 200-signal holdout remains required',
     'OBSERVED EXIT LEADERBOARD',
     ...EXIT_ARMS.map((arm) => metricLine(arm, exitPrimary.get(arm)!)),
+    'STRESS EXIT LEADERBOARD (+1 block, +30% gas)',
+    ...EXIT_ARMS.map((arm) => metricLine(arm, exitStress.get(arm)!)),
     'PAIRED EXIT BOOTSTRAP (95% CI)',
   );
   for (const [left, right] of [
-    ['EXIT_A_FULL_2X', 'EXIT_B_LADDER_80_15_5'],
-    ['EXIT_C_90_10', 'EXIT_B_LADDER_80_15_5'],
+    ['EXIT_A_FULL_2X', 'EXIT_B_FULL_1_5X'],
+    ['EXIT_C_90_10', 'EXIT_B_FULL_1_5X'],
     ['EXIT_A_FULL_2X', 'EXIT_C_90_10'],
   ]) {
     const differences = pairedPnlDifferences(exitPrimary.get(left)!, exitPrimary.get(right)!);

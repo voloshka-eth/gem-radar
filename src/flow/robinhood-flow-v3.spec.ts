@@ -1,6 +1,7 @@
 import {
   ROBINHOOD_EXECUTION_SCENARIOS,
   ROBINHOOD_EXPERIMENT_ARMS,
+  ROBINHOOD_PAIRED_EXIT_ARMS,
   ROBINHOOD_FLOW_V3_CONFIG,
   ROBINHOOD_FLOW_V3_CONFIG_HASH,
   canonicalJson,
@@ -17,7 +18,7 @@ function buy(trader: string, occurredAtMs: number, blockNumber: string, quoteAmo
 }
 
 describe('Robinhood Flow v3 pre-registration', () => {
-  it('freezes five arms with C-only paid capital and a deterministic config hash', () => {
+  it('freezes the low-friction entry and paired-exit experiment', () => {
     expect(ROBINHOOD_EXPERIMENT_ARMS.map((arm) => [arm.code, arm.immediateUsd, arm.addUsd])).toEqual([
       ['A_IMMEDIATE_20', 0, 0],
       ['B_PROBE_4_ADD_16', 0, 0],
@@ -25,15 +26,27 @@ describe('Robinhood Flow v3 pre-registration', () => {
       ['D_PROBE_2_ADD_18', 0, 0],
       ['E_PROBE_10_ADD_10', 0, 0],
     ]);
-    expect(ROBINHOOD_FLOW_V3_CONFIG.version).toBe('robinhood_flow_v3_entry_experiment_v3');
+    expect(ROBINHOOD_PAIRED_EXIT_ARMS.map((arm) => [arm.code, arm.immediateUsd])).toEqual([
+      ['EXIT_A_FULL_2X', 20],
+      ['EXIT_B_FULL_1_5X', 20],
+      ['EXIT_C_90_10', 20],
+    ]);
+    expect(ROBINHOOD_FLOW_V3_CONFIG.version).toBe('robinhood_friction_cohorts_v3');
+    expect(ROBINHOOD_FLOW_V3_CONFIG.primaryMaxEntrySlippagePct).toBe(0.01);
+    expect(ROBINHOOD_FLOW_V3_CONFIG.primaryMaxSellSlippagePct).toBe(0.01);
     expect(ROBINHOOD_FLOW_V3_CONFIG.maxPaidEntryLatencyMs).toBe(5_000);
-    expect(ROBINHOOD_EXECUTION_SCENARIOS).toEqual([expect.objectContaining({
+    expect(ROBINHOOD_EXECUTION_SCENARIOS).toEqual(expect.arrayContaining([expect.objectContaining({
       code: 'OBSERVED_ENTRY',
       latencyMs: 0,
       gasMultiplier: 1,
       primary: true,
       stress: false,
-    })]);
+    }), expect.objectContaining({
+      code: 'STRESS_1_BLOCK',
+      latencyMs: 1_000,
+      gasMultiplier: 1.3,
+      stress: true,
+    })]));
     expect(ROBINHOOD_FLOW_V3_CONFIG_HASH).toMatch(/^[0-9a-f]{64}$/);
     expect(canonicalJson({ b: 2, a: 1 })).toBe('{"a":1,"b":2}');
   });

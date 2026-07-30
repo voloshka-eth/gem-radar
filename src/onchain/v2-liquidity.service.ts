@@ -48,6 +48,54 @@ export interface V2LiquidityResult {
   executableDepthUsd: number;
 }
 
+export interface V2SequentialRoundTripInput {
+  onchainTvlUsd: number;
+  spotPriceUsd: number;
+  feeBps: number;
+  sizeUsd: number;
+  buyGasUsd: number;
+  sellGasUsd: number;
+  sandwichPct: number;
+  buyTaxPct: number;
+  sellTaxPct: number;
+}
+
+export function simulateV2SequentialRoundTrip(input: V2SequentialRoundTripInput): {
+  tokensAcquired: number;
+  sellProceedsUsd: number;
+  roundTripMultiple: number;
+} | null {
+  const quoteReserveUsd = input.onchainTvlUsd / 2;
+  const gemReserve = quoteReserveUsd / input.spotPriceUsd;
+  const usableUsd = input.sizeUsd - input.buyGasUsd;
+  if (!(quoteReserveUsd > 0 && gemReserve > 0 && usableUsd > 0 && input.sizeUsd > 0)) return null;
+
+  const feeFraction = Math.max(0, Math.min(1, input.feeBps / 10_000));
+  const buyInputUsd = usableUsd / (1 + Math.max(0, input.sandwichPct));
+  const buyAfterFeeUsd = buyInputUsd * (1 - feeFraction);
+  const poolGemOut = buyAfterFeeUsd * gemReserve / (quoteReserveUsd + buyAfterFeeUsd);
+  const tokensAcquired = poolGemOut / (1 + Math.max(0, input.buyTaxPct));
+
+  // The sell runs against the actual post-buy reserves, not the original S0.
+  const postBuyQuoteReserveUsd = quoteReserveUsd + buyInputUsd;
+  const postBuyGemReserve = gemReserve - poolGemOut;
+  const sellAfterFeeTokens = tokensAcquired * (1 - feeFraction);
+  const poolQuoteOut = sellAfterFeeTokens * postBuyQuoteReserveUsd /
+    (postBuyGemReserve + sellAfterFeeTokens);
+  const sellProceedsUsd = Math.max(
+    poolQuoteOut *
+      (1 - Math.max(0, input.sandwichPct)) *
+      (1 - Math.max(0, input.sellTaxPct)) -
+      input.sellGasUsd,
+    0,
+  );
+  return {
+    tokensAcquired,
+    sellProceedsUsd,
+    roundTripMultiple: sellProceedsUsd / input.sizeUsd,
+  };
+}
+
 @Injectable()
 export class V2LiquidityService {
   private readonly logger = new Logger(V2LiquidityService.name);

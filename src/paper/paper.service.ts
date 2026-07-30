@@ -52,9 +52,7 @@ export class PaperService {
     // One paper position per token: re-discovery of the same token must not create a
     // duplicate (it would skew the aggregate edge/post-mortem stats).
     const existing = await this.prisma.paperPosition.findFirst({
-      where: (c.signalId
-        ? { signalId: c.signalId }
-        : { chain: pool.chain, tokenAddress: token.tokenAddress, strategyVersion }) as any,
+      where: { chain: pool.chain, tokenAddress: token.tokenAddress },
       select: { id: true },
     });
     if (existing) {

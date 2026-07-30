@@ -887,6 +887,7 @@ describe('CollectorService', () => {
 
   it('admits a static-safe Robinhood no-provider token into the primary paper lane', async () => {
     (service as any).robinhoodPaperEnabled = true;
+    (service as any).robinhoodLegacyPaperEnabled = true;
     const robinhoodUnknown: ContractRiskResult = {
       decision: 'CONTRACT_UNKNOWN',
       rejectReasons: [],
@@ -940,6 +941,7 @@ describe('CollectorService', () => {
 
   it('routes a Robinhood score between the shadow floor and primary floor into a full paper lifecycle', async () => {
     (service as any).robinhoodPaperEnabled = true;
+    (service as any).robinhoodLegacyPaperEnabled = true;
     const risk: ContractRiskResult = {
       decision: 'CONTRACT_UNKNOWN', rejectReasons: [], goplusQueried: false,
       honeypotQueried: false, merged: { providerStatus: 'NO_RISK_PROVIDER_SUPPORT' },

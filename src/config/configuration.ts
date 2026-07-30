@@ -109,6 +109,8 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
   minBlockCoverage: parseFloat(process.env.EVM_FLOW_MIN_BLOCK_COVERAGE ?? '0.995'),
   robinhoodExperimentMaxTickAgeMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_MAX_TICK_AGE_MS ?? '10000', 10),
   robinhoodExperimentMaxLegLatenessMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_MAX_LEG_LATENESS_MS ?? '3000', 10),
+  // A single polling/read miss must not invalidate an otherwise healthy paired sample.
+  robinhoodExperimentHealthGraceMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_HEALTH_GRACE_MS ?? '10000', 10),
 }));
 
 export const solanaLaunchConfig = registerAs('solanaLaunch', () => ({
@@ -228,6 +230,9 @@ export const collectorConfig = registerAs('collector', () => ({
   robinhoodPaperEnabled: process.env.ROBINHOOD_PAPER_ENABLED != null
     ? process.env.ROBINHOOD_PAPER_ENABLED !== 'false'
     : process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
+  // EVM flow owns Robinhood paid paper entries. The legacy score/stage lane
+  // remains available only for explicit archival reproduction.
+  robinhoodLegacyPaperEnabled: process.env.ROBINHOOD_LEGACY_PAPER_ENABLED === 'true',
   robinhoodMinDepthUsd: parseFloat(process.env.ROBINHOOD_MIN_DEPTH_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
   robinhoodMinOnchainTvlUsd: parseFloat(process.env.ROBINHOOD_MIN_ONCHAIN_TVL_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_ONCHAIN_TVL_USD ?? '200'),
   robinhoodMinScore: parseFloat(process.env.ROBINHOOD_MIN_SCORE ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),

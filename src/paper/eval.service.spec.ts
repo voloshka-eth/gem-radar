@@ -114,6 +114,7 @@ function harness(
       update: jest.fn().mockResolvedValue({}),
     },
     paperEvent: {
+      findFirst: jest.fn().mockResolvedValue(null),
       create: jest.fn().mockResolvedValue({}),
     },
     evmSwapObservation: {
@@ -161,6 +162,27 @@ function harness(
 }
 
 describe('EvalService price-read failures', () => {
+  it('writes one CSV row for the same market exit across legacy strategy positions', async () => {
+    const position = openPosition();
+    const { service, prisma, fileLogger } = harness(position, healthyLiquidity());
+    prisma.paperEvent.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'existing-market-event' });
+
+    await (service as any).writeExit(
+      'eval-1', position, 'INVALIDATE_SELL', 'rug', 0, 0, 1, 20, 0, 0, 0,
+      'invalidation: liquidity_gone_1x', 'RUG',
+    );
+    await (service as any).writeExit(
+      'eval-2', { ...position, id: 'pos_2', strategyVersion: 'fresh_confirmed_v1' },
+      'INVALIDATE_SELL', 'rug', 0, 0, 1, 20, 0, 0, 0,
+      'invalidation: liquidity_gone_1x', 'RUG',
+    );
+
+    expect(prisma.paperEvent.create).toHaveBeenCalledTimes(2);
+    expect(fileLogger.logPaperExit).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps an OPEN paper position alive below the no-price rug threshold', async () => {
     const { service, prisma, fileLogger } = harness(
       openPosition({ priceReadFailureCount: 1 }),

@@ -846,12 +846,33 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     note: string,
     outcomeClassValue = '',
   ): Promise<void> {
+    const eventDelegate = (this.prisma as any).paperEvent;
+    const duplicateWhere: Record<string, unknown> = {
+      type,
+      position: {
+        chain: pos.chain,
+        poolAddress: pos.poolAddress,
+        id: { not: pos.id },
+      },
+    };
+    if (type === 'LADDER_SELL') {
+      const rung = note.match(/^ladder\s+([0-9.]+x)/i)?.[1];
+      if (rung) duplicateWhere.note = { startsWith: `ladder ${rung}` };
+    }
+    const duplicateMarketEvent = typeof eventDelegate?.findFirst === 'function'
+      ? await eventDelegate.findFirst({ where: duplicateWhere, select: { id: true } }).catch(() => null)
+      : null;
+
     await this.prisma.paperEvent.create({
       data: {
         positionId: pos.id, ts: new Date(), type,
         price: priceNow ?? 0, multiple, fraction, tokens, usd: netUsd, slipPct, note,
       },
     }).catch(() => undefined);
+
+    // Historical parallel strategy positions retain their own accounting event,
+    // but the human-facing journal records one market action only once.
+    if (duplicateMarketEvent) return;
 
     this.fileLogger.logPaperExit({
       ts: new Date().toISOString(), run_id: runId, schema_version: CSV_SCHEMA_VERSION,

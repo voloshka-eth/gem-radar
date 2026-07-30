@@ -9,9 +9,18 @@ export type RobinhoodExperimentArmCode =
   | 'E_PROBE_10_ADD_10'
   | 'EXIT_A_FULL_2X'
   | 'EXIT_B_LADDER_80_15_5'
+  | 'EXIT_B_FULL_1_5X'
   | 'EXIT_C_90_10';
 
-export type RobinhoodExecutionScenarioCode = 'OBSERVED_ENTRY';
+export type RobinhoodExecutionScenarioCode = 'OBSERVED_ENTRY' | 'STRESS_1_BLOCK';
+
+export type RobinhoodFrictionDetailCohort =
+  | 'BOTH_LE_0_5'
+  | 'BOTH_LE_1'
+  | 'SELL_LE_1_BUY_1_3'
+  | 'BUY_LE_1_SELL_1_3'
+  | 'BOTH_1_3'
+  | 'OUT_OF_RANGE';
 
 export interface RobinhoodArmDefinition {
   code: RobinhoodExperimentArmCode;
@@ -45,6 +54,10 @@ export interface RobinhoodFlowV3Config {
   minDistinctBlocks: number;
   minExecutableDepthUsd: number;
   maxEntrySlippagePct: number;
+  primaryMaxEntrySlippagePct?: number;
+  primaryMaxSellSlippagePct?: number;
+  maxSellSlippagePct?: number;
+  maxQuoteAgeMs?: number;
   minZeroMoveRoundTrip: number;
   hardStopMultiple: number;
   flowReversalBuySellRatio: number;

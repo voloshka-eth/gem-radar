@@ -1,10 +1,28 @@
-import { V2LiquidityService } from './v2-liquidity.service';
+import { simulateV2SequentialRoundTrip, V2LiquidityService } from './v2-liquidity.service';
 
 const GEM = '0x1111111111111111111111111111111111111111';
 const QUOTE = '0x2222222222222222222222222222222222222222';
 const POOL = '0x3333333333333333333333333333333333333333';
 
 describe('V2LiquidityService', () => {
+  it('sells acquired tokens against post-buy reserves in sequential round-trip math', () => {
+    const result = simulateV2SequentialRoundTrip({
+      onchainTvlUsd: 20_000,
+      spotPriceUsd: 1,
+      feeBps: 30,
+      sizeUsd: 20,
+      buyGasUsd: 0,
+      sellGasUsd: 0,
+      sandwichPct: 0,
+      buyTaxPct: 0,
+      sellTaxPct: 0,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.tokensAcquired).toBeLessThan(20);
+    expect(result!.roundTripMultiple).toBeLessThan(1);
+    expect(result!.roundTripMultiple).toBeGreaterThan(0.99);
+  });
   it('models separate exact $20 entry and exit directions', async () => {
     const client = {
       readContract: jest.fn(async (request: any) => {

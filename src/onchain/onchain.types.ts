@@ -36,3 +36,11 @@ export interface ExecutionQuoteResult {
   observedAt: Date;
   error?: string;
 }
+
+export interface SequentialRoundTripResult {
+  method: 'V2_POST_BUY_RESERVE_SIMULATION';
+  confidence: 'EXACT_AMM_MATH';
+  tokensAcquired: number;
+  sellProceedsUsd: number;
+  roundTripMultiple: number;
+}
