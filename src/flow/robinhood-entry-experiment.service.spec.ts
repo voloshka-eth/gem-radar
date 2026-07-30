@@ -243,6 +243,43 @@ describe('RobinhoodEntryExperimentService', () => {
     expect(result).toBe(123_456);
   });
 
+  it('attempts a Robinhood entry when block coverage is healthy but recent flow is quiet', async () => {
+    const created = {
+      id: 'experiment-quiet-flow',
+      watchId: 'watch-1',
+      status: 'CONFIRMING',
+      configHash: ROBINHOOD_FLOW_V3_CONFIG_HASH,
+      horizonAt: new Date(123_456),
+    };
+    jest.spyOn(service as any, 'findExperiment')
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(created);
+    const tryCreate = jest.spyOn(service as any, 'tryCreateExperiment').mockResolvedValue(created);
+    jest.spyOn(service as any, 'processExperiment').mockResolvedValue(undefined);
+
+    const result = await service.handleTick({
+      ...tick(20_000),
+      dataHealthy: false,
+      pipelineHealthy: true,
+    });
+
+    expect(tryCreate).toHaveBeenCalledTimes(1);
+    expect(result).toBe(123_456);
+  });
+
+  it('does not attempt a Robinhood entry while block coverage is unhealthy', async () => {
+    jest.spyOn(service as any, 'findExperiment').mockResolvedValue(null);
+    const tryCreate = jest.spyOn(service as any, 'tryCreateExperiment');
+
+    await expect(service.handleTick({
+      ...tick(20_000),
+      dataHealthy: true,
+      pipelineHealthy: false,
+    })).resolves.toBeNull();
+
+    expect(tryCreate).not.toHaveBeenCalled();
+  });
+
   it('exports only the canonical observed full-2x arm to the legacy CSV view', () => {
     expect((service as any).isCanonicalCsvArm({
       armCode: 'EXIT_A_FULL_2X', scenarioCode: 'OBSERVED_ENTRY',

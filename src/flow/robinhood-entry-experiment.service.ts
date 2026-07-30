@@ -73,7 +73,9 @@ export class RobinhoodEntryExperimentService {
     if (tick.candidate.pool.chain !== 'robinhood' || tick.watchType !== 'FRESH') return null;
     let experiment = await this.findExperiment(tick.watchId);
     if (!experiment) {
-      if (!tick.dataHealthy || !tick.pipelineHealthy) return null;
+      // A quiet pool can still have a fresh executable quote. Swap freshness is
+      // a confirmation feature; it must not suppress the immediate paper entry.
+      if (!tick.pipelineHealthy) return null;
       const lastAttempt = this.createAttemptAt.get(tick.watchId) ?? 0;
       if (tick.observedAtMs - lastAttempt < 10_000) return null;
       this.createAttemptAt.set(tick.watchId, tick.observedAtMs);

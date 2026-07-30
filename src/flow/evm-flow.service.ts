@@ -223,17 +223,13 @@ export class EvmFlowService implements OnModuleInit, OnModuleDestroy {
     }
     const client = this.streamClients.get(chain);
     if (!client) return;
-    const stop = client.watchBlocks({
+    const stop = client.watchBlockNumber({
       emitOnBegin: true,
-      onBlock: (block) => {
-        // viem may invoke the callback with no block while a websocket closes or
-        // reconnects. This is a transport event, not a fatal application error.
-        if (!block) {
-          this.logger.debug(`Flow head stream empty block ${chain}; ignoring`);
-          return;
-        }
-        if (block.number == null) return;
-        void this.enqueueHead(chain, block.number, block.hash ?? null);
+      onBlockNumber: (blockNumber) => {
+        if (typeof blockNumber !== 'bigint') return;
+        const current = this.latestHead.get(chain);
+        if (current != null && blockNumber <= current) return;
+        void this.enqueueHead(chain, blockNumber, null);
       },
       onError: (error) => {
         this.rpcFailures.set(chain, (this.rpcFailures.get(chain) ?? 0) + 1);

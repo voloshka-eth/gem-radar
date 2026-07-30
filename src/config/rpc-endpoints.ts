@@ -21,22 +21,19 @@
 export type AlchemyNetwork =
   | 'eth-mainnet'
   | 'base-mainnet'
-  | 'solana-mainnet'
   | 'robinhood-mainnet';
 
-export type PaidChain = 'ethereum' | 'base' | 'robinhood' | 'solana';
+export type PaidChain = 'ethereum' | 'base' | 'robinhood';
 
 const ALCHEMY_HOST: Record<AlchemyNetwork, string> = {
   'eth-mainnet': 'eth-mainnet.g.alchemy.com',
   'base-mainnet': 'base-mainnet.g.alchemy.com',
-  'solana-mainnet': 'solana-mainnet.g.alchemy.com',
   'robinhood-mainnet': 'robinhood-mainnet.g.alchemy.com',
 };
 
 const INFURA_HOST: Record<AlchemyNetwork, string> = {
   'eth-mainnet': 'mainnet.infura.io',
   'base-mainnet': 'base-mainnet.infura.io',
-  'solana-mainnet': 'solana-mainnet.infura.io',
   'robinhood-mainnet': 'robinhood-mainnet.infura.io',
 };
 
@@ -46,13 +43,12 @@ const PUBLIC_DEFAULTS = {
   base: 'https://base.drpc.org',
   baseFallback: 'https://base.publicnode.com',
   robinhood: 'https://rpc.mainnet.chain.robinhood.com',
-  solana: 'https://api.mainnet-beta.solana.com',
 } as const;
 
 /** Default: Alchemy covers the Robinhood paper lane + Ethereum collector. */
 const DEFAULT_ALCHEMY_CHAINS: PaidChain[] = ['robinhood', 'ethereum'];
 /** Default: Infura covers Solana (when/if the Solana lane is re-enabled). */
-const DEFAULT_INFURA_CHAINS: PaidChain[] = ['solana'];
+const DEFAULT_INFURA_CHAINS: PaidChain[] = [];
 
 /** Accept a raw key or a full Alchemy URL; return the API key segment only. */
 export function extractAlchemyApiKey(raw: string | undefined | null): string | undefined {
@@ -119,9 +115,6 @@ export type ResolvedRpcEndpoints = {
   ethereumRpcWsUrl?: string;
   baseRpcWsUrl?: string;
   robinhoodRpcWsUrl?: string;
-  solanaRpcUrl: string;
-  solanaRpcUrls: string[];
-  solanaRpcWsUrl?: string;
   primaryTimeoutMs: number;
   fallbackTimeoutMs: number;
   alchemyActive: boolean;
@@ -140,7 +133,7 @@ export type RpcEnvInput = {
   infuraRpcUrl?: string;
   /** Comma list for Alchemy failovers. Default: robinhood,ethereum */
   rpcAlchemyChains?: string;
-  /** Comma list for Infura. Default: solana */
+  /** Comma list for Infura. Default: none */
   rpcInfuraChains?: string;
   /**
    * Legacy alias: if set and the split vars are empty, applies to BOTH providers.
@@ -160,13 +153,11 @@ export type RpcEnvInput = {
   robinhoodRpcUrl?: string;
   robinhoodRpcUrlFallback?: string;
   robinhoodRpcWsUrl?: string;
-  solanaRpcUrl?: string;
-  solanaRpcWsUrl?: string;
 };
 
 function parseChainList(raw: string | undefined, fallback: PaidChain[]): PaidChain[] {
   if (raw == null || !raw.trim()) return [...fallback];
-  const allowed = new Set<PaidChain>(['ethereum', 'base', 'robinhood', 'solana']);
+  const allowed = new Set<PaidChain>(['ethereum', 'base', 'robinhood']);
   const parsed = raw
     .toLowerCase()
     .split(',')
@@ -225,7 +216,7 @@ function unique(values: string[]): string[] {
 
 /**
  * Build chain RPC endpoints.
- * Default: Alchemy = robinhood+ethereum, Infura = solana. Free public is primary.
+ * Default: Alchemy = robinhood+ethereum, Infura = none. Free public is primary.
  */
 export function resolveRpcEndpoints(
   env: RpcEnvInput = process.env as unknown as RpcEnvInput,
@@ -295,20 +286,9 @@ export function resolveRpcEndpoints(
     paidFirst,
   });
 
-  const solana = buildChainUrls({
-    explicitPrimary: env.solanaRpcUrl,
-    publicPrimary: PUBLIC_DEFAULTS.solana,
-    alchemyUrl: alchemyKey ? alchemyHttpUrl('solana-mainnet', alchemyKey) : undefined,
-    infuraUrl: infuraKey ? infuraHttpUrl('solana-mainnet', infuraKey) : undefined,
-    useAlchemy: onAlchemy('solana'),
-    useInfura: onInfura('solana'),
-    paidFirst,
-  });
-
   const ethWsExplicit = trimOrUndefined(env.ethereumRpcWsUrl);
   const baseWsExplicit = trimOrUndefined(env.baseRpcWsUrl);
   const rhWsExplicit = trimOrUndefined(env.robinhoodRpcWsUrl);
-  const solWsExplicit = trimOrUndefined(env.solanaRpcWsUrl);
 
   const ethereumRpcWsUrl = ethWsExplicit
     ?? (alchemyKey && onAlchemy('ethereum') ? alchemyWsUrl('eth-mainnet', alchemyKey) : undefined)
@@ -323,8 +303,6 @@ export function resolveRpcEndpoints(
   // a free plan while rejecting logsSubscribe, which makes web3.js retry and
   // log -32601 forever. With no explicit WSS URL, Connection derives the
   // well-supported public WS endpoint from the public HTTP primary.
-  const solanaRpcWsUrl = solWsExplicit;
-
   const alchemyActive = Boolean(alchemyKey) && alchemyChains.length > 0;
   const infuraActive = Boolean(infuraKey) && infuraChains.length > 0;
   const paidChains = unique([...alchemyChains, ...infuraChains]) as PaidChain[];
@@ -340,9 +318,6 @@ export function resolveRpcEndpoints(
     ethereumRpcWsUrl,
     baseRpcWsUrl,
     robinhoodRpcWsUrl,
-    solanaRpcUrl: solana.primary,
-    solanaRpcUrls: solana.urls,
-    solanaRpcWsUrl,
     primaryTimeoutMs,
     fallbackTimeoutMs,
     alchemyActive,
@@ -369,9 +344,6 @@ export function flattenResolved(rpc: ResolvedRpcEndpoints) {
     robinhoodRpcUrlFallback: rpc.robinhood.fallback,
     robinhoodRpcUrls: rpc.robinhood.urls,
     robinhoodRpcWsUrl: rpc.robinhoodRpcWsUrl,
-    solanaRpcUrl: rpc.solanaRpcUrl,
-    solanaRpcUrls: rpc.solanaRpcUrls,
-    solanaRpcWsUrl: rpc.solanaRpcWsUrl,
     primaryTimeoutMs: rpc.primaryTimeoutMs,
     fallbackTimeoutMs: rpc.fallbackTimeoutMs,
     alchemyActive: rpc.alchemyActive,

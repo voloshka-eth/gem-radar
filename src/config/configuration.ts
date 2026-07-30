@@ -1,6 +1,5 @@
 import { registerAs } from '@nestjs/config';
 import tokenSymbolBlocklist from './token-symbol-blocklist.json';
-import blockedCreatorsFile from './blocked-creators.json';
 import { flattenResolved, resolveRpcEndpoints } from './rpc-endpoints';
 
 const activeStrategyMode = (): string =>
@@ -30,8 +29,6 @@ const resolveConfiguredRpc = () => flattenResolved(resolveRpcEndpoints({
   robinhoodRpcUrl: process.env.ROBINHOOD_RPC_URL,
   robinhoodRpcUrlFallback: process.env.ROBINHOOD_RPC_URL_FALLBACK,
   robinhoodRpcWsUrl: process.env.ROBINHOOD_RPC_WS_URL,
-  solanaRpcUrl: process.env.SOLANA_RPC_URL,
-  solanaRpcWsUrl: process.env.SOLANA_RPC_WS_URL,
 }));
 
 let rpcCache: ReturnType<typeof resolveConfiguredRpc> | null = null;
@@ -113,59 +110,6 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
   robinhoodExperimentHealthGraceMs: parseInt(process.env.ROBINHOOD_EXPERIMENT_HEALTH_GRACE_MS ?? '10000', 10),
 }));
 
-export const solanaLaunchConfig = registerAs('solanaLaunch', () => ({
-  enabled: process.env.SOLANA_LAUNCH_ENABLED !== 'false',
-  multiVenueEnabled: process.env.SOLANA_MULTI_VENUE_ENABLED !== 'false',
-  rpcUrl: configuredRpc().solanaRpcUrl,
-  rpcUrls: configuredRpc().solanaRpcUrls,
-  wsUrl: configuredRpc().solanaRpcWsUrl,
-  rpcPrimaryTimeoutMs: configuredRpc().primaryTimeoutMs,
-  rpcFallbackTimeoutMs: configuredRpc().fallbackTimeoutMs,
-  launchApiUrl: process.env.RAYDIUM_LAUNCH_API_URL ?? 'https://launch-mint-v1.raydium.io',
-  tradeApiUrl: process.env.RAYDIUM_TRADE_API_URL ?? 'https://transaction-v1.raydium.io',
-  pollIntervalMs: parseInt(process.env.SOLANA_LAUNCH_POLL_INTERVAL_MS ?? '10000', 10),
-  healthLogMs: parseInt(process.env.SOLANA_LAUNCH_HEALTH_LOG_MS ?? '30000', 10),
-  discoveryAgeMs: parseInt(process.env.SOLANA_LAUNCH_DISCOVERY_AGE_MS ?? '300000', 10),
-  bootstrapLookbackMs: parseInt(process.env.SOLANA_LAUNCH_BOOTSTRAP_LOOKBACK_MS ?? '86400000', 10),
-  bootstrapWatchMs: parseInt(process.env.SOLANA_LAUNCH_BOOTSTRAP_WATCH_MS ?? '1800000', 10),
-  watchMs: parseInt(process.env.SOLANA_LAUNCH_WATCH_MS ?? '7200000', 10),
-  positionSizeUsd: parseFloat(process.env.SOLANA_LAUNCH_POSITION_SIZE_USD ?? '20'),
-  maxEntrySlippagePct: parseFloat(process.env.SOLANA_LAUNCH_MAX_ENTRY_SLIP_PCT ?? '0.03'),
-  minRoundTripMultiple: parseFloat(process.env.SOLANA_LAUNCH_MIN_ROUND_TRIP_MULTIPLE ?? '0.80'),
-  routeProbeFinishingRate: parseFloat(process.env.SOLANA_LAUNCH_ROUTE_PROBE_FINISHING_RATE ?? '0.95'),
-  mintRefreshIntervalMs: parseInt(process.env.SOLANA_LAUNCH_MINT_REFRESH_INTERVAL_MS ?? '30000', 10),
-  mintRefreshBatchSize: parseInt(process.env.SOLANA_LAUNCH_MINT_REFRESH_BATCH_SIZE ?? '50', 10),
-  routeReadyProbeIntervalMs: parseInt(process.env.SOLANA_ROUTE_READY_PROBE_INTERVAL_MS ?? '15000', 10),
-  routeFallbackProbeIntervalMs: parseInt(process.env.SOLANA_ROUTE_FALLBACK_PROBE_INTERVAL_MS ?? '60000', 10),
-  maxRouteProbesPerPoll: parseInt(process.env.SOLANA_MAX_ROUTE_PROBES_PER_POLL ?? '10', 10),
-  gasUsd: parseFloat(process.env.SOLANA_PAPER_GAS_USD ?? '0.01'),
-  hardStopMultiple: parseFloat(process.env.SOLANA_PAPER_HARD_STOP_MULTIPLE ?? '0.80'),
-  timeExitMs: parseInt(process.env.SOLANA_PAPER_TIME_EXIT_MS ?? '28800000', 10),
-  requestTimeoutMs: parseInt(process.env.SOLANA_REQUEST_TIMEOUT_MS ?? '10000', 10),
-  streamBackfillMs: parseInt(process.env.SOLANA_STREAM_BACKFILL_MS ?? '15000', 10),
-  lifecyclePollMs: parseInt(process.env.SOLANA_LIFECYCLE_POLL_MS ?? '5000', 10),
-  maxTransactionsPerCycle: parseInt(process.env.SOLANA_MAX_TRANSACTIONS_PER_CYCLE ?? '40', 10),
-  rpcMinRequestIntervalMs: parseInt(process.env.SOLANA_RPC_MIN_REQUEST_INTERVAL_MS ?? '250', 10),
-  rateLimitBackoffMs: parseInt(process.env.SOLANA_RATE_LIMIT_BACKOFF_MS ?? '10000', 10),
-  maxQueuedTransactions: parseInt(process.env.SOLANA_MAX_QUEUED_TRANSACTIONS ?? '1000', 10),
-  watchBackfillBatchSize: parseInt(process.env.SOLANA_WATCH_BACKFILL_BATCH_SIZE ?? '5', 10),
-  maxShadowSignals: parseInt(process.env.SOLANA_MAX_SHADOW_SIGNALS ?? '8', 10),
-  maxActivePoolSubscriptions: parseInt(process.env.SOLANA_MAX_ACTIVE_POOL_SUBSCRIPTIONS ?? '8', 10),
-  openArmEvalIntervalMs: parseInt(process.env.SOLANA_OPEN_ARM_EVAL_INTERVAL_MS ?? '30000', 10),
-  pendingWatchTimeoutMs: parseInt(process.env.SOLANA_PENDING_WATCH_TIMEOUT_MS ?? '120000', 10),
-  streamFreshnessMs: parseInt(process.env.SOLANA_STREAM_FRESHNESS_MS ?? '90000', 10),
-  streamFreshnessSlots: parseInt(process.env.SOLANA_STREAM_FRESHNESS_SLOTS ?? '225', 10),
-  streamWatchdogMs: parseInt(process.env.SOLANA_STREAM_WATCHDOG_MS ?? '10000', 10),
-  streamReconnectBaseMs: parseInt(process.env.SOLANA_STREAM_RECONNECT_BASE_MS ?? '5000', 10),
-  streamReconnectMaxMs: parseInt(process.env.SOLANA_STREAM_RECONNECT_MAX_MS ?? '120000', 10),
-  confirmationSweepMs: parseInt(process.env.SOLANA_CONFIRMATION_SWEEP_MS ?? '10000', 10),
-  executionTimelinessMs: parseInt(process.env.SOLANA_EXECUTION_TIMELINESS_MS ?? '60000', 10),
-  blockedCreators: (process.env.SOLANA_BLOCKED_CREATORS ?? '')
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean),
-}));
-
 export const apiConfig = registerAs('api', () => ({
   dexscreenerBaseUrl:
     process.env.DEXSCREENER_BASE_URL ?? 'https://api.dexscreener.com',
@@ -230,9 +174,10 @@ export const collectorConfig = registerAs('collector', () => ({
   robinhoodPaperEnabled: process.env.ROBINHOOD_PAPER_ENABLED != null
     ? process.env.ROBINHOOD_PAPER_ENABLED !== 'false'
     : process.env.ROBINHOOD_EXPERIMENTAL_PAPER_ENABLED === 'true',
-  // EVM flow owns Robinhood paid paper entries. The legacy score/stage lane
-  // remains available only for explicit archival reproduction.
-  robinhoodLegacyPaperEnabled: process.env.ROBINHOOD_LEGACY_PAPER_ENABLED === 'true',
+  // Keep the restored Robinhood stage lane active unless explicitly disabled.
+  // Flow experiments remain independent, while the stage lane feeds canonical
+  // paper_entries instead of silently degrading to research-only observations.
+  robinhoodLegacyPaperEnabled: process.env.ROBINHOOD_LEGACY_PAPER_ENABLED !== 'false',
   robinhoodMinDepthUsd: parseFloat(process.env.ROBINHOOD_MIN_DEPTH_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_DEPTH_USD ?? '100'),
   robinhoodMinOnchainTvlUsd: parseFloat(process.env.ROBINHOOD_MIN_ONCHAIN_TVL_USD ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_ONCHAIN_TVL_USD ?? '200'),
   robinhoodMinScore: parseFloat(process.env.ROBINHOOD_MIN_SCORE ?? process.env.ROBINHOOD_EXPERIMENTAL_MIN_SCORE ?? '50'),
@@ -446,62 +391,6 @@ export const gemConfig = registerAs('gem', () => ({
   } as Record<string, Record<string, string>>,
 }));
 
-export const launchSniperConfig = registerAs('launchSniper', () => ({
-  enabled: process.env.LAUNCH_SNIPER_ENABLED != null
-    ? process.env.LAUNCH_SNIPER_ENABLED === 'true'
-    : activeStrategyMode() === 'launch_sniper_paper',
-  mode: process.env.LAUNCH_SNIPER_MODE ?? 'paper',
-  bscRpcUrl: process.env.BSC_RPC_URL ?? 'https://bsc.blockrazor.xyz',
-  fourMemeApiBaseUrl: process.env.FOUR_MEME_API_BASE_URL ?? 'https://four.meme/meme-api/v1',
-  fourMemeTokenManager:
-    process.env.FOUR_MEME_TOKEN_MANAGER ?? '0x5c952063c7fc8610ffdb798152d69f0b9550762b',
-  pollIntervalMs: parseInt(process.env.LAUNCH_SNIPER_POLL_INTERVAL_MS ?? '3000', 10),
-  initialLookbackBlocks: parseInt(process.env.LAUNCH_SNIPER_INITIAL_LOOKBACK_BLOCKS ?? '300', 10),
-  maxLogRangeBlocks: parseInt(process.env.LAUNCH_SNIPER_MAX_LOG_RANGE_BLOCKS ?? '25', 10),
-  rpcRequestDelayMs: parseInt(process.env.LAUNCH_SNIPER_RPC_REQUEST_DELAY_MS ?? '500', 10),
-  rpcTimeoutMs: parseInt(process.env.LAUNCH_SNIPER_RPC_TIMEOUT_MS ?? '15000', 10),
-  apiSeedEnabled: process.env.LAUNCH_SNIPER_API_SEED_ENABLED !== 'false',
-  apiSeedIntervalMs: parseInt(process.env.LAUNCH_SNIPER_API_SEED_INTERVAL_MS ?? '15000', 10),
-  apiSeedPageSize: parseInt(process.env.LAUNCH_SNIPER_API_SEED_PAGE_SIZE ?? '30', 10),
-  pollErrorBackoffMs: parseInt(process.env.LAUNCH_SNIPER_POLL_ERROR_BACKOFF_MS ?? '10000', 10),
-  rateLimitBackoffMs: parseInt(process.env.LAUNCH_SNIPER_RATE_LIMIT_BACKOFF_MS ?? '60000', 10),
-  maxPollBackoffMs: parseInt(process.env.LAUNCH_SNIPER_MAX_BACKOFF_MS ?? '300000', 10),
-  heartbeatIntervalMs: parseInt(process.env.LAUNCH_SNIPER_HEARTBEAT_INTERVAL_MS ?? '30000', 10),
-  confirmations: parseInt(process.env.LAUNCH_SNIPER_CONFIRMATIONS ?? '1', 10),
-  maxTrackedLaunches: parseInt(process.env.LAUNCH_SNIPER_MAX_TRACKED ?? '2000', 10),
-  blockedCreators: (blockedCreatorsFile.creators as Array<{ address: string }>)
-    .map((entry) => entry.address.trim().toLowerCase())
-    .filter((entry) => /^0x[0-9a-f]{40}$/.test(entry)),
-  trigger: {
-    windowMs: parseInt(process.env.LAUNCH_SNIPER_WINDOW_MS ?? '300000', 10),
-    minAgeSec: parseFloat(process.env.LAUNCH_SNIPER_MIN_AGE_SEC ?? '2'),
-    minBlocksAfterLaunch: parseInt(process.env.LAUNCH_SNIPER_MIN_BLOCKS_AFTER_LAUNCH ?? '6', 10),
-    maxAgeSec: parseFloat(process.env.LAUNCH_SNIPER_MAX_AGE_SEC ?? '300'),
-    minBuys: parseInt(process.env.LAUNCH_SNIPER_MIN_BUYS ?? '3', 10),
-    minUniqueBuyers: parseInt(process.env.LAUNCH_SNIPER_MIN_UNIQUE_BUYERS ?? '3', 10),
-    minBuyQuote: parseFloat(process.env.LAUNCH_SNIPER_MIN_BUY_BNB ?? '0.10'),
-    minBuySellRatio: parseFloat(process.env.LAUNCH_SNIPER_MIN_BUY_SELL_RATIO ?? '2'),
-    maxLargestBuyerShare: parseFloat(process.env.LAUNCH_SNIPER_MAX_BUYER_SHARE ?? '0.65'),
-    minPriceMomentum: parseFloat(process.env.LAUNCH_SNIPER_MIN_PRICE_MOMENTUM ?? '1.02'),
-  },
-  paper: {
-    positionSizeQuote: parseFloat(process.env.LAUNCH_SNIPER_POSITION_BNB ?? '0.02'),
-    protocolFeePct: parseFloat(process.env.LAUNCH_SNIPER_PROTOCOL_FEE_PCT ?? '0.01'),
-    entrySlippagePct: parseFloat(process.env.LAUNCH_SNIPER_ENTRY_SLIPPAGE_PCT ?? '0.02'),
-    exitSlippagePct: parseFloat(process.env.LAUNCH_SNIPER_EXIT_SLIPPAGE_PCT ?? '0.03'),
-    stopMultiple: parseFloat(process.env.LAUNCH_SNIPER_STOP_MULTIPLE ?? '0.80'),
-    timeExitMs: parseInt(process.env.LAUNCH_SNIPER_TIME_EXIT_MS ?? '3600000', 10),
-    momentumWindowMs: parseInt(process.env.LAUNCH_SNIPER_MOMENTUM_WINDOW_MS ?? '30000', 10),
-    momentumExitRatio: parseFloat(process.env.LAUNCH_SNIPER_MOMENTUM_EXIT_RATIO ?? '0.70'),
-    momentumConfirmations: parseInt(process.env.LAUNCH_SNIPER_MOMENTUM_CONFIRMATIONS ?? '2', 10),
-    ladder: [
-      { multiple: 2, sellFraction: 0.80 },
-      { multiple: 5, sellFraction: 0.15 },
-      { multiple: parseFloat(process.env.LAUNCH_SNIPER_RUNNER_MULTIPLE ?? '100'), sellFraction: 0.05 },
-    ],
-  },
-}));
-
 export const telegramConfig = registerAs('telegram', () => ({
   botToken: process.env.TELEGRAM_BOT_TOKEN,
   chatId: process.env.TELEGRAM_CHAT_ID,
@@ -522,13 +411,11 @@ export default [
   redisConfig,
   chainConfig,
   evmFlowConfig,
-  solanaLaunchConfig,
   apiConfig,
   collectorConfig,
   scoringConfig,
   paperConfig,
   gemConfig,
-  launchSniperConfig,
   telegramConfig,
   maintenanceConfig,
   explorerConfig,

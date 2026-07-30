@@ -334,7 +334,7 @@ export class LiquidityVerificationService {
    * A row is implausible (→ verified=false) if ANY of:
    *   1. V2 only: onchain_tvl < 1% of reported   while reported > $1000
    *   2. V2 only: onchain_tvl < $1               while reported > $1000
-   *   3. slippage on ANY probe          > 50%
+   *   3. slippage on the smallest probe > 50%
    *   4. slippage is non-monotonic across probe sizes (must be non-decreasing)
    *   5. the smallest probe never executed (slip null) — no executable evidence
    *
@@ -358,11 +358,15 @@ export class LiquidityVerificationService {
     if (model === 'V2' && onchainTvlUsd != null && reported != null && reported > 1000 && onchainTvlUsd < 1) {
       return `onchain_tvl $${onchainTvlUsd.toFixed(4)} < $1 while reported $${reported.toFixed(0)}`;
     }
-    // Rule 3 — any probe shows >50% slippage → no real depth.
-    for (const p of slips) {
-      if (p.slip !== null && p.slip > 0.50) {
-        return `slip on $${p.size} probe = ${(p.slip * 100).toFixed(1)}% (>50%)`;
-      }
+    // Rule 3 - the smallest executable probe must be physically meaningful.
+    // Large probes describe limited depth; executableDepthUsd already records it.
+    const smallestProbe = slips[0];
+    if (
+      smallestProbe?.slip !== null &&
+      smallestProbe?.slip !== undefined &&
+      smallestProbe.slip > 0.50
+    ) {
+      return `slip on $${smallestProbe.size} probe = ${(smallestProbe.slip * 100).toFixed(1)}% (>50%)`;
     }
     // Rule 4 — slippage must be non-decreasing as size grows.
     // Compare only probes that returned a value; allow 0.01% float noise.

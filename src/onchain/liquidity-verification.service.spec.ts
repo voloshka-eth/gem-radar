@@ -47,6 +47,45 @@ describe('LiquidityVerificationService physicality guard', () => {
     expect(result.error).toBeUndefined();
   });
 
+  it('treats excessive large-size impact as limited depth instead of a broken read', () => {
+    const result = (service as any).buildResult(
+      'V3',
+      2_500,
+      3_000,
+      {
+        ...quoterBackedRead,
+        slip100: 0.08,
+        slip500: 0.42,
+        slip1000: 0.72,
+        executableDepthUsd: 100,
+      },
+    );
+
+    expect(result.liquidityVerified).toBe(true);
+    expect(result.executableDepthUsd).toBe(100);
+  });
+
+  it('still rejects a pool when the $20 sell probe itself is physically unusable', () => {
+    const result = (service as any).buildResult(
+      'V3',
+      10,
+      3_000,
+      {
+        ...quoterBackedRead,
+        exitSlip20: 0.70,
+        slip20: 0.70,
+        slip50: 0.80,
+        slip100: 0.90,
+        slip500: 0.99,
+        slip1000: 1,
+        executableDepthUsd: 0,
+      },
+    );
+
+    expect(result.liquidityVerified).toBe(false);
+    expect(result.error).toContain('slip on $20 probe');
+  });
+
   it('accepts V4 only when its Quoter proves executable depth', () => {
     const result = (service as any).buildV4Result(quoterBackedRead);
 

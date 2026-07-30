@@ -54,10 +54,10 @@ describe('EvmFlowService data-plane guards', () => {
     expect((flow as any).rpcFailures.get('robinhood')).toBe(1);
   });
 
-  it('ignores an empty websocket callback and starts one HTTP fallback after a stream error', () => {
+  it('ignores invalid and duplicate websocket heads and starts one HTTP fallback after a stream error', () => {
     let callbacks: any;
     const streamClient = {
-      watchBlocks: jest.fn((options: any) => {
+      watchBlockNumber: jest.fn((options: any) => {
         callbacks = options;
         return jest.fn();
       }),
@@ -71,8 +71,14 @@ describe('EvmFlowService data-plane guards', () => {
     const fallback = jest.spyOn(flow as any, 'startHttpHeadPoller').mockImplementation(() => undefined);
 
     (flow as any).startHeadWatcher('robinhood');
-    expect(() => callbacks.onBlock(undefined)).not.toThrow();
+    expect(() => callbacks.onBlockNumber(undefined)).not.toThrow();
     expect(enqueue).not.toHaveBeenCalled();
+    (flow as any).latestHead.set('robinhood', 100n);
+    callbacks.onBlockNumber(100n);
+    callbacks.onBlockNumber(99n);
+    expect(enqueue).not.toHaveBeenCalled();
+    callbacks.onBlockNumber(101n);
+    expect(enqueue).toHaveBeenCalledWith('robinhood', 101n, null);
 
     callbacks.onError(new Error('socket closed'));
     expect(fallback).toHaveBeenCalledWith('robinhood');
