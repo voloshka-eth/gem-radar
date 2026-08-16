@@ -2,7 +2,7 @@
 // Adding a field: extend the interface, add an entry to the headers array,
 // bump CSV_SCHEMA_VERSION.  Never reorder existing columns — append only.
 
-export const CSV_SCHEMA_VERSION = '1.12.0'; // Append-only Robinhood execution-friction fields
+export const CSV_SCHEMA_VERSION = '1.12.1'; // Append-only friction and exit-diagnostic fields
 
 export interface CsvHeader {
   id: string;   // matches the key in the row object
@@ -661,6 +661,16 @@ export interface PaperExitRow {
   sell_impact_pct?: string;
   quote_age_ms?: string;
   shared_entry_quote_id?: string;
+  exit_reason?: string;
+  liquidity_entry_usd?: string;
+  liquidity_now_usd?: string;
+  liquidity_change_pct?: string;
+  executable_exit_multiple?: string;
+  sell_sim_ok?: string;
+  sell_tax_pct?: string;
+  price_read_failures?: string;
+  liquidity_gone_reads?: string;
+  quote_error?: string;
 }
 
 export const PAPER_EXIT_HEADERS: CsvHeader[] = [
@@ -708,6 +718,16 @@ export const PAPER_EXIT_HEADERS: CsvHeader[] = [
   { id: 'sell_impact_pct', title: 'sell_impact_pct' },
   { id: 'quote_age_ms', title: 'quote_age_ms' },
   { id: 'shared_entry_quote_id', title: 'shared_entry_quote_id' },
+  { id: 'exit_reason', title: 'exit_reason' },
+  { id: 'liquidity_entry_usd', title: 'liquidity_entry_usd' },
+  { id: 'liquidity_now_usd', title: 'liquidity_now_usd' },
+  { id: 'liquidity_change_pct', title: 'liquidity_change_pct' },
+  { id: 'executable_exit_multiple', title: 'executable_exit_multiple' },
+  { id: 'sell_sim_ok', title: 'sell_sim_ok' },
+  { id: 'sell_tax_pct', title: 'sell_tax_pct' },
+  { id: 'price_read_failures', title: 'price_read_failures' },
+  { id: 'liquidity_gone_reads', title: 'liquidity_gone_reads' },
+  { id: 'quote_error', title: 'quote_error' },
 ];
 
 // ─── raw/contract_risk_checks.csv ─────────────────────────────────────────────

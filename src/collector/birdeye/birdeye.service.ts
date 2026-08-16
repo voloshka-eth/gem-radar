@@ -19,14 +19,16 @@ export class BirdeyeService {
   constructor(private readonly config: ConfigService) {
     this.apiKey = this.config.get<string>('api.birdeyeApiKey') || undefined;
     this.limit = this.config.get<number>('api.birdeyeTokenListLimit') ?? 50;
+    const timeout = Math.max(1_000, this.config.get<number>('api.discoveryRequestTimeoutMs') ?? 10_000);
+    const retries = Math.max(0, this.config.get<number>('api.discoveryRequestRetries') ?? 0);
     this.http = axios.create({
       baseURL: this.config.get<string>('api.birdeyeBaseUrl') ?? 'https://public-api.birdeye.so',
-      timeout: 30_000,
+      timeout,
       headers: this.apiKey ? { 'X-API-KEY': this.apiKey } : undefined,
     });
 
     axiosRetry(this.http, {
-      retries: 2,
+      retries,
       retryDelay: (count) => axiosRetry.exponentialDelay(count),
       retryCondition: (err) =>
         axiosRetry.isNetworkOrIdempotentRequestError(err) ||

@@ -298,7 +298,12 @@ describe('EvalService price-read failures', () => {
     expect(prisma.paperPosition.update.mock.calls[0][0].data.entryFeatures).toMatchObject({
       liquidityGoneReadCount: 2,
     });
-    expect(fileLogger.logPaperExit.mock.calls[0][0].note).toContain('liquidity_gone_2x');
+    expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
+      event_type: 'LIQUIDITY_GONE_SELL',
+      exit_reason: 'LIQUIDITY_GONE_CONFIRMED',
+      liquidity_gone_reads: '2',
+      outcome_class: 'RUG',
+    });
   });
 
   it('keeps immediate low-liquidity closes on Ethereum and Base', async () => {
@@ -409,7 +414,9 @@ describe('EvalService price-read failures', () => {
       status: 'CLOSED', remainingFraction: 0, outcomeClass: 'STOP_LOSS',
     });
     expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
-      event_type: 'INVALIDATE_SELL', outcome_class: 'STOP_LOSS',
+      event_type: 'HARD_STOP_SELL',
+      exit_reason: 'EXECUTABLE_HARD_STOP',
+      outcome_class: 'STOP_LOSS',
     });
   });
 
@@ -473,7 +480,9 @@ describe('EvalService price-read failures', () => {
       status: 'CLOSED', remainingFraction: 0, outcomeClass: 'PARTIAL_PROFIT_CREATOR_EXIT',
     });
     expect(fileLogger.logPaperExit.mock.calls[0][0]).toMatchObject({
-      event_type: 'INVALIDATE_SELL', outcome_class: 'PARTIAL_PROFIT_CREATOR_EXIT',
+      event_type: 'CREATOR_EXIT_SELL',
+      exit_reason: 'CREATOR_SELL_PROTECTION',
+      outcome_class: 'PARTIAL_PROFIT_CREATOR_EXIT',
     });
   });
 });

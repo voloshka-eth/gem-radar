@@ -43,15 +43,17 @@ export class GeckoTerminalService {
 
   constructor(private readonly config: ConfigService) {
     const baseURL = this.config.get<string>('api.geckoterminalBaseUrl');
+    const timeout = Math.max(1_000, this.config.get<number>('api.discoveryRequestTimeoutMs') ?? 10_000);
+    const retries = Math.max(0, this.config.get<number>('api.discoveryRequestRetries') ?? 0);
 
     this.http = axios.create({
       baseURL,
-      timeout: 30_000,
+      timeout,
       headers: { Accept: 'application/json;version=20230302' },
     });
 
     axiosRetry(this.http, {
-      retries: 1,
+      retries,
       retryDelay: (count, err) => {
         this.recordRateLimitBackoff(err);
         return this.retryAfterDelayMs(err) ?? axiosRetry.exponentialDelay(count) + Math.random() * 1000;

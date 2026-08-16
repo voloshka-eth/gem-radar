@@ -29,11 +29,13 @@ export class DexScreenerService {
 
   constructor(private readonly config: ConfigService) {
     const baseURL = this.config.get<string>('api.dexscreenerBaseUrl');
+    const timeout = Math.max(1_000, this.config.get<number>('api.discoveryRequestTimeoutMs') ?? 10_000);
+    const retries = Math.max(0, this.config.get<number>('api.discoveryRequestRetries') ?? 0);
 
-    this.http = axios.create({ baseURL, timeout: 30_000 });
+    this.http = axios.create({ baseURL, timeout });
 
     axiosRetry(this.http, {
-      retries: 3,
+      retries,
       retryDelay: (count) => axiosRetry.exponentialDelay(count) + Math.random() * 1000,
       retryCondition: (err) =>
         axiosRetry.isNetworkOrIdempotentRequestError(err) ||

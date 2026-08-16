@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { FileLoggerService, escapeCsvField } from './file-logger.service';
+import { FileLoggerService, escapeCsvField, formatLogTimestamp } from './file-logger.service';
 import { CSV_SCHEMA_VERSION, NewPoolRow, RejectedTokenRow } from './csv-schemas';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -170,18 +170,18 @@ describe('FileLoggerService', () => {
 
   // ── Timestamp format ─────────────────────────────────────────────────────
 
-  it('ts produced by Date.toISOString() is UTC with Z suffix', () => {
-    const ts = new Date().toISOString();
-    expect(ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  it('renders UTC timestamps in Warsaw time with an explicit offset', () => {
+    expect(formatLogTimestamp('2026-08-04T14:39:01.362Z')).toBe('2026-08-04T16:39:01.362+02:00');
+    expect(formatLogTimestamp('2026-01-04T14:39:01.362Z')).toBe('2026-01-04T15:39:01.362+01:00');
   });
 
-  it('ts value written to CSV is exactly the ISO string passed in', () => {
+  it('writes timestamp columns in Warsaw time', () => {
     const ts = '2024-06-17T12:00:00.000Z';
     service.logNewPool(buildNewPoolRow({ ts }));
 
     const lines = readLines(path.join(tempDir, 'raw', 'new_pools.csv'));
     // First field of first data row is the timestamp
-    expect(lines[1].startsWith(ts + ',')).toBe(true);
+    expect(lines[1].startsWith('2024-06-17T14:00:00.000+02:00,')).toBe(true);
   });
 
   // ── schema_version in every row ──────────────────────────────────────────

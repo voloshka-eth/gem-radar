@@ -329,6 +329,20 @@ describe('CollectorService', () => {
 
   // ── firstSeenAt write-once ────────────────────────────────────────────────
 
+  it('contains a failed collection cycle so the following scheduled tick can run', async () => {
+    const failure = new Error('upstream unavailable');
+    jest.spyOn(service as any, 'doCollectionCycle').mockRejectedValueOnce(failure);
+    const logError = jest.spyOn((service as any).logger, 'error').mockImplementation();
+
+    await expect(service.runCollectionCycle()).resolves.toBeUndefined();
+
+    expect(logError).toHaveBeenCalledWith(
+      'Collection cycle failed: upstream unavailable',
+      expect.any(String),
+    );
+    expect((service as any).isCollecting).toBe(false);
+  });
+
   it('token upsert CREATE includes firstSeenAt', async () => {
     gtMock.getNewPools.mockResolvedValue([buildResult()]);
     await service.runCollectionCycle();

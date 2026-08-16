@@ -256,6 +256,10 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
     this.isCollecting = true;
     try {
       await this.doCollectionCycle();
+    } catch (error) {
+      // A provider outage or one malformed source response must not turn a
+      // scheduled async callback into an unhandled rejection that kills Node.
+      this.logger.error(`Collection cycle failed: ${(error as Error).message}`, (error as Error).stack);
     } finally {
       this.isCollecting = false;
     }
@@ -277,6 +281,8 @@ export class CollectorService implements OnModuleInit, OnModuleDestroy {
           `Factory hot watcher done - run_id: ${runId} | pending: ${result.pending} total: ${result.total} passed: ${result.passed} rejected: ${result.rejected} quarantined: ${result.quarantined} skipped: ${result.skipped} waiting: ${result.waiting} | elapsed: ${Date.now() - started}ms`,
         );
       }
+    } catch (error) {
+      this.logger.error(`Factory hot watcher failed: ${(error as Error).message}`, (error as Error).stack);
     } finally {
       this.isFactoryCollecting = false;
     }

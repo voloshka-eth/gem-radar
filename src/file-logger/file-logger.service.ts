@@ -142,7 +142,9 @@ export class FileLoggerService implements OnModuleInit {
     const relativePath = 'raw/source_payloads.jsonl';
     this.rotateRawLogIfNeeded(relativePath);
     const fullPath = path.join(this.logDir, relativePath);
-    fs.appendFileSync(fullPath, JSON.stringify(payload) + '\n', 'utf8');
+    const row = { ...payload };
+    if (typeof row.ts === 'string') row.ts = formatLogTimestamp(row.ts);
+    fs.appendFileSync(fullPath, JSON.stringify(row) + '\n', 'utf8');
   }
 
   /** Called by maintenance to compact the current raw session without touching paper CSVs. */
@@ -193,7 +195,9 @@ export class FileLoggerService implements OnModuleInit {
       this.upgradeHeaderIfAppendOnly(fullPath, expected, leadingComment);
       this.validatedHeaders.add(headerKey);
     }
-    output += headers.map((h) => escapeCsvField(rowObj[h.id])).join(',') + '\n';
+    output += headers.map((h) => escapeCsvField(
+      isTimestampColumn(h.id) ? formatLogTimestamp(rowObj[h.id]) : rowObj[h.id],
+    )).join(',') + '\n';
 
     try {
       fs.appendFileSync(fullPath, output, 'utf8');
@@ -292,4 +296,32 @@ export function escapeCsvField(value: unknown): string {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;
+}
+
+const WARSAW_TIME_ZONE = 'Europe/Warsaw';
+
+/**
+ * File logs are read by a person first, so render UTC ISO timestamps in the
+ * configured research timezone while retaining an explicit UTC offset.
+ */
+export function formatLogTimestamp(value: unknown): unknown {
+  if (typeof value !== 'string' || !value.endsWith('Z')) return value;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: WARSAW_TIME_ZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23', timeZoneName: 'longOffset',
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value;
+  const offset = (part('timeZoneName') ?? 'GMT').replace('GMT', '') || '+00:00';
+  const millis = String(date.getUTCMilliseconds()).padStart(3, '0');
+
+  return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}:${part('second')}.${millis}${offset}`;
+}
+
+function isTimestampColumn(id: string): boolean {
+  return id === 'ts' || id.endsWith('_at');
 }

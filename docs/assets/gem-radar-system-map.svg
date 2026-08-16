@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Gem Radar research system map</title>
+  <desc id="desc">A technical diagram of discovery, verification, paper execution, and evidence feedback loops.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07141a"/>
+      <stop offset="0.55" stop-color="#0a151c"/>
+      <stop offset="1" stop-color="#15120c"/>
+    </linearGradient>
+    <linearGradient id="cyanLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1dd7db" stop-opacity="0.15"/>
+      <stop offset="0.5" stop-color="#71ffff" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#1dd7db" stop-opacity="0.15"/>
+    </linearGradient>
+    <linearGradient id="amberLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffb546" stop-opacity="0.12"/>
+      <stop offset="0.5" stop-color="#ffcd77" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#ffb546" stop-opacity="0.12"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#73a4ae" stroke-opacity="0.10" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#background)"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+  <path d="M0 156H1600M0 744H1600" stroke="#80dfe2" stroke-opacity="0.12"/>
+  <path d="M92 100V800M1508 100V800" stroke="#80dfe2" stroke-opacity="0.16"/>
+
+  <text x="92" y="116" fill="#d4eef0" font-family="Arial, Helvetica, sans-serif" font-size="22" letter-spacing="5">GEM RADAR / RESEARCH SYSTEM MAP</text>
+  <text x="92" y="146" fill="#89aeb5" font-family="Arial, Helvetica, sans-serif" font-size="14" letter-spacing="2">EXECUTION-AWARE PAPER TRADING / FORWARD EVIDENCE / NO LIVE SIGNING</text>
+  <text x="1450" y="116" fill="#ffce79" font-family="Arial, Helvetica, sans-serif" font-size="14" text-anchor="end" letter-spacing="2">PAPER-ONLY</text>
+
+  <g fill="none" stroke="#2a5a62" stroke-width="1">
+    <circle cx="800" cy="468" r="284"/>
+    <circle cx="800" cy="468" r="228"/>
+    <circle cx="800" cy="468" r="172"/>
+    <circle cx="800" cy="468" r="116"/>
+    <path d="M516 468H1084M800 184V752"/>
+    <path d="M599 267L1001 669M1001 267L599 669"/>
+  </g>
+
+  <g filter="url(#glow)">
+    <path d="M210 350C335 290 408 294 519 348S692 440 800 412S1004 338 1120 410S1320 500 1440 421" fill="none" stroke="url(#cyanLine)" stroke-width="3"/>
+    <path d="M180 594C332 650 450 636 564 566S718 484 809 531S1012 672 1132 585S1326 432 1457 535" fill="none" stroke="url(#amberLine)" stroke-width="3"/>
+  </g>
+
+  <g transform="translate(118 274)">
+    <rect width="300" height="160" rx="8" fill="#0c2027" stroke="#2cd8da" stroke-opacity="0.75"/>
+    <rect x="18" y="18" width="5" height="124" fill="#42e4e5"/>
+    <text x="42" y="54" fill="#f1ffff" font-family="Arial, Helvetica, sans-serif" font-size="24" letter-spacing="2">DISCOVERY</text>
+    <text x="42" y="84" fill="#9dc5cc" font-family="Arial, Helvetica, sans-serif" font-size="14">Factories / pools / listings</text>
+    <text x="42" y="108" fill="#9dc5cc" font-family="Arial, Helvetica, sans-serif" font-size="14">Canonical identity first</text>
+    <text x="42" y="132" fill="#68e4e5" font-family="Arial, Helvetica, sans-serif" font-size="13" letter-spacing="1">OBSERVE, DO NOT ASSUME</text>
+  </g>
+
+  <g transform="translate(1182 274)">
+    <rect width="300" height="160" rx="8" fill="#201b10" stroke="#ffc259" stroke-opacity="0.75"/>
+    <rect x="277" y="18" width="5" height="124" fill="#ffca71"/>
+    <text x="42" y="54" fill="#fff9eb" font-family="Arial, Helvetica, sans-serif" font-size="24" letter-spacing="2">VERIFY</text>
+    <text x="42" y="84" fill="#d4c39e" font-family="Arial, Helvetica, sans-serif" font-size="14">Quote routes / safety / depth</text>
+    <text x="42" y="108" fill="#d4c39e" font-family="Arial, Helvetica, sans-serif" font-size="14">Staleness and coverage checks</text>
+    <text x="42" y="132" fill="#ffcf7c" font-family="Arial, Helvetica, sans-serif" font-size="13" letter-spacing="1">EXECUTABLE, NOT REPORTED</text>
+  </g>
+
+  <g transform="translate(118 548)">
+    <rect width="300" height="160" rx="8" fill="#111a24" stroke="#8297bf" stroke-opacity="0.75"/>
+    <rect x="18" y="18" width="5" height="124" fill="#9bb5e8"/>
+    <text x="42" y="54" fill="#f0f4ff" font-family="Arial, Helvetica, sans-serif" font-size="24" letter-spacing="2">PAPER ENGINE</text>
+    <text x="42" y="84" fill="#b5c0d8" font-family="Arial, Helvetica, sans-serif" font-size="14">Versioned arms and execution legs</text>
+    <text x="42" y="108" fill="#b5c0d8" font-family="Arial, Helvetica, sans-serif" font-size="14">Gas / tax / impact / exits</text>
+    <text x="42" y="132" fill="#b0c9ff" font-family="Arial, Helvetica, sans-serif" font-size="13" letter-spacing="1">NO WALLET. NO SIGNING.</text>
+  </g>
+
+  <g transform="translate(1182 548)">
+    <rect width="300" height="160" rx="8" fill="#142017" stroke="#8cd49c" stroke-opacity="0.75"/>
+    <rect x="277" y="18" width="5" height="124" fill="#9beba9"/>
+    <text x="42" y="54" fill="#effff1" font-family="Arial, Helvetica, sans-serif" font-size="24" letter-spacing="2">EVIDENCE</text>
+    <text x="42" y="84" fill="#b7d2ba" font-family="Arial, Helvetica, sans-serif" font-size="14">Paired PnL and reconciliation</text>
+    <text x="42" y="108" fill="#b7d2ba" font-family="Arial, Helvetica, sans-serif" font-size="14">Capped EV / holdout / recall</text>
+    <text x="42" y="132" fill="#a5ecb0" font-family="Arial, Helvetica, sans-serif" font-size="13" letter-spacing="1">PROMOTE OR FALSIFY</text>
+  </g>
+
+  <g transform="translate(650 332)">
+    <circle cx="150" cy="136" r="118" fill="#0d252d" fill-opacity="0.92" stroke="#67f1f3" stroke-width="2"/>
+    <circle cx="150" cy="136" r="88" fill="none" stroke="#4bd7da" stroke-opacity="0.45"/>
+    <circle cx="150" cy="136" r="57" fill="none" stroke="#ffd07b" stroke-opacity="0.65"/>
+    <path d="M150 28V244M42 136H258" stroke="#7ee9eb" stroke-opacity="0.35"/>
+    <path d="M96 82L204 190M204 82L96 190" stroke="#ffca71" stroke-opacity="0.30"/>
+    <circle cx="150" cy="136" r="12" fill="#fbfffc"/>
+    <circle cx="150" cy="136" r="25" fill="none" stroke="#aaffff" stroke-opacity="0.8" filter="url(#glow)"/>
+    <text x="150" y="128" fill="#e9ffff" font-family="Arial, Helvetica, sans-serif" font-size="15" text-anchor="middle" letter-spacing="2">FORWARD</text>
+    <text x="150" y="150" fill="#e9ffff" font-family="Arial, Helvetica, sans-serif" font-size="15" text-anchor="middle" letter-spacing="2">RESEARCH</text>
+    <text x="150" y="177" fill="#a2cbd0" font-family="Arial, Helvetica, sans-serif" font-size="11" text-anchor="middle" letter-spacing="1">MEASURE THE CLAIM</text>
+  </g>
+
+  <g fill="none" stroke-width="2" stroke-linecap="round">
+    <path d="M418 354H605" stroke="#42e4e5" stroke-opacity="0.8"/>
+    <path d="M995 354H1182" stroke="#ffca71" stroke-opacity="0.8"/>
+    <path d="M418 628H605" stroke="#9bb5e8" stroke-opacity="0.8"/>
+    <path d="M995 628H1182" stroke="#9beba9" stroke-opacity="0.8"/>
+    <path d="M800 762C950 800 1110 778 1256 702" stroke="#9beba9" stroke-opacity="0.55" stroke-dasharray="8 10"/>
+    <path d="M800 174C670 130 520 140 349 260" stroke="#42e4e5" stroke-opacity="0.4" stroke-dasharray="8 10"/>
+  </g>
+
+  <g fill="#c8faff">
+    <circle cx="508" cy="354" r="5"/><circle cx="1092" cy="354" r="5"/>
+    <circle cx="508" cy="628" r="5"/><circle cx="1092" cy="628" r="5"/>
+  </g>
+
+  <text x="92" y="836" fill="#7f9ba3" font-family="Arial, Helvetica, sans-serif" font-size="12" letter-spacing="2">SOURCE -> VERIFY -> SIMULATE -> RECONCILE -> ACCEPT OR REJECT</text>
+  <text x="1508" y="836" fill="#7f9ba3" font-family="Arial, Helvetica, sans-serif" font-size="12" text-anchor="end" letter-spacing="2">GEM RADAR / PAPER-ONLY</text>
+</svg>

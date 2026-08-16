@@ -111,6 +111,10 @@ export const evmFlowConfig = registerAs('evmFlow', () => ({
 }));
 
 export const apiConfig = registerAs('api', () => ({
+  // Discovery endpoints are enrichment sources. A provider outage must not hold
+  // the scheduled collector cycle for minutes.
+  discoveryRequestTimeoutMs: parseInt(process.env.DISCOVERY_REQUEST_TIMEOUT_MS ?? '10000', 10),
+  discoveryRequestRetries: parseInt(process.env.DISCOVERY_REQUEST_RETRIES ?? '0', 10),
   dexscreenerBaseUrl:
     process.env.DEXSCREENER_BASE_URL ?? 'https://api.dexscreener.com',
   geckoterminalBaseUrl:

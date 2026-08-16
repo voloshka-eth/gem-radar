@@ -13,6 +13,18 @@ import type { LiquidityCheckResult } from '../onchain/onchain.types';
 import {
   detectStatus, isInvalidating, outcomeClass, PositionStatus, LadderRung,
 } from './exit-ladder';
+
+type ExitDiagnostics = {
+  reason: string;
+  liqEntryUsd: number | null;
+  liqNowUsd: number | null;
+  executableExitMultiple: number | null;
+  sellSimOk: boolean | null;
+  sellTaxPct: number | null;
+  priceReadFailures: number;
+  liquidityGoneReads: number;
+  quoteError: string | null;
+};
 import { modelExit, slipForSize } from './fills';
 import { taxFraction } from './paper.service';
 import type { EvalViewRow } from './paper.types';
@@ -375,7 +387,9 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
           executed.push(rung.multiple);
           await this.writeExit(runId, pos, 'LADDER_SELL', status, priceNow, currentMultiple, rung.sellFraction,
             tokensToSell, fill.netUsd, exitSlip, realizedValueUsd / sizeUsd,
-            `ladder ${rung.multiple}x executable=${executableRungMultiple.toFixed(4)}x`);
+            `ladder ${rung.multiple}x executable=${executableRungMultiple.toFixed(4)}x`, '',
+            this.exitDiagnostics(`LADDER_TARGET_${rung.multiple}X`, liqEntry, liqNow, executableRungMultiple, sellSimOk,
+              sellTaxNow, priceReadFailureCount, liquidityGoneReadCount, onchainRead.error));
         }
       }
       const ladderComplete = remainingFraction <= 1e-6;
@@ -467,6 +481,9 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
             tokensToSell, fill.netUsd, exitSlip, realizedMultiple,
             `time exit after ${Math.round(positionAgeMs / 60_000)}m${protectedGreenExit ? ' protected-green' : ''}`,
             closeOutcomeClass,
+            this.exitDiagnostics(realizedMultiple >= 1 ? 'TIME_HORIZON_PROFIT' : 'TIME_HORIZON_LOSS', liqEntry,
+              liqNow, executableIfClosed, sellSimOk, sellTaxNow, priceReadFailureCount,
+              liquidityGoneReadCount, onchainRead.error),
           );
           remainingFraction = 0;
           realizedValueUsd = finalRealizedValueUsd;
@@ -508,8 +525,12 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
         const invalidationReason = liquidityGoneConfirmed && status === 'rug'
             ? `liquidity_gone_${liquidityGoneReadCount}x`
           : reason;
-        await this.writeExit(runId, pos, 'INVALIDATE_SELL', status, priceNow, currentMultiple, remainingFraction,
-          tokensToSell, fill.netUsd, exitSlip, realizedMultiple, `invalidation: ${invalidationReason}`, closeOutcomeClass);
+        const exitReason = this.exitReason(reason, sellSimOk, sellTaxNow, liquidityGoneConfirmed);
+        await this.writeExit(runId, pos, this.exitEventType(exitReason), status, priceNow, currentMultiple, remainingFraction,
+          tokensToSell, fill.netUsd, exitSlip, realizedMultiple,
+          `exit: ${exitReason}; trigger=${invalidationReason}`, closeOutcomeClass,
+          this.exitDiagnostics(exitReason, liqEntry, liqNow, executableIfClosed, sellSimOk, sellTaxNow,
+            priceReadFailureCount, liquidityGoneReadCount, onchainRead.error));
         remainingFraction = 0;
 
         await this.prisma.paperPosition.update({
@@ -845,6 +866,7 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
     realizedMultipleTotal: number,
     note: string,
     outcomeClassValue = '',
+    diagnostics?: ExitDiagnostics,
   ): Promise<void> {
     const eventDelegate = (this.prisma as any).paperEvent;
     const duplicateWhere: Record<string, unknown> = {
@@ -893,7 +915,76 @@ export class EvalService implements OnModuleInit, OnModuleDestroy {
       strategy_version: pos.strategyVersion ?? 'legacy_static_v0',
       risk_cohort: pos.riskCohort ?? 'CONTRACT_SAFE',
       exit_policy: pos.exitPolicy ?? 'SAFE_LADDER',
+      exit_reason: diagnostics?.reason ?? '',
+      liquidity_entry_usd: diagnostics?.liqEntryUsd != null ? diagnostics.liqEntryUsd.toFixed(2) : '',
+      liquidity_now_usd: diagnostics?.liqNowUsd != null ? diagnostics.liqNowUsd.toFixed(2) : '',
+      liquidity_change_pct: diagnostics?.liqEntryUsd != null && diagnostics.liqEntryUsd > 0 && diagnostics.liqNowUsd != null
+        ? (((diagnostics.liqNowUsd - diagnostics.liqEntryUsd) / diagnostics.liqEntryUsd) * 100).toFixed(2)
+        : '',
+      executable_exit_multiple: diagnostics?.executableExitMultiple != null
+        ? diagnostics.executableExitMultiple.toFixed(4)
+        : '',
+      sell_sim_ok: diagnostics?.sellSimOk == null ? '' : String(diagnostics.sellSimOk),
+      sell_tax_pct: diagnostics?.sellTaxPct != null ? diagnostics.sellTaxPct.toFixed(4) : '',
+      price_read_failures: diagnostics ? String(diagnostics.priceReadFailures) : '',
+      liquidity_gone_reads: diagnostics ? String(diagnostics.liquidityGoneReads) : '',
+      quote_error: diagnostics?.quoteError ?? '',
     });
+  }
+
+  private exitDiagnostics(
+    reason: string,
+    liqEntryUsd: number | null,
+    liqNowUsd: number | null,
+    executableExitMultiple: number | null,
+    sellSimOk: boolean | null,
+    sellTaxPct: number | null,
+    priceReadFailures: number,
+    liquidityGoneReads: number,
+    quoteError: string | null,
+  ): ExitDiagnostics {
+    return {
+      reason, liqEntryUsd, liqNowUsd, executableExitMultiple, sellSimOk, sellTaxPct,
+      priceReadFailures, liquidityGoneReads, quoteError,
+    };
+  }
+
+  private exitReason(
+    reason: string,
+    sellSimOk: boolean | null,
+    sellTaxPct: number | null,
+    liquidityGoneConfirmed: boolean,
+  ): string {
+    if (reason === 'hard_stop') return 'EXECUTABLE_HARD_STOP';
+    if (reason === 'creator_exit') return 'CREATOR_SELL_PROTECTION';
+    if (reason === 'flow_reversal') return 'FLOW_REVERSAL_PROTECTION';
+    if (reason === 'drawdown') return 'MAX_DRAWDOWN_INVALIDATION';
+    if (reason === 'liquidity_pulled') return 'DEPTH_COLLAPSE';
+    if (reason === 'unsellable') {
+      if (sellTaxPct != null) return 'SELL_TAX_SPIKE';
+      return sellSimOk === false ? 'SELL_SIMULATION_FAILED' : 'SELL_ROUTE_UNAVAILABLE';
+    }
+    if (reason === 'rug') {
+      return liquidityGoneConfirmed ? 'LIQUIDITY_GONE_CONFIRMED' : 'PRICE_OR_LIQUIDITY_UNREADABLE';
+    }
+    return 'OTHER_INVALIDATION';
+  }
+
+  private exitEventType(exitReason: string): string {
+    const eventTypes: Record<string, string> = {
+      EXECUTABLE_HARD_STOP: 'HARD_STOP_SELL',
+      CREATOR_SELL_PROTECTION: 'CREATOR_EXIT_SELL',
+      FLOW_REVERSAL_PROTECTION: 'FLOW_REVERSAL_SELL',
+      MAX_DRAWDOWN_INVALIDATION: 'MAX_DRAWDOWN_SELL',
+      DEPTH_COLLAPSE: 'DEPTH_COLLAPSE_SELL',
+      LIQUIDITY_GONE_CONFIRMED: 'LIQUIDITY_GONE_SELL',
+      SELL_TAX_SPIKE: 'SELL_TAX_EXIT',
+      SELL_SIMULATION_FAILED: 'UNSELLABLE_EXIT',
+      SELL_ROUTE_UNAVAILABLE: 'UNSELLABLE_EXIT',
+      PRICE_OR_LIQUIDITY_UNREADABLE: 'DATA_UNREADABLE_EXIT',
+      OTHER_INVALIDATION: 'INVALIDATION_EXIT',
+    };
+    return eventTypes[exitReason] ?? 'INVALIDATION_EXIT';
   }
 }
 
