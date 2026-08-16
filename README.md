@@ -295,4 +295,4 @@ summary rows use `chain = "multi"`. GeckoTerminal rows use the actual chain name
 | **M3** ✅ | On-chain slippage simulator |
 | **M4** ✅ | Reporting (daily TXT), Telegram alerts |
 | **M5** ✅ | Holder distribution, deployer reputation |
->>>>>>> 906dc84ec7beed9d96955510c174170ec1c59251
+
